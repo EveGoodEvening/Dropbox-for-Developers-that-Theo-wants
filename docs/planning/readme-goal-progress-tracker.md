@@ -1,6 +1,6 @@
 # README-Goal Progress Tracker — Dropbox for Developers that Theo wants
 
-> Durable progress tracker for the README.md goal. Companion to `docs/planning/readme-goal-implementation-plan.md`. Every task is **unchecked initially** — no implementation has started (resume mode: `pre_implementation`). This file is the **sole mutable source of truth** for per-task/per-chunk status, verification evidence, commit rows, `👉 NEXT` placement, and resume state.
+> Durable progress tracker for the README.md goal. Companion to `docs/planning/readme-goal-implementation-plan.md`. Tasks start unchecked and are checked only when their evidence is recorded. Current resume state is captured in **Next Up** and the **Summary table**; this file is the **sole mutable source of truth** for per-task/per-chunk status, verification evidence, commit rows, `👉 NEXT` placement, and resume state.
 
 ## How to use this tracker
 
@@ -17,9 +17,9 @@
 
 ## Next Up
 
-At planning time, no chunk has started. The only dependency-ready unchecked chunk is `CHUNK-01-FOUNDATION`, so the only current `👉 NEXT` marker is on its first unchecked doable task: `Choose stack/language (resolve U1) and record rationale`. Resolving U1 is the first executable action, not an external blocker preventing work from starting — it is the first task of CHUNK-01.
+CHUNK-01 has no unchecked tracker tasks: all implementation and verification tasks are checked, evidence is populated, and review is accepted. Current resume state is **ready to merge CHUNK-01**.
 
-> **👉 NEXT task: `Choose stack/language (resolve U1) and record rationale`** (CHUNK-01-FOUNDATION, first task below).
+No task-level `👉 NEXT` marker is currently placed. Keep downstream `👉 NEXT` markers withheld until CHUNK-01 is merged; only then move `👉 NEXT` to both dependency-ready CHUNK-02 and CHUNK-03 first tasks.
 
 Dependency order: `01 → {02, 03} → 04 → 05 → {06, 07} → 08 → 09`. CHUNK-04 and CHUNK-05 are serialized (04 before 05); there is no 04 ∥ 05 parallel wave. When the `{02, 03}` or `{06, 07}` waves become dependency-ready, this section and the task lists must show multiple simultaneous `👉 NEXT` markers.
 
@@ -34,33 +34,38 @@ Dependency order: `01 → {02, 03} → 04 → 05 → {06, 07} → 08 → 09`. CH
 
 ## CHUNK-01-FOUNDATION
 
-- **Status:** `[ ]` not started
-- **Owner branch / worktree:** —
-- **Commit(s):** —
-- **Review status:** pending
-- **Blocker / deferred reason:** U1 (stack/language choice) — **blocker**; U9 (FS2 build-vs-adopt-vs-vendor) — **blocker** and not already resolved. Both must be resolved by CHUNK-01 before review can be accepted; CHUNK-09 consumes U9 only after this tracker records the CHUNK-01 decision. Resolving U1 is the first task (not an external blocker).
+- **Status:** `[x]` done — implementation verified and review accepted in `chunk-01-foundation`; merge pending
+- **Owner branch / worktree:** `chunk-01-foundation` / `../dropbox-dev-chunk-01-foundation`
+- **Commit(s):** pending chunk commit / merge SHA
+- **Review status:** accepted — correctness, security, and accounting reviews clean after fixes
+- **Blocker / deferred reason:** U1 resolved 2026-06-27: Rust 2021 single Cargo package/binary (`dropbox-dev`) with `Cargo.lock`. U9 resolved 2026-06-27: build from scratch; local inspection found no FS2 code/API/manifest beyond README/planning mentions and README.md:24 says FS2 is "nowhere near enough". No CHUNK-01 blocker remains.
 - **Depends on:** — (root)
 
 ### Tasks
-- [ ] 👉 NEXT — Choose stack/language (resolve U1) and record rationale (in the implementation plan via the planning-layer exception + this tracker)
-- [ ] Record the FS2 decision (resolve U9: build-from-scratch vs adopt-and-extend vs vendor) with rationale and date (in the implementation plan via the planning-layer exception + this tracker); must land before CHUNK-02/CHUNK-06 design begin and before CHUNK-09 treats U9 as consumed
-- [ ] Create project manifest + module skeleton
-- [ ] Establish build command (`make build` or equivalent) — passes from clean clone
-- [ ] Establish test harness (`make test`) — runs a passing no-op test
-- [ ] Establish lint/typecheck (`make lint`) — passes
-- [ ] Add config loading + structured logging + error model
-- [ ] Define shared `Platform`/OS identity type (canonical OS, architecture, machine-id provenance) and export it for CHUNK-02/CHUNK-03 consumers
-- [ ] Implement migration framework (schema version table + runner; empty `v0` baseline, no product tables)
-- [ ] Add tool `.gitignore` entries for generated build/test/cache artifacts
-- [ ] Add minimal CLI `version`/`info` smoke shim; `<cli> info` prints machine id, version, and config path; `--help` is optional only
-- [ ] Record verification evidence (see subsection below)
+- [x] Choose stack/language (resolve U1) and record rationale (Rust 2021; recorded in implementation plan via the planning-layer exception + this tracker)
+- [x] Record the FS2 decision (resolve U9: build-from-scratch vs adopt-and-extend vs vendor) with rationale and date (build from scratch; recorded in implementation plan via the planning-layer exception + this tracker)
+- [x] Create project manifest + module skeleton
+- [x] Establish build command (`make build` or equivalent) — `make build` passed after security fixes on 2026-06-27
+- [x] Establish test harness (`make test`) — `make test` passed after review fixes on 2026-06-27 with 15 unit tests + doc-tests
+- [x] Establish lint/typecheck (`make lint`) — `make lint` passed after security fixes on 2026-06-27 (`cargo clippy --locked --all-targets -- -D warnings`)
+- [x] Add config loading + structured logging + error model
+- [x] Define shared `Platform`/OS identity type (canonical OS, architecture, machine-id provenance, app-scoped derived machine id) and export it for CHUNK-02/CHUNK-03 consumers
+- [x] Implement migration framework (schema version table + runner; empty `v0` baseline, no product tables)
+- [x] Add tool `.gitignore` entries for generated build/test/cache artifacts
+- [x] Add minimal CLI `version`/`info` smoke shim; `<cli> info` prints app-scoped machine id, version, and config path; `--help` is optional only
+- [x] Record verification evidence (see subsection below)
 
 ### Verification evidence
 
 | Slot | Command/scenario | Result | Date / SHA | Output artifact / pasted summary | Tracker/evidence commit(s) |
 |------|------------------|--------|------------|----------------------------------|----------------------------|
-| Acceptance evidence | _ | _ | _ | _ | _ |
-| Additional task evidence (append rows as needed) | _ | _ | _ | _ | _ |
+| Acceptance evidence | `make build`; `make test`; `make lint`; `make version`; `make info` | Passed after review fixes | 2026-06-27 / pending SHA | `make build` passed; `make test` passed 15 unit tests + doc-tests; `make lint` passed clippy with `-D warnings`; `make version` printed `dropbox-dev 0.1.0`; `make info` stdout included `machine_id=dropbox-dev-...`, `version=0.1.0`, `config_path=...`, `schema_version=v0`, `product_tables=0`; stderr logged only app-scoped machine id plus escaped fields/provenance and did not include raw OS machine id | pending |
+| Stack decision (U1) | Read `Cargo.toml`, `Cargo.lock`, `Makefile`, `src/lib.rs`, and implementation-plan U1 row | Recorded | 2026-06-27 / pending SHA | Rust 2021, one Cargo package/binary (`dropbox-dev`), one lockfile; rationale recorded in implementation plan CHUNK-01 section and U1 decision row | pending |
+| FS2 decision (U9) | Local FS2 reference inspection + README.md:24 review | Recorded | 2026-06-27 / pending SHA | Build from scratch; no FS2 code/API/manifest present locally beyond README/planning mentions; README says FS2 is insufficient | pending |
+| Migration baseline smoke | `make migration-info` | Passed after security fixes | 2026-06-27 / pending SHA | Alias of `make info`; output included `schema_version=v0` and `product_tables=0`; product schema tables are not introduced in CHUNK-01 | pending |
+| Migration framework consumer smoke | `cargo test foundation::migration` | Passed | 2026-06-27 / pending SHA | Feature migration registration, apply, duplicate-version rejection, and rollback hooks passed; downstream chunks can register product migrations after empty v0 without reopening foundation | pending |
+| Security regression smoke | raw OS machine-id leak check; unset config-home scenario; relative `DROPBOX_DEV_CONFIG` scenario | Passed | 2026-06-27 / pending SHA | Raw OS machine id was absent from stdout/stderr; env with `DROPBOX_DEV_CONFIG`, `XDG_CONFIG_HOME`, `APPDATA`, and `HOME` unset exited non-zero with `CONFIG_INVALID`; relative `DROPBOX_DEV_CONFIG=dropbox-dev/config.conf` exited non-zero with `CONFIG_INVALID` | pending |
+| Config/logging regression smoke | `cargo test foundation::config`; `cargo test foundation::logging` | Passed | 2026-06-27 / pending SHA | Config probing skips only NotFound and returns `CONFIG_IO` for metadata/read errors; logger escapes newline, carriage return, tab, and ASCII controls so structured log fields cannot inject raw line breaks/control bytes | pending |
 
 ---
 
@@ -335,7 +340,7 @@ Dependency order: `01 → {02, 03} → 04 → 05 → {06, 07} → 08 → 09`. CH
 
 | Chunk | Status | Depends on | Parallel with | Blocker | Review |
 |-------|--------|------------|---------------|---------|--------|
-| CHUNK-01-FOUNDATION | `[ ]` | — | — | U1 (blocker), U9 (blocker) | pending |
+| CHUNK-01-FOUNDATION | `[x]` | — | — | U1 resolved; U9 resolved; implementation verified; review accepted; merge pending | accepted |
 | CHUNK-02-CATALOG-STRUCTURE | `[ ]` | 01 | 03 | U2 (deferred) | pending |
 | CHUNK-03-IGNORE-PLATFORM-POLICY | `[ ]` | 01 | 02 | U3 (deferred) | pending |
 | CHUNK-04-WATCHER-INDEXER | `[ ]` | 02, 03 | — | U4 (deferred) | pending |
@@ -343,6 +348,6 @@ Dependency order: `01 → {02, 03} → 04 → 05 → {06, 07} → 08 → 09`. CH
 | CHUNK-06-LAZY-HYDRATION-VFS | `[ ]` | 05 | 07 | U6 (blocker) | pending |
 | CHUNK-07-ENV-SYNC | `[ ]` | 05 | 06 | U7 (blocker) | pending |
 | CHUNK-08-CLI-DAEMON-UX | `[ ]` | 04, 05, 06, 07 | — | U8 (deferred) | pending |
-| CHUNK-09-E2E-HARDENING | `[ ]` | 08 | — | none (U9 consumed after CHUNK-01 resolves it) | pending |
+| CHUNK-09-E2E-HARDENING | `[ ]` | 08 | — | none (U9 resolved by CHUNK-01; consumed after merge) | pending |
 
-**Next dependency-ready unchecked chunk(s):** `CHUNK-01-FOUNDATION` 👉 NEXT (first task: `Choose stack/language (resolve U1) and record rationale`). Future parallel waves must list multiple `👉 NEXT` tasks when both chunks are dependency-ready.
+**Current resume state:** CHUNK-01 has no unchecked task and is review-accepted / ready to merge; no task-level `👉 NEXT` marker is active. After CHUNK-01 is merged, move `👉 NEXT` to both CHUNK-02 and CHUNK-03 first tasks for the parallel wave.

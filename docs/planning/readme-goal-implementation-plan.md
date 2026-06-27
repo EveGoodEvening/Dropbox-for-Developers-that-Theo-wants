@@ -86,8 +86,10 @@ Chunk IDs are exactly those from `local://planning-contract.json`. Each chunk li
   - `<cli> --help` may exist as optional help smoke, but it is not the required CHUNK-01 acceptance path.
   - Migration runner loads an empty baseline schema and reports version `v0` with no product tables.
 - **Review criteria:** Manifest + build/test/lint commands documented in repo; logging and error model present and used by the `version`/`info` smoke path; shared `Platform`/OS identity type documented/exported for CHUNK-02/CHUNK-03; tool `.gitignore` entries cover generated build/test/cache artifacts; migration framework present with a version table and runner; **FS2 decision (U9) recorded with rationale and date**; no dead scaffolding.
-- **Rollback / risk:** Lowest risk. Rollback = revert scaffolding commit. Risk: stack choice is load-bearing and hard to reverse (see unresolved U1); FS2 decision shapes catalog/VFS design (U9).
-- **Unresolved decisions:** U1 (stack choice) — **blocker** until chosen, because every downstream chunk's verification commands depend on it. U9 (FS2 build-vs-adopt-vs-vendor) — **blocker** until chosen by CHUNK-01; downstream chunks, including CHUNK-09, must not treat U9 as consumed until CHUNK-01 records the decision because catalog and VFS design (CHUNK-02/CHUNK-06) depend on whether FS2 covers the catalog/hydration surface.
+- **Stack decision (U1) — resolved 2026-06-27:** Rust 2021, one Cargo package (`dropbox-dev`) with one binary (`dropbox-dev`) and one lockfile. Rationale: this is a long-running filesystem daemon/CLI with cross-platform watching, VFS/lazy hydration, secret handling, and sync behavior; Rust gives predictable native binaries, memory safety without GC pauses, strong error typing, and mature filesystem/CLI ecosystem while keeping downstream module boundaries boring and maintainable.
+- **FS2 decision (U9) — resolved 2026-06-27:** Build from scratch; do not adopt, extend, or vendor FS2. Rationale: the local repo contains only the README note that FS2 exists and is "nowhere near enough" plus planning references; no FS2 code, manifest, API, or evidence exists locally showing coverage for the catalog, migration, policy, sync, or lazy-hydration/VFS surfaces. Downstream CHUNK-02/CHUNK-06 should design against this repo's foundation contracts instead of waiting on FS2 integration.
+- **Rollback / risk:** Lowest risk. Rollback = revert scaffolding commit. Risk: stack choice is load-bearing and hard to reverse; the recorded FS2 build-from-scratch decision shapes catalog/VFS design.
+- **Unresolved decisions:** None for CHUNK-01 after U1/U9 are recorded here; downstream blocker/deferred decisions remain with their owning chunks.
 
 ---
 
@@ -276,7 +278,7 @@ CHUNK-09-E2E-HARDENING  (after 08; all previous chunks are transitive)
 - A chunk PR must include its tracker status/evidence updates before review can be accepted; tracker evidence/status is part of review, not a post-review chore.
 - After a chunk PR is squash-merged to `master`, master-side tracker edits are limited to recording the merge SHA in `Commit(s)` and moving `👉 NEXT` / Next Up markers. Any other status/evidence correction must be a separate tracker correction docs PR/commit.
 - A chunk is reviewable only when its verification commands pass, its review criteria are met, its checklist items are satisfied, and the tracker records the evidence/commits that prove those facts.
-- Blocker-tagged unresolved decisions (U1, U6, U7, U9, U10) must be resolved before the owning chunk's review can be marked accepted.
+- Blocker-tagged unresolved decisions must be resolved before the owning chunk's review can be marked accepted. CHUNK-01 resolved U1 and U9 on 2026-06-27; remaining blocker-tagged downstream decisions are U6, U7, and U10 until their owning chunks resolve them.
 - Deferred decisions (U2, U3, U4, U8) may be resolved by the chunk owner with rationale recorded in the chunk's PR and progress tracker.
 - U5 is **resolved** (last-writer-wins + conflict sidecar + manual escape hatch); all chunks must reuse this single policy.
 
@@ -294,14 +296,14 @@ CHUNK-09-E2E-HARDENING  (after 08; all previous chunks are transitive)
 - **R3 — `node_modules` / platform-specific:** Naive sync is huge, slow, non-portable, and wrong across Mac/Linux. (Owned by CHUNK-03; exercised by CHUNK-04, CHUNK-05, CHUNK-06, CHUNK-09.)
 - **R4 — Lazy hydration:** Filesystem-level/editor integration for access-while-absent introduces latency, cache coherency, and failure-mode risks. (Owned by CHUNK-06; exercised by CHUNK-09.)
 - **R5 — Ignore semantics:** Incorrect semantics leak sensitive/generated files or omit necessary state. (Owned by CHUNK-03; exercised end-to-end by CHUNK-09.)
-- **R6 — FS2 dependency:** FS2 is mentioned as insufficient (README.md:24) but not present locally; the build-vs-adopt-vs-vendor decision (U9) is owned by CHUNK-01 and must be recorded before catalog/VFS design begin. (Owned by CHUNK-01.)
+- **R6 — FS2 dependency:** FS2 is mentioned as insufficient (README.md:24) but not present locally beyond README/planning references; CHUNK-01 resolved U9 on 2026-06-27 as build-from-scratch, so downstream catalog/VFS design proceeds against this repo's foundation contracts rather than adopting, extending, or vendoring FS2. (Owned by CHUNK-01.)
 - **R7 — Cross-machine transport:** The README goal is automatic cross-machine sync; a production transport/backend with enrollment/auth/pairing and in-transit security must be implemented (CHUNK-05), not mock-only and not loopback-only. Local loopback is a harness for testing the production transport contract. (Owned by CHUNK-05; wired by CHUNK-08; exercised by CHUNK-09.)
 
 ## Unresolved Decisions
 
 | ID | Decision | State | Owner chunk | Reason |
 |----|----------|-------|-------------|--------|
-| U1 | Stack / language choice | **Blocker** | CHUNK-01 | Every downstream verification command depends on it. |
+| U1 | Stack / language choice | **Resolved** | CHUNK-01 | Chosen 2026-06-27: Rust 2021, one Cargo package (`dropbox-dev`), one binary (`dropbox-dev`), one lockfile (`Cargo.lock`). Rationale: native filesystem daemon/CLI, cross-platform watching/VFS, secret handling, and long-running sync behavior need predictable resource use, memory safety, and strong error typing. |
 | U2 | Catalog serialization format | Deferred | CHUNK-02 | Must be reproducible across machines; chunk owner decides with rationale recorded in PR + tracker. |
 | U3 | Ignore file format (bespoke vs `.gitignore`-compatible superset) | Deferred | CHUNK-03 | Chunk owner decides; must remain distinct from `.gitignore` unless explicitly chosen otherwise; rationale recorded. |
 | U4 | Filesystem watcher library per OS | Deferred | CHUNK-04 | Must work on macOS and Linux; chunk owner selects; rationale recorded. |
@@ -309,7 +311,7 @@ CHUNK-09-E2E-HARDENING  (after 08; all previous chunks are transitive)
 | U6 | VFS approach (FUSE/platform native vs editor plugin vs stub files) | **Blocker** | CHUNK-06 | Verification approach depends on it; rationale recorded. |
 | U7 | Encryption key management for env sync | **Blocker** | CHUNK-07 | Cannot ship env sync without it; rationale recorded. |
 | U8 | Daemon supervision model per OS | Deferred | CHUNK-08 | Chunk owner selects per OS; rationale recorded. |
-| U9 | Whether to integrate, adopt-and-extend, or vendor FS2 (or build-from-scratch) | **Blocker** | CHUNK-01 | README.md:24 says FS2 is insufficient; the build-vs-adopt-vs-vendor decision shapes catalog and VFS design (CHUNK-02/CHUNK-06) and must be recorded before those chunks begin. It is not already resolved; CHUNK-09 consumes U9 only after CHUNK-01 records the decision. Default stance: build-from-scratch unless an inspection proves FS2 covers the catalog/hydration surface. |
+| U9 | Whether to integrate, adopt-and-extend, or vendor FS2 (or build-from-scratch) | **Resolved** | CHUNK-01 | Chosen 2026-06-27: build from scratch. README.md:24 says FS2 is insufficient, and local inspection found no FS2 code/API/manifest beyond README/planning mentions; no evidence exists that FS2 covers catalog, policy, migration, sync, or lazy-hydration/VFS needs. CHUNK-02/CHUNK-06 should consume this foundation instead of treating FS2 as an upstream dependency. |
 | U10 | Sync transport/backend choice (production daemon-to-daemon/backend path + machine enrollment/auth/pairing; local loopback only as harness) | **Blocker** | CHUNK-05 | The README goal is automatic cross-machine sync; the production transport/backing sync path depends on this choice. Mock transport is for deterministic tests only. |
 
 ## Out of Scope for This Artifact

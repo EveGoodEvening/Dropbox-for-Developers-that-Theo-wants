@@ -1,0 +1,15 @@
+[package]
+name = "dropbox-dev"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+description = "Foundation skeleton for Dropbox-like developer machine sync"
+publish = false
+
+[lib]
+name = "dropbox_dev"
+path = "src/lib.rs"
+
+[[bin]]
+name = "dropbox-dev"
+path = "src/main.rs"
