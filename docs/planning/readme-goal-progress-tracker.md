@@ -17,9 +17,9 @@
 
 ## Next Up
 
-CHUNK-01 is merged on `master` at `814afca` and has no unchecked tracker tasks. Current dependency-ready unchecked chunks are CHUNK-02 and CHUNK-03.
+CHUNK-02 and CHUNK-03 are merged on `master` at `542ee65` and `8e73304`. Current dependency-ready unchecked chunk is CHUNK-04.
 
-Task-level `👉 NEXT` markers are active on the first unchecked doable tasks for both parallel-ready chunks: CHUNK-02 `Define project + directory structure model...` and CHUNK-03 `Define ignore/exclusion mechanism...`.
+Task-level `👉 NEXT` marker is active on CHUNK-04 `Select filesystem watcher library per OS...`.
 
 Dependency order: `01 → {02, 03} → 04 → 05 → {06, 07} → 08 → 09`. CHUNK-04 and CHUNK-05 are serialized (04 before 05); there is no 04 ∥ 05 parallel wave. When the `{02, 03}` or `{06, 07}` waves become dependency-ready, this section and the task lists must show multiple simultaneous `👉 NEXT` markers.
 
@@ -71,61 +71,61 @@ Dependency order: `01 → {02, 03} → 04 → 05 → {06, 07} → 08 → 09`. CH
 
 ## CHUNK-02-CATALOG-STRUCTURE
 
-- **Status:** `[ ]` not started
-- **Owner branch / worktree:** —
-- **Commit(s):** —
-- **Review status:** pending
-- **Blocker / deferred reason:** U2 (catalog serialization format) — deferred to chunk owner with rationale (checklist item + review criterion).
+- **Status:** `[x]` done — implementation verified, review accepted, and merged
+- **Owner branch / worktree:** `chunk-02-catalog-structure` / `../dropbox-dev-chunk-02-catalog-structure` (merged; worktree removal pending)
+- **Commit(s):** `542ee65` (`feat(catalog): add structure-first manifest model`)
+- **Review status:** accepted — catalog correctness and wave integration reviews clean
+- **Blocker / deferred reason:** U2 resolved 2026-06-27: deterministic versioned line-oriented stdlib-only manifest serialization. No CHUNK-02 blocker remains.
 - **Depends on:** CHUNK-01-FOUNDATION
 - **Parallel with:** CHUNK-03-IGNORE-PLATFORM-POLICY
 
 ### Tasks
-- [ ] 👉 NEXT — Define project + directory structure model (transport-independent) using CHUNK-01's shared `Platform`/OS identity type for machine/platform fields
-- [ ] Implement cross-machine structure reconciliation (deterministic)
-- [ ] Property test: structure sync never fetches file contents
-- [ ] Unit test: two differing structures converge to one canonical record
-- [ ] Unit test: add/remove directory updates catalog idempotently
-- [ ] Resolve U2 (serialization format) with recorded rationale (PR + tracker)
-- [ ] Write `catalog_*` initial migration on CHUNK-01's empty baseline; verify apply + rollback
-- [ ] Record verification evidence (see subsection below)
+- [x] Define project + directory structure model (transport-independent) using CHUNK-01's shared `Platform`/OS identity type for machine/platform fields
+- [x] Implement cross-machine structure reconciliation (deterministic)
+- [x] Property test: structure sync never fetches file contents
+- [x] Unit test: two differing structures converge to one canonical record
+- [x] Unit test: add/remove directory updates catalog idempotently
+- [x] Resolve U2 (serialization format) with recorded rationale (PR + tracker)
+- [x] Write `catalog_*` initial migration on CHUNK-01's empty baseline; verify apply + rollback
+- [x] Record verification evidence (see subsection below)
 
 ### Verification evidence
 
 | Slot | Command/scenario | Result | Date / SHA | Output artifact / pasted summary | Tracker/evidence commit(s) |
 |------|------------------|--------|------------|----------------------------------|----------------------------|
-| Acceptance evidence | _ | _ | _ | _ | _ |
-| Additional task evidence (append rows as needed) | _ | _ | _ | _ | _ |
+| Acceptance evidence | `cargo test --locked -p dropbox-dev catalog::`; `cargo clippy --locked --all-targets -- -D warnings` | Passed | 2026-06-27 / `542ee65` | Catalog tests passed 8 tests; clippy passed with `-D warnings`; catalog review and wave integration review returned clean | `542ee65` |
+| Additional task evidence | Staged `src/catalog/mod.rs` review | Passed | 2026-06-27 / `542ee65` | Transport-independent Project/Machine/TreeManifest/TreeEntry/PlaceholderRecord model; deterministic contentless serialization; add/remove/modify/move diff; catalog migration descriptor/runner | `542ee65` |
 
 ---
 
 ## CHUNK-03-IGNORE-PLATFORM-POLICY
 
-- **Status:** `[ ]` not started
-- **Owner branch / worktree:** —
-- **Commit(s):** —
-- **Review status:** pending
-- **Blocker / deferred reason:** U3 (ignore file format — bespoke vs `.gitignore`-compatible superset) — deferred to chunk owner with rationale (checklist item + review criterion).
+- **Status:** `[x]` done — implementation verified, review accepted, and merged
+- **Owner branch / worktree:** `chunk-03-ignore-platform-policy` / `../dropbox-dev-chunk-03-ignore-platform-policy` (merged; worktree removal pending)
+- **Commit(s):** `8e73304` (`feat(policy): add syncignore and platform policy`)
+- **Review status:** accepted — policy security/correctness and wave integration reviews clean after Git metadata fix
+- **Blocker / deferred reason:** U3 resolved 2026-06-27: `.syncignore`-style policy distinct from `.gitignore`, with project/user overrides for ordinary built-ins and non-overridable local-only Git metadata. No CHUNK-03 blocker remains.
 - **Depends on:** CHUNK-01-FOUNDATION
 - **Parallel with:** CHUNK-02-CATALOG-STRUCTURE
 
 ### Tasks
-- [ ] 👉 NEXT — Define ignore/exclusion mechanism distinct from `.gitignore` (unless explicitly chosen otherwise)
-- [ ] Resolve U3 (ignore format) with recorded rationale (PR + tracker)
-- [ ] Define platform-specific policy (`node_modules`, generated/dependency dirs, OS artifacts) for Mac + Linux using CHUNK-01's shared `Platform`/OS identity type
-- [ ] Record git/submodule metadata disposition: `.git/` directories and submodule `.git` pointer files are local-only metadata, `.gitmodules` behavior is explicit, and whole-folder sync replaces submodule workflows
-- [ ] Unit test: `node_modules/`, generated dir, and ignore-patterned file are excluded from sync
-- [ ] Unit test: platform-specific path handled per policy (not byte-synced)
-- [ ] Unit test: all three `Action` variants (`ignore`, `rebuild-locally`, `platform-pin`)
-- [ ] Unit test: ignore rules add/remove without touching `.gitignore`
-- [ ] Unit test: Git metadata policy covers `.git/`, submodule `.git` file pointers, and `.gitmodules` without touching `.gitignore`
-- [ ] Record verification evidence (see subsection below)
+- [x] Define ignore/exclusion mechanism distinct from `.gitignore` (unless explicitly chosen otherwise)
+- [x] Resolve U3 (ignore format) with recorded rationale (PR + tracker)
+- [x] Define platform-specific policy (`node_modules`, generated/dependency dirs, OS artifacts) for Mac + Linux using CHUNK-01's shared `Platform`/OS identity type
+- [x] Record git/submodule metadata disposition: `.git/` directories and submodule `.git` pointer files are local-only metadata, `.gitmodules` behavior is explicit, and whole-folder sync replaces submodule workflows
+- [x] Unit test: `node_modules/`, generated dir, and ignore-patterned file are excluded from sync
+- [x] Unit test: platform-specific path handled per policy (not byte-synced)
+- [x] Unit test: all three `Action` variants (`ignore`, `rebuild-locally`, `platform-pin`)
+- [x] Unit test: ignore rules add/remove without touching `.gitignore`
+- [x] Unit test: Git metadata policy covers `.git/`, submodule `.git` file pointers, and `.gitmodules` without touching `.gitignore`
+- [x] Record verification evidence (see subsection below)
 
 ### Verification evidence
 
 | Slot | Command/scenario | Result | Date / SHA | Output artifact / pasted summary | Tracker/evidence commit(s) |
 |------|------------------|--------|------------|----------------------------------|----------------------------|
-| Acceptance evidence | _ | _ | _ | _ | _ |
-| Additional task evidence (append rows as needed) | _ | _ | _ | _ | _ |
+| Acceptance evidence | `cargo test --locked -p dropbox-dev policy::`; `cargo clippy --locked --all-targets -- -D warnings` | Passed | 2026-06-27 / `8e73304` | Policy tests passed 10 tests; clippy passed with `-D warnings`; policy rereview and wave integration review returned clean | `8e73304` |
+| Additional task evidence | Staged `src/policy/mod.rs` review | Passed | 2026-06-27 / `8e73304` | Pure no-I/O `.syncignore` policy; node_modules rebuild-locally; generated/OS ignores; platform-pin; non-overridable Git metadata; ordinary built-in overrides retained | `8e73304` |
 
 ---
 
@@ -341,8 +341,8 @@ Dependency order: `01 → {02, 03} → 04 → 05 → {06, 07} → 08 → 09`. CH
 | Chunk | Status | Depends on | Parallel with | Blocker | Review |
 |-------|--------|------------|---------------|---------|--------|
 | CHUNK-01-FOUNDATION | `[x]` | — | — | U1 resolved; U9 resolved; implementation verified; review accepted; merged `814afca` | accepted |
-| CHUNK-02-CATALOG-STRUCTURE | `[ ]` | 01 | 03 | U2 (deferred) | pending |
-| CHUNK-03-IGNORE-PLATFORM-POLICY | `[ ]` | 01 | 02 | U3 (deferred) | pending |
+| CHUNK-02-CATALOG-STRUCTURE | `[x]` | 01 | 03 | U2 resolved; merged `542ee65` | accepted |
+| CHUNK-03-IGNORE-PLATFORM-POLICY | `[x]` | 01 | 02 | U3 resolved; merged `8e73304` | accepted |
 | CHUNK-04-WATCHER-INDEXER | `[ ]` | 02, 03 | — | U4 (deferred) | pending |
 | CHUNK-05-SYNC-STORE-CONVERGENCE | `[ ]` | 04, 03 | — | U10 (blocker) | pending |
 | CHUNK-06-LAZY-HYDRATION-VFS | `[ ]` | 05 | 07 | U6 (blocker) | pending |
@@ -350,4 +350,4 @@ Dependency order: `01 → {02, 03} → 04 → 05 → {06, 07} → 08 → 09`. CH
 | CHUNK-08-CLI-DAEMON-UX | `[ ]` | 04, 05, 06, 07 | — | U8 (deferred) | pending |
 | CHUNK-09-E2E-HARDENING | `[ ]` | 08 | — | none (U9 resolved by CHUNK-01; consumed after merge) | pending |
 
-**Current resume state:** CHUNK-01 is merged. CHUNK-02 and CHUNK-03 are dependency-ready in the parallel wave; task-level `👉 NEXT` markers are active on both first unchecked tasks.
+**Current resume state:** CHUNK-02 and CHUNK-03 are merged. CHUNK-04 is dependency-ready; task-level `👉 NEXT` marker is active on its first unchecked task.
