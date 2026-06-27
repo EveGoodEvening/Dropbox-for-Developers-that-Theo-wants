@@ -17,9 +17,9 @@
 
 ## Next Up
 
-CHUNK-04 is merged on `master` at `97351fc`. Current dependency-ready unchecked chunk is CHUNK-05.
+CHUNK-05 is merged on `master` at `3379287`. Current dependency-ready unchecked chunks are CHUNK-06 and CHUNK-07.
 
-Task-level `👉 NEXT` marker is active on CHUNK-05 `Choose production transport/backend...` / U10 resolution.
+Task-level `👉 NEXT` markers are active on CHUNK-06 `Choose VFS approach...` and CHUNK-07 `Choose encryption key management...`.
 
 Dependency order: `01 → {02, 03} → 04 → 05 → {06, 07} → 08 → 09`. CHUNK-04 and CHUNK-05 are serialized (04 before 05); there is no 04 ∥ 05 parallel wave. When the `{02, 03}` or `{06, 07}` waves become dependency-ready, this section and the task lists must show multiple simultaneous `👉 NEXT` markers.
 
@@ -161,38 +161,38 @@ Dependency order: `01 → {02, 03} → 04 → 05 → {06, 07} → 08 → 09`. CH
 
 ## CHUNK-05-SYNC-STORE-CONVERGENCE
 
-- **Status:** `[ ]` not started
-- **Owner branch / worktree:** —
-- **Commit(s):** —
-- **Review status:** pending
-- **Blocker / deferred reason:** U5 (conflict resolution strategy) — **resolved**: last-writer-wins + conflict sidecar + manual escape hatch. U10 (production transport/backend choice) — **blocker**; must be chosen before review. Local loopback is only a test harness, not the production answer.
+- **Status:** `[x]` done — implementation verified, review accepted, and merged
+- **Owner branch / worktree:** `chunk-05-sync-store-convergence` / `../dropbox-dev-chunk-05-sync-store-convergence` (merged; worktree removal pending)
+- **Commit(s):** `3379287` (`feat(sync): add file-backed convergence store`)
+- **Review status:** accepted — sync correctness/security/accounting reviews clean after fixes
+- **Blocker / deferred reason:** U5 resolved: last-writer-wins + conflict sidecar + manual escape hatch. U10 resolved 2026-06-27: append-only file-backed sync store rooted at a configurable shared directory / mounted network path / object-store-like directory; local harness uses same contract. No CHUNK-05 blocker remains.
 - **Depends on:** CHUNK-04-WATCHER-INDEXER, CHUNK-03-IGNORE-PLATFORM-POLICY (direct policy action contract; CHUNK-02/CHUNK-01 are transitive)
 - **Parallel with:** — (serializes after 04; must complete before {06, 07})
 
 ### Tasks
-- [ ] Choose production sync transport/backend (resolve U10) with rationale (real cross-machine/backing path; loopback harness only)
-- [ ] Implement machine enrollment/auth/pairing
-- [ ] Implement authoritative sync store + operation log
-- [ ] Implement production cross-machine/backing transport path (mock only for deterministic tests; loopback only as local harness for the production contract)
-- [ ] Implement generic authenticated/encrypted payload + content transport contract
-- [ ] Implement convergence protocol (partial/offline, reconnect) branching on all `Action` variants from CHUNK-03 policy and the recorded Git metadata/submodule disposition
-- [ ] Implement conflict resolution per resolved U5 (last-writer-wins + conflict sidecar + manual escape hatch)
-- [ ] Integration test: two machines editing same file converge with conflict sidecar (no silent data loss)
-- [ ] Integration test: offline machine reconnects and converges
-- [ ] Property test: operation log replay is deterministic
-- [ ] Transport test: two daemon instances exchange generic manifest metadata + content payloads over the production transport path via the local harness (not env-specific blobs; not mock-only)
-- [ ] In-transit security test: plaintext generic payload/content does not cross the transport
-- [ ] All-policy-action + Git-metadata test: CHUNK-03 `ignore`, `rebuild-locally`, `platform-pin`, `.git/`, submodule `.git` files, and `.gitmodules` disposition branched in convergence
-- [ ] Write `sync_*` initial migration on CHUNK-01's empty baseline; verify apply + rollback
-- [ ] Implement + document sync-store rollback/backup/restore procedure; verify with a test
-- [ ] Record verification evidence (see subsection below)
+- [x] Choose production sync transport/backend (resolve U10) with rationale (real cross-machine/backing path; loopback harness only)
+- [x] Implement machine enrollment/auth/pairing
+- [x] Implement authoritative sync store + operation log
+- [x] Implement production cross-machine/backing transport path (mock only for deterministic tests; loopback only as local harness for the production contract)
+- [x] Implement generic authenticated/encrypted payload + content transport contract
+- [x] Implement convergence protocol (partial/offline, reconnect) branching on all `Action` variants from CHUNK-03 policy and the recorded Git metadata/submodule disposition
+- [x] Implement conflict resolution per resolved U5 (last-writer-wins + conflict sidecar + manual escape hatch)
+- [x] Integration test: two machines editing same file converge with conflict sidecar (no silent data loss)
+- [x] Integration test: offline machine reconnects and converges
+- [x] Property test: operation log replay is deterministic
+- [x] Transport test: two daemon instances exchange generic manifest metadata + content payloads over the production transport path via the local harness (not env-specific blobs; not mock-only)
+- [x] In-transit security test: plaintext generic payload/content does not cross the transport
+- [x] All-policy-action + Git-metadata test: CHUNK-03 `ignore`, `rebuild-locally`, `platform-pin`, `.git/`, submodule `.git` files, and `.gitmodules` disposition branched in convergence
+- [x] Write `sync_*` initial migration on CHUNK-01's empty baseline; verify apply + rollback
+- [x] Implement + document sync-store rollback/backup/restore procedure; verify with a test
+- [x] Record verification evidence (see subsection below)
 
 ### Verification evidence
 
 | Slot | Command/scenario | Result | Date / SHA | Output artifact / pasted summary | Tracker/evidence commit(s) |
 |------|------------------|--------|------------|----------------------------------|----------------------------|
-| Acceptance evidence | _ | _ | _ | _ | _ |
-| Additional task evidence (append rows as needed) | _ | _ | _ | _ | _ |
+| Acceptance evidence | `cargo test --locked -p dropbox-dev sync::`; `cargo clippy --locked --all-targets -- -D warnings` | Passed | 2026-06-27 / `3379287` | Sync tests passed 50 tests before final acceptance, then 39/41/43/48/50 incremental gates, final gate passed 50 tests; clippy passed with `-D warnings`; final acceptance review returned clean | `3379287` |
+| Additional task evidence | Staged `src/sync/mod.rs` review | Passed | 2026-06-27 / `3379287` | File-backed transport; enrollment/auth/pairing; authenticated encrypted envelopes; convergence with policy/Git metadata branches; LWW sidecars; deterministic replay; remote delete/tombstone; metadata/symlink actions; backup/restore; sync migration | `3379287` |
 
 ---
 
@@ -344,10 +344,10 @@ Dependency order: `01 → {02, 03} → 04 → 05 → {06, 07} → 08 → 09`. CH
 | CHUNK-02-CATALOG-STRUCTURE | `[x]` | 01 | 03 | U2 resolved; merged `542ee65` | accepted |
 | CHUNK-03-IGNORE-PLATFORM-POLICY | `[x]` | 01 | 02 | U3 resolved; merged `8e73304` | accepted |
 | CHUNK-04-WATCHER-INDEXER | `[x]` | 02, 03 | — | U4 resolved; merged `97351fc` | accepted |
-| CHUNK-05-SYNC-STORE-CONVERGENCE | `[ ]` | 04, 03 | — | U10 (blocker) | pending |
+| CHUNK-05-SYNC-STORE-CONVERGENCE | `[x]` | 04, 03 | — | U5 resolved; U10 resolved; merged `3379287` | accepted |
 | CHUNK-06-LAZY-HYDRATION-VFS | `[ ]` | 05 | 07 | U6 (blocker) | pending |
 | CHUNK-07-ENV-SYNC | `[ ]` | 05 | 06 | U7 (blocker) | pending |
 | CHUNK-08-CLI-DAEMON-UX | `[ ]` | 04, 05, 06, 07 | — | U8 (deferred) | pending |
 | CHUNK-09-E2E-HARDENING | `[ ]` | 08 | — | none (U9 resolved by CHUNK-01; consumed after merge) | pending |
 
-**Current resume state:** CHUNK-04 is merged. CHUNK-05 is dependency-ready; task-level `👉 NEXT` marker is active on its first unchecked task.
+**Current resume state:** CHUNK-05 is merged. CHUNK-06 and CHUNK-07 are dependency-ready in the parallel wave; task-level `👉 NEXT` markers are active on both first unchecked tasks.
