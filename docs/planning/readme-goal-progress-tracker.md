@@ -17,9 +17,9 @@
 
 ## Next Up
 
-CHUNK-01 has no unchecked tracker tasks: all implementation and verification tasks are checked, evidence is populated, and review is accepted. Current resume state is **ready to merge CHUNK-01**.
+CHUNK-01 is merged on `master` at `814afca` and has no unchecked tracker tasks. Current dependency-ready unchecked chunks are CHUNK-02 and CHUNK-03.
 
-No task-level `👉 NEXT` marker is currently placed. Keep downstream `👉 NEXT` markers withheld until CHUNK-01 is merged; only then move `👉 NEXT` to both dependency-ready CHUNK-02 and CHUNK-03 first tasks.
+Task-level `👉 NEXT` markers are active on the first unchecked doable tasks for both parallel-ready chunks: CHUNK-02 `Define project + directory structure model...` and CHUNK-03 `Define ignore/exclusion mechanism...`.
 
 Dependency order: `01 → {02, 03} → 04 → 05 → {06, 07} → 08 → 09`. CHUNK-04 and CHUNK-05 are serialized (04 before 05); there is no 04 ∥ 05 parallel wave. When the `{02, 03}` or `{06, 07}` waves become dependency-ready, this section and the task lists must show multiple simultaneous `👉 NEXT` markers.
 
@@ -34,9 +34,9 @@ Dependency order: `01 → {02, 03} → 04 → 05 → {06, 07} → 08 → 09`. CH
 
 ## CHUNK-01-FOUNDATION
 
-- **Status:** `[x]` done — implementation verified and review accepted in `chunk-01-foundation`; merge pending
-- **Owner branch / worktree:** `chunk-01-foundation` / `../dropbox-dev-chunk-01-foundation`
-- **Commit(s):** pending chunk commit / merge SHA
+- **Status:** `[x]` done — implementation verified, review accepted, and merged
+- **Owner branch / worktree:** `chunk-01-foundation` / `../dropbox-dev-chunk-01-foundation` (merged; worktree removal pending)
+- **Commit(s):** `814afca` (`feat(foundation): bootstrap project skeleton and shared core`)
 - **Review status:** accepted — correctness, security, and accounting reviews clean after fixes
 - **Blocker / deferred reason:** U1 resolved 2026-06-27: Rust 2021 single Cargo package/binary (`dropbox-dev`) with `Cargo.lock`. U9 resolved 2026-06-27: build from scratch; local inspection found no FS2 code/API/manifest beyond README/planning mentions and README.md:24 says FS2 is "nowhere near enough". No CHUNK-01 blocker remains.
 - **Depends on:** — (root)
@@ -59,13 +59,13 @@ Dependency order: `01 → {02, 03} → 04 → 05 → {06, 07} → 08 → 09`. CH
 
 | Slot | Command/scenario | Result | Date / SHA | Output artifact / pasted summary | Tracker/evidence commit(s) |
 |------|------------------|--------|------------|----------------------------------|----------------------------|
-| Acceptance evidence | `make build`; `make test`; `make lint`; `make version`; `make info` | Passed after review fixes | 2026-06-27 / pending SHA | `make build` passed; `make test` passed 15 unit tests + doc-tests; `make lint` passed clippy with `-D warnings`; `make version` printed `dropbox-dev 0.1.0`; `make info` stdout included `machine_id=dropbox-dev-...`, `version=0.1.0`, `config_path=...`, `schema_version=v0`, `product_tables=0`; stderr logged only app-scoped machine id plus escaped fields/provenance and did not include raw OS machine id | pending |
-| Stack decision (U1) | Read `Cargo.toml`, `Cargo.lock`, `Makefile`, `src/lib.rs`, and implementation-plan U1 row | Recorded | 2026-06-27 / pending SHA | Rust 2021, one Cargo package/binary (`dropbox-dev`), one lockfile; rationale recorded in implementation plan CHUNK-01 section and U1 decision row | pending |
-| FS2 decision (U9) | Local FS2 reference inspection + README.md:24 review | Recorded | 2026-06-27 / pending SHA | Build from scratch; no FS2 code/API/manifest present locally beyond README/planning mentions; README says FS2 is insufficient | pending |
-| Migration baseline smoke | `make migration-info` | Passed after security fixes | 2026-06-27 / pending SHA | Alias of `make info`; output included `schema_version=v0` and `product_tables=0`; product schema tables are not introduced in CHUNK-01 | pending |
-| Migration framework consumer smoke | `cargo test foundation::migration` | Passed | 2026-06-27 / pending SHA | Feature migration registration, apply, duplicate-version rejection, and rollback hooks passed; downstream chunks can register product migrations after empty v0 without reopening foundation | pending |
-| Security regression smoke | raw OS machine-id leak check; unset config-home scenario; relative `DROPBOX_DEV_CONFIG` scenario | Passed | 2026-06-27 / pending SHA | Raw OS machine id was absent from stdout/stderr; env with `DROPBOX_DEV_CONFIG`, `XDG_CONFIG_HOME`, `APPDATA`, and `HOME` unset exited non-zero with `CONFIG_INVALID`; relative `DROPBOX_DEV_CONFIG=dropbox-dev/config.conf` exited non-zero with `CONFIG_INVALID` | pending |
-| Config/logging regression smoke | `cargo test foundation::config`; `cargo test foundation::logging` | Passed | 2026-06-27 / pending SHA | Config probing skips only NotFound and returns `CONFIG_IO` for metadata/read errors; logger escapes newline, carriage return, tab, and ASCII controls so structured log fields cannot inject raw line breaks/control bytes | pending |
+| Acceptance evidence | `make build`; `make test`; `make lint`; `make version`; `make info` | Passed after review fixes | 2026-06-27 / `814afca` | `make build` passed; `make test` passed 15 unit tests + doc-tests; `make lint` passed clippy with `-D warnings`; `make version` printed `dropbox-dev 0.1.0`; `make info` stdout included `machine_id=dropbox-dev-...`, `version=0.1.0`, `config_path=...`, `schema_version=v0`, `product_tables=0`; stderr logged only app-scoped machine id plus escaped fields/provenance and did not include raw OS machine id | `814afca` |
+| Stack decision (U1) | Read `Cargo.toml`, `Cargo.lock`, `Makefile`, `src/lib.rs`, and implementation-plan U1 row | Recorded | 2026-06-27 / `814afca` | Rust 2021, one Cargo package/binary (`dropbox-dev`), one lockfile; rationale recorded in implementation plan CHUNK-01 section and U1 decision row | `814afca` |
+| FS2 decision (U9) | Local FS2 reference inspection + README.md:24 review | Recorded | 2026-06-27 / `814afca` | Build from scratch; no FS2 code/API/manifest present locally beyond README/planning mentions; README says FS2 is insufficient | `814afca` |
+| Migration baseline smoke | `make migration-info` | Passed after security fixes | 2026-06-27 / `814afca` | Alias of `make info`; output included `schema_version=v0` and `product_tables=0`; product schema tables are not introduced in CHUNK-01 | `814afca` |
+| Migration framework consumer smoke | `cargo test foundation::migration` | Passed | 2026-06-27 / `814afca` | Feature migration registration, apply, duplicate-version rejection, and rollback hooks passed; downstream chunks can register product migrations after empty v0 without reopening foundation | `814afca` |
+| Security regression smoke | raw OS machine-id leak check; unset config-home scenario; relative `DROPBOX_DEV_CONFIG` scenario | Passed | 2026-06-27 / `814afca` | Raw OS machine id was absent from stdout/stderr; env with `DROPBOX_DEV_CONFIG`, `XDG_CONFIG_HOME`, `APPDATA`, and `HOME` unset exited non-zero with `CONFIG_INVALID`; relative `DROPBOX_DEV_CONFIG=dropbox-dev/config.conf` exited non-zero with `CONFIG_INVALID` | `814afca` |
+| Config/logging regression smoke | `cargo test foundation::config`; `cargo test foundation::logging` | Passed | 2026-06-27 / `814afca` | Config probing skips only NotFound and returns `CONFIG_IO` for metadata/read errors; logger escapes newline, carriage return, tab, and ASCII controls so structured log fields cannot inject raw line breaks/control bytes | `814afca` |
 
 ---
 
@@ -80,7 +80,7 @@ Dependency order: `01 → {02, 03} → 04 → 05 → {06, 07} → 08 → 09`. CH
 - **Parallel with:** CHUNK-03-IGNORE-PLATFORM-POLICY
 
 ### Tasks
-- [ ] Define project + directory structure model (transport-independent) using CHUNK-01's shared `Platform`/OS identity type for machine/platform fields
+- [ ] 👉 NEXT — Define project + directory structure model (transport-independent) using CHUNK-01's shared `Platform`/OS identity type for machine/platform fields
 - [ ] Implement cross-machine structure reconciliation (deterministic)
 - [ ] Property test: structure sync never fetches file contents
 - [ ] Unit test: two differing structures converge to one canonical record
@@ -109,7 +109,7 @@ Dependency order: `01 → {02, 03} → 04 → 05 → {06, 07} → 08 → 09`. CH
 - **Parallel with:** CHUNK-02-CATALOG-STRUCTURE
 
 ### Tasks
-- [ ] Define ignore/exclusion mechanism distinct from `.gitignore` (unless explicitly chosen otherwise)
+- [ ] 👉 NEXT — Define ignore/exclusion mechanism distinct from `.gitignore` (unless explicitly chosen otherwise)
 - [ ] Resolve U3 (ignore format) with recorded rationale (PR + tracker)
 - [ ] Define platform-specific policy (`node_modules`, generated/dependency dirs, OS artifacts) for Mac + Linux using CHUNK-01's shared `Platform`/OS identity type
 - [ ] Record git/submodule metadata disposition: `.git/` directories and submodule `.git` pointer files are local-only metadata, `.gitmodules` behavior is explicit, and whole-folder sync replaces submodule workflows
@@ -340,7 +340,7 @@ Dependency order: `01 → {02, 03} → 04 → 05 → {06, 07} → 08 → 09`. CH
 
 | Chunk | Status | Depends on | Parallel with | Blocker | Review |
 |-------|--------|------------|---------------|---------|--------|
-| CHUNK-01-FOUNDATION | `[x]` | — | — | U1 resolved; U9 resolved; implementation verified; review accepted; merge pending | accepted |
+| CHUNK-01-FOUNDATION | `[x]` | — | — | U1 resolved; U9 resolved; implementation verified; review accepted; merged `814afca` | accepted |
 | CHUNK-02-CATALOG-STRUCTURE | `[ ]` | 01 | 03 | U2 (deferred) | pending |
 | CHUNK-03-IGNORE-PLATFORM-POLICY | `[ ]` | 01 | 02 | U3 (deferred) | pending |
 | CHUNK-04-WATCHER-INDEXER | `[ ]` | 02, 03 | — | U4 (deferred) | pending |
@@ -350,4 +350,4 @@ Dependency order: `01 → {02, 03} → 04 → 05 → {06, 07} → 08 → 09`. CH
 | CHUNK-08-CLI-DAEMON-UX | `[ ]` | 04, 05, 06, 07 | — | U8 (deferred) | pending |
 | CHUNK-09-E2E-HARDENING | `[ ]` | 08 | — | none (U9 resolved by CHUNK-01; consumed after merge) | pending |
 
-**Current resume state:** CHUNK-01 has no unchecked task and is review-accepted / ready to merge; no task-level `👉 NEXT` marker is active. After CHUNK-01 is merged, move `👉 NEXT` to both CHUNK-02 and CHUNK-03 first tasks for the parallel wave.
+**Current resume state:** CHUNK-01 is merged. CHUNK-02 and CHUNK-03 are dependency-ready in the parallel wave; task-level `👉 NEXT` markers are active on both first unchecked tasks.
