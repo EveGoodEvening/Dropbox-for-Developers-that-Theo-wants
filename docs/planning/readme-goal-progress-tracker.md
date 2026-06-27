@@ -17,9 +17,9 @@
 
 ## Next Up
 
-CHUNK-02 and CHUNK-03 are merged on `master` at `542ee65` and `8e73304`. Current dependency-ready unchecked chunk is CHUNK-04.
+CHUNK-04 is merged on `master` at `97351fc`. Current dependency-ready unchecked chunk is CHUNK-05.
 
-Task-level `👉 NEXT` marker is active on CHUNK-04 `Select filesystem watcher library per OS...`.
+Task-level `👉 NEXT` marker is active on CHUNK-05 `Choose production transport/backend...` / U10 resolution.
 
 Dependency order: `01 → {02, 03} → 04 → 05 → {06, 07} → 08 → 09`. CHUNK-04 and CHUNK-05 are serialized (04 before 05); there is no 04 ∥ 05 parallel wave. When the `{02, 03}` or `{06, 07}` waves become dependency-ready, this section and the task lists must show multiple simultaneous `👉 NEXT` markers.
 
@@ -131,31 +131,31 @@ Dependency order: `01 → {02, 03} → 04 → 05 → {06, 07} → 08 → 09`. CH
 
 ## CHUNK-04-WATCHER-INDEXER
 
-- **Status:** `[ ]` not started
-- **Owner branch / worktree:** —
-- **Commit(s):** —
-- **Review status:** pending
-- **Blocker / deferred reason:** U4 (watcher library per OS) — deferred to chunk owner; must work on macOS + Linux (checklist item + review criterion).
+- **Status:** `[x]` done — implementation verified, review accepted, and merged
+- **Owner branch / worktree:** `chunk-04-watcher-indexer` / `../dropbox-dev-chunk-04-watcher-indexer` (merged; worktree removal pending)
+- **Commit(s):** `97351fc` (`feat(watcher): add policy-aware indexer and durable events`)
+- **Review status:** accepted — watcher correctness, integration, and accounting reviews clean after fixes
+- **Blocker / deferred reason:** U4 resolved 2026-06-27: stdlib polling filesystem adapter over a real project root for macOS/Linux-compatible behavior; later native fsevents/inotify adapters may plug into the frozen contracts. No CHUNK-04 blocker remains.
 - **Depends on:** CHUNK-02-CATALOG-STRUCTURE, CHUNK-03-IGNORE-PLATFORM-POLICY (CHUNK-01 is transitive through both)
 - **Parallel with:** — (consumes 02 + 03; produces the interface 05 consumes)
 
 ### Tasks
-- [ ] Select filesystem watcher library per OS (resolve U4) with rationale (PR + tracker)
-- [ ] Implement local indexer consistent with catalog (02) and policy (03)
-- [ ] Integration test: create/edit/move/delete produces correct, deduped events
-- [ ] Integration test: ignored, Git metadata, and platform-specific paths produce no unsafe content-sync events, while snapshot/event queue preserves policy action metadata/rebuild hints/platform-pin decisions for CHUNK-05 (all `Action` variants)
-- [ ] Race test: rapid bulk changes converge to stable index
-- [ ] Handle renames, deletes, permissions, symlinks
-- [ ] Freeze snapshot/event-queue interface for CHUNK-05
-- [ ] Write `watcher_events` initial migration on CHUNK-01's empty baseline; verify apply + rollback
-- [ ] Record verification evidence (see subsection below)
+- [x] Select filesystem watcher library per OS (resolve U4) with rationale (PR + tracker)
+- [x] Implement local indexer consistent with catalog (02) and policy (03)
+- [x] Integration test: create/edit/move/delete produces correct, deduped events
+- [x] Integration test: ignored, Git metadata, and platform-specific paths produce no unsafe content-sync events, while snapshot/event queue preserves policy action metadata/rebuild hints/platform-pin decisions for CHUNK-05 (all `Action` variants)
+- [x] Race test: rapid bulk changes converge to stable index
+- [x] Handle renames, deletes, permissions, symlinks
+- [x] Freeze snapshot/event-queue interface for CHUNK-05
+- [x] Write `watcher_events` initial migration on CHUNK-01's empty baseline; verify apply + rollback
+- [x] Record verification evidence (see subsection below)
 
 ### Verification evidence
 
 | Slot | Command/scenario | Result | Date / SHA | Output artifact / pasted summary | Tracker/evidence commit(s) |
 |------|------------------|--------|------------|----------------------------------|----------------------------|
-| Acceptance evidence | _ | _ | _ | _ | _ |
-| Additional task evidence (append rows as needed) | _ | _ | _ | _ | _ |
+| Acceptance evidence | `cargo test --locked -p dropbox-dev watcher::`; `cargo clippy --locked --all-targets -- -D warnings` | Passed | 2026-06-27 / `97351fc` | Watcher tests passed 21 tests; clippy passed with `-D warnings`; final clean review returned no material blockers | `97351fc` |
+| Additional task evidence | Staged `src/watcher/mod.rs` review | Passed | 2026-06-27 / `97351fc` | Stdlib polling filesystem adapter; durable file-backed event queue; policy-aware indexing; move/delete/policy transition coalescing; symlink target payload; watcher_events migration descriptor | `97351fc` |
 
 ---
 
@@ -343,11 +343,11 @@ Dependency order: `01 → {02, 03} → 04 → 05 → {06, 07} → 08 → 09`. CH
 | CHUNK-01-FOUNDATION | `[x]` | — | — | U1 resolved; U9 resolved; implementation verified; review accepted; merged `814afca` | accepted |
 | CHUNK-02-CATALOG-STRUCTURE | `[x]` | 01 | 03 | U2 resolved; merged `542ee65` | accepted |
 | CHUNK-03-IGNORE-PLATFORM-POLICY | `[x]` | 01 | 02 | U3 resolved; merged `8e73304` | accepted |
-| CHUNK-04-WATCHER-INDEXER | `[ ]` | 02, 03 | — | U4 (deferred) | pending |
+| CHUNK-04-WATCHER-INDEXER | `[x]` | 02, 03 | — | U4 resolved; merged `97351fc` | accepted |
 | CHUNK-05-SYNC-STORE-CONVERGENCE | `[ ]` | 04, 03 | — | U10 (blocker) | pending |
 | CHUNK-06-LAZY-HYDRATION-VFS | `[ ]` | 05 | 07 | U6 (blocker) | pending |
 | CHUNK-07-ENV-SYNC | `[ ]` | 05 | 06 | U7 (blocker) | pending |
 | CHUNK-08-CLI-DAEMON-UX | `[ ]` | 04, 05, 06, 07 | — | U8 (deferred) | pending |
 | CHUNK-09-E2E-HARDENING | `[ ]` | 08 | — | none (U9 resolved by CHUNK-01; consumed after merge) | pending |
 
-**Current resume state:** CHUNK-02 and CHUNK-03 are merged. CHUNK-04 is dependency-ready; task-level `👉 NEXT` marker is active on its first unchecked task.
+**Current resume state:** CHUNK-04 is merged. CHUNK-05 is dependency-ready; task-level `👉 NEXT` marker is active on its first unchecked task.
