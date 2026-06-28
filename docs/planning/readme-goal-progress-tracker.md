@@ -17,9 +17,9 @@
 
 ## Next Up
 
-CHUNK-06 and CHUNK-07 are merged on `master` at `f27cfa6` and `7de9fb2`. Current dependency-ready unchecked chunk is CHUNK-08.
+CHUNK-08 is merged on `master` at `82cc44b`. Current dependency-ready unchecked chunk is CHUNK-09.
 
-Task-level `👉 NEXT` marker is active on CHUNK-08 `Implement CLI commands...` / U8 supervision resolution.
+Task-level `👉 NEXT` marker is active on CHUNK-09 `Run full smoke/e2e...`.
 
 Dependency order: `01 → {02, 03} → 04 → 05 → {06, 07} → 08 → 09`. CHUNK-04 and CHUNK-05 are serialized (04 before 05); there is no 04 ∥ 05 parallel wave. When the `{02, 03}` or `{06, 07}` waves become dependency-ready, this section and the task lists must show multiple simultaneous `👉 NEXT` markers.
 
@@ -261,30 +261,30 @@ Dependency order: `01 → {02, 03} → 04 → 05 → {06, 07} → 08 → 09`. CH
 
 ## CHUNK-08-CLI-DAEMON-UX
 
-- **Status:** `[ ]` not started
-- **Owner branch / worktree:** —
-- **Commit(s):** —
-- **Review status:** pending
-- **Blocker / deferred reason:** U8 (daemon supervision model per OS) — deferred to chunk owner (checklist item + review criterion).
+- **Status:** `[x]` done — implementation verified, review accepted, and merged
+- **Owner branch / worktree:** `chunk-08-cli-daemon-ux` / `../dropbox-dev-chunk-08-cli-daemon-ux` (merged; worktree removal pending)
+- **Commit(s):** `82cc44b` (`feat(cli): add daemon UX commands`)
+- **Review status:** accepted — final CHUNK-08 review clean after fixes
+- **Blocker / deferred reason:** U8 resolved 2026-06-27: portable foreground stdlib supervision model with deterministic cache-dir state/control files; OS-specific service managers may wrap the same binary later. No CHUNK-08 blocker remains.
 - **Depends on:** CHUNK-04-WATCHER-INDEXER, CHUNK-05-SYNC-STORE-CONVERGENCE, CHUNK-06-LAZY-HYDRATION-VFS, CHUNK-07-ENV-SYNC (CHUNK-01/02/03 are transitive)
 - **Parallel with:** — (integrates all upstream surfaces; owns `cli/`)
 
 ### Tasks
-- [ ] Implement CLI commands: `init`, `status`, `sync`, `sync pause`, `sync resume`, `catalog`, `policy`, `watch`, `hydrate`, `env`, `doctor`, `version`/`info`
-- [ ] Implement daemon lifecycle (start/stop/`sync pause`/`sync resume`, robust, surfaces errors)
-- [ ] Choose daemon supervision model per OS (resolve U8) with rationale (PR + tracker)
-- [ ] CLI test: all commands behave as documented, including `sync pause`/`sync resume` state transitions (user-facing CLI verification lives here)
-- [ ] Daemon test: `sync pause`/`sync resume` honored; sync errors surfaced; hydration/env state reported
-- [ ] Doctor test: `doctor` checks transport reachable (real transport) + config + permissions + cache + policy
-- [ ] UX test: stale-worktree scenario (README.md:8) observable + recoverable from CLI
-- [ ] Record verification evidence (see subsection below)
+- [x] Implement CLI commands: `init`, `status`, `sync`, `sync pause`, `sync resume`, `catalog`, `policy`, `watch`, `hydrate`, `env`, `doctor`, `version`/`info`
+- [x] Implement daemon lifecycle (start/stop/`sync pause`/`sync resume`, robust, surfaces errors)
+- [x] Choose daemon supervision model per OS (resolve U8) with rationale (PR + tracker)
+- [x] CLI test: all commands behave as documented, including `sync pause`/`sync resume` state transitions (user-facing CLI verification lives here)
+- [x] Daemon test: `sync pause`/`sync resume` honored; sync errors surfaced; hydration/env state reported
+- [x] Doctor test: `doctor` checks transport reachable (real transport) + config + permissions + cache + policy
+- [x] UX test: stale-worktree scenario (README.md:8) observable + recoverable from CLI
+- [x] Record verification evidence (see subsection below)
 
 ### Verification evidence
 
 | Slot | Command/scenario | Result | Date / SHA | Output artifact / pasted summary | Tracker/evidence commit(s) |
 |------|------------------|--------|------------|----------------------------------|----------------------------|
-| Acceptance evidence | _ | _ | _ | _ | _ |
-| Additional task evidence (append rows as needed) | _ | _ | _ | _ | _ |
+| Acceptance evidence | `cargo test --locked -p dropbox-dev cli::`; `cargo test --locked -p dropbox-dev`; `cargo clippy --locked --all-targets -- -D warnings` | Passed | 2026-06-27 / `82cc44b` | CLI tests passed 27; package tests passed 151; clippy passed; final CHUNK-08 review returned clean | `82cc44b` |
+| Additional task evidence | Staged `src/cli/mod.rs` review | Passed | 2026-06-27 / `82cc44b` | CLI commands, foreground daemon supervision, pause/resume draining, transport-backed hydrate/env export, doctor nonzero failure, stale recovery/local delete/rename, conflict-sidecar safety, policy-preserving manifest publication | `82cc44b` |
 
 ---
 
@@ -347,7 +347,7 @@ Dependency order: `01 → {02, 03} → 04 → 05 → {06, 07} → 08 → 09`. CH
 | CHUNK-05-SYNC-STORE-CONVERGENCE | `[x]` | 04, 03 | — | U5 resolved; U10 resolved; merged `3379287` | accepted |
 | CHUNK-06-LAZY-HYDRATION-VFS | `[x]` | 05 | 07 | U6 resolved; merged `f27cfa6` | accepted |
 | CHUNK-07-ENV-SYNC | `[x]` | 05 | 06 | U7 resolved; merged `7de9fb2` | accepted |
-| CHUNK-08-CLI-DAEMON-UX | `[ ]` | 04, 05, 06, 07 | — | U8 (deferred) | pending |
+| CHUNK-08-CLI-DAEMON-UX | `[x]` | 04, 05, 06, 07 | — | U8 resolved; merged `82cc44b` | accepted |
 | CHUNK-09-E2E-HARDENING | `[ ]` | 08 | — | none (U9 resolved by CHUNK-01; consumed after merge) | pending |
 
-**Current resume state:** CHUNK-06 and CHUNK-07 are merged. CHUNK-08 is dependency-ready; task-level `👉 NEXT` marker is active on its first unchecked task.
+**Current resume state:** CHUNK-08 is merged. CHUNK-09 is dependency-ready; task-level `👉 NEXT` marker is active on its first unchecked task.
