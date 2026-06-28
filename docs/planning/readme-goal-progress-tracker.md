@@ -324,8 +324,8 @@ Dependency order: `01 → {02, 03} → 04 → 05 → {06, 07} → 08 → 09`. CH
 
 | Slot | Command/scenario | Result | Date / SHA | Output artifact / pasted summary | Tracker/evidence commit(s) |
 |------|------------------|--------|------------|----------------------------------|----------------------------|
-| Acceptance evidence | `cargo test --locked --test e2e`; `cargo test --locked -p dropbox-dev`; `cargo clippy --locked --all-targets -- -D warnings` | Passed | 2026-06-27 / `d8bba01` | E2E tests passed 9; package tests passed 160; clippy passed; final CHUNK-09 review returned clean | `d8bba01` |
-| Upstream fix/resume evidence (append rows as needed) | CHUNK-09 upstream blocker scan | Passed | 2026-06-27 / `d8bba01` | No upstream production blockers found; only tests/runbook added | `d8bba01` |
+| Acceptance evidence | `cargo test --locked --test e2e`; `cargo test --locked -p dropbox-dev`; `cargo clippy --locked --all-targets -- -D warnings` | Passed | 2026-06-27 / `6218f59` | Final master verification: E2E tests passed 9; package tests passed 171; clippy passed; final Env/CLI and E2E rereviews clean; final core fixes re-reviewed through the preserved tombstone path | `6218f59` |
+| Upstream fix/resume evidence (append rows as needed) | Final split review production fixes | Passed | 2026-06-27 / `6218f59` | Final review found scoped production fixes after CHUNK-09: `62fa204` sync partial/tombstone handling; `a321976` env CLI/audit skip handling; `7c5950e`/`cd35639` equal-time tombstone snapshot/replay handling; `a376c4e` foreground DeleteLocal consumer; `6218f59` preserved skipped tombstone paths during unrelated manifest publish | `62fa204`, `a321976`, `7c5950e`, `cd35639`, `a376c4e`, `6218f59` |
 | Queued `sync pause`/`sync resume` gate | `cargo test --locked --test e2e queued_pause_resume_keeps_content_off_transport_until_resume` | Passed | 2026-06-27 / `d8bba01` | Queued changes stay off transport while paused and drain on resume | `d8bba01` |
 | Stale-worktree/missed-git-pull E2E gate | `cargo test --locked --test e2e git_metadata_stale_worktree_and_failure_injection_are_observable_and_recoverable` | Passed | 2026-06-27 / `d8bba01` | Stale worktree observable/recoverable through product sync path | `d8bba01` |
 | Failure-injection gate (daemon kill, network partition, offline hydration source) | `cargo test --locked --test e2e daemon_process_interruption_restart_recovers_foreground_sync` plus failure-injection E2E | Passed | 2026-06-27 / `d8bba01` | Daemon interruption/restart, network partition/heal, and offline hydration source covered | `d8bba01` |
@@ -348,6 +348,6 @@ Dependency order: `01 → {02, 03} → 04 → 05 → {06, 07} → 08 → 09`. CH
 | CHUNK-06-LAZY-HYDRATION-VFS | `[x]` | 05 | 07 | U6 resolved; merged `f27cfa6` | accepted |
 | CHUNK-07-ENV-SYNC | `[x]` | 05 | 06 | U7 resolved; merged `7de9fb2` | accepted |
 | CHUNK-08-CLI-DAEMON-UX | `[x]` | 04, 05, 06, 07 | — | U8 resolved; merged `82cc44b` | accepted |
-| CHUNK-09-E2E-HARDENING | `[x]` | 08 | — | U9 consumed; merged `d8bba01` | accepted |
+| CHUNK-09-E2E-HARDENING | `[x]` | 08 | — | U9 consumed; merged `d8bba01`; final split fixes through `6218f59` | accepted |
 
-**Current resume state:** All chunks CHUNK-01 through CHUNK-09 are complete, verified, reviewed, and merged. No unchecked doable checklist tasks remain.
+**Current resume state:** All chunks CHUNK-01 through CHUNK-09 are complete, verified, reviewed, merged, and final split-review fixes are recorded through `6218f59`. No unchecked doable checklist tasks remain.
