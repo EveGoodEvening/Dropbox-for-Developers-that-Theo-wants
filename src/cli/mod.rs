@@ -19,9 +19,10 @@ use crate::foundation::{
 };
 use crate::policy::{Action, Policy, SYNCIGNORE_FILE_NAME};
 use crate::sync::{
-    replay_operation_log, store_blob_id_for_content, write_content_atomically, ConvergenceAction,
-    ConvergenceEngine, ConvergencePlan, EndpointSecurityConfig, FileBackedSyncStore,
-    OperationKind, OperationRecord, ReplayState, SharedSecret, TransportMode,
+    filter_manifest_replay_tombstones, replay_operation_log, store_blob_id_for_content,
+    write_content_atomically, ConvergenceAction, ConvergenceEngine, ConvergencePlan,
+    EndpointSecurityConfig, FileBackedSyncStore, OperationKind, OperationRecord, ReplayState,
+    SharedSecret, TransportMode,
 };
 use crate::vfs::{
     AccessLatency, HydrationRequest, Hydrator, VfsAccessError, VfsMount, VfsResult,
@@ -1019,6 +1020,7 @@ fn recover_stale_worktree(runtime: &CliRuntime) -> Result<String, SyncError> {
         let _ = controller.record_error(&sync_error.to_string());
         sync_error
     })?;
+    let replay = replay_operation_log(&operations);
     let Some(remote_manifest) = latest_remote_manifest(&store, &operations)? else {
         let mut output = String::new();
         push_kv(&mut output, "recover_status", "noop");
@@ -1026,7 +1028,6 @@ fn recover_stale_worktree(runtime: &CliRuntime) -> Result<String, SyncError> {
         return Ok(output);
     };
 
-    let replay = replay_operation_log(&operations);
     let engine = ConvergenceEngine::new(runtime.config.machine_id.clone(), runtime.platform.clone());
     let plan = engine.plan_snapshot_with_remote_state(
         &snapshot,
@@ -2082,10 +2083,11 @@ fn latest_remote_manifest(
                 operation.id
             ))
         })?;
-    store
+    let manifest = store
         .fetch_manifest(manifest_id)
-        .map(Some)
-        .map_err(|error| SyncError::cli(error.to_string()))
+        .map_err(|error| SyncError::cli(error.to_string()))?;
+    let replay = replay_operation_log(operations);
+    Ok(Some(filter_manifest_replay_tombstones(&manifest, &replay)))
 }
 
 fn next_sequence(operations: &[OperationRecord]) -> u64 {
@@ -2198,8 +2200,8 @@ fn plan_current_worktree(
     let operations = store
         .load_operation_log()
         .map_err(|error| SyncError::cli(error.to_string()))?;
-    let remote_manifest = latest_remote_manifest(&store, &operations)?;
     let replay = replay_operation_log(&operations);
+    let remote_manifest = latest_remote_manifest(&store, &operations)?;
     let engine = ConvergenceEngine::new(runtime.config.machine_id.clone(), runtime.platform.clone());
     let local_events = local_delete_rename_events(
         state.last_local_manifest.as_ref(),
@@ -4990,6 +4992,49 @@ mod tests {
     }
 
     #[test]
+    fn hydrate_filters_stale_manifest_file_after_replay_tombstone() {
+        let fixture = Fixture::new("hydrate-tombstone-file");
+        fixture.seed_remote_file("manifest-stale-file", "deleted.txt", b"stale", 1);
+        fixture.append_remote_delete_tombstone_only("deleted.txt", 3, 20);
+
+        let hydrate = fixture.run(["dropbox-dev", "hydrate"]).unwrap();
+
+        assert_contains(&hydrate, "hydrate_status=ok");
+        assert_contains(&hydrate, "manifest_source=remote");
+        assert_contains(&hydrate, "placeholder_count=0");
+
+        let error = fixture
+            .run(["dropbox-dev", "hydrate", "deleted.txt"])
+            .expect_err("tombstoned stale manifest file should not hydrate")
+            .to_string();
+        assert_contains(&error, "path is not materialized");
+    }
+
+    #[test]
+    fn hydrate_filters_stale_manifest_directory_child_after_replay_tombstone() {
+        let fixture = Fixture::new("hydrate-tombstone-directory");
+        fixture.seed_remote_file(
+            "manifest-stale-directory",
+            "deleted-dir/child.txt",
+            b"stale child",
+            1,
+        );
+        fixture.append_remote_delete_tombstone_only("deleted-dir", 3, 20);
+
+        let hydrate = fixture.run(["dropbox-dev", "hydrate"]).unwrap();
+
+        assert_contains(&hydrate, "hydrate_status=ok");
+        assert_contains(&hydrate, "manifest_source=remote");
+        assert_contains(&hydrate, "placeholder_count=0");
+
+        let error = fixture
+            .run(["dropbox-dev", "hydrate", "deleted-dir/child.txt"])
+            .expect_err("child under replay-tombstoned directory should not hydrate")
+            .to_string();
+        assert_contains(&error, "path is not materialized");
+    }
+
+    #[test]
     fn stale_worktree_is_observable_recoverable_and_new_stale_is_not_masked() {
         let fixture = Fixture::new("stale");
         let bytes = b"remote contents";
@@ -5391,6 +5436,27 @@ mod tests {
             );
             store.append_operation(&manifest_operation).unwrap();
             blob_id
+        }
+
+        fn append_remote_delete_tombstone_only(
+            &self,
+            relative: &str,
+            sequence: u64,
+            modified_unix_millis: u64,
+        ) {
+            let remote_machine_id = self.remote_peer_machine_id();
+            let store = self.remote_peer_store(&remote_machine_id);
+            let delete_operation = OperationRecord::from_draft(
+                OperationDraft::new(
+                    sequence,
+                    self.runtime.project_id.clone(),
+                    remote_machine_id,
+                    OperationKind::DeletePath,
+                    relative,
+                )
+                .modified_unix_millis(modified_unix_millis),
+            );
+            store.append_operation(&delete_operation).unwrap();
         }
 
         fn append_remote_delete_tombstone(

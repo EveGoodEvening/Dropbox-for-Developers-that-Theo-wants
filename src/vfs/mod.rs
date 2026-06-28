@@ -918,6 +918,7 @@ fn insert_synthetic_parents(nodes: &mut BTreeMap<String, VfsNode>, path: &str) {
 mod tests {
     use super::*;
     use crate::catalog::TreeEntry;
+    use crate::sync::{filter_manifest_replay_tombstones, DeleteTombstone};
     use std::collections::BTreeMap;
 
     #[derive(Debug, Default)]
@@ -957,6 +958,19 @@ mod tests {
 
     fn manifest(id: &str, entries: Vec<TreeEntry>) -> TreeManifest {
         TreeManifest::new(id, "project-alpha", entries)
+    }
+
+    fn replay_with_tombstone(path: &str, modified_unix_millis: u64) -> ReplayState {
+        let mut replay = ReplayState::default();
+        replay.tombstones.insert(
+            path.to_owned(),
+            DeleteTombstone {
+                path: path.to_owned(),
+                modified_unix_millis,
+                source_machine_id: "machine-deleter".to_owned(),
+            },
+        );
+        replay
     }
 
     #[test]
@@ -1322,6 +1336,67 @@ mod tests {
             mount.node("bin/tool").expect("node").hydration_status,
             HydrationStatus::NotHydrated
         );
+    }
+
+    #[test]
+    fn filtered_manifest_does_not_materialize_or_fetch_stale_tombstoned_file() {
+        let stale_tree = manifest(
+            "manifest-stale-file",
+            vec![TreeEntry::file(
+                "deleted.txt",
+                5,
+                10,
+                0o644,
+                Some("stale".to_owned()),
+            )],
+        );
+        let replay = replay_with_tombstone("deleted.txt", 20);
+        let filtered_tree = filter_manifest_replay_tombstones(&stale_tree, &replay);
+        let metadata = VfsSyncMetadata::from_replay_state(&replay);
+        let mut mount = VfsMount::materialize(&filtered_tree, &metadata);
+        let mut hydrator = CountingHydrator::default().with_blob("stale", b"stale");
+
+        assert!(mount.node("deleted.txt").is_none());
+        assert!(mount.placeholder_records().is_empty());
+        assert_eq!(
+            mount
+                .read_file("deleted.txt", &mut hydrator)
+                .expect_err("stale tombstoned file should not materialize")
+                .failure_mode,
+            AccessFailureMode::NotFound
+        );
+        assert_eq!(hydrator.total_fetches(), 0);
+    }
+
+    #[test]
+    fn filtered_manifest_does_not_materialize_or_fetch_directory_child_under_tombstone() {
+        let stale_tree = manifest(
+            "manifest-stale-directory",
+            vec![TreeEntry::file(
+                "deleted-dir/child.txt",
+                5,
+                10,
+                0o644,
+                Some("stale-child".to_owned()),
+            )],
+        );
+        let replay = replay_with_tombstone("deleted-dir", 20);
+        let filtered_tree = filter_manifest_replay_tombstones(&stale_tree, &replay);
+        let metadata = VfsSyncMetadata::from_replay_state(&replay);
+        let mut mount = VfsMount::materialize(&filtered_tree, &metadata);
+        let mut hydrator = CountingHydrator::default().with_blob("stale-child", b"stale");
+
+        assert!(mount.node("deleted-dir").is_none());
+        assert!(mount.node("deleted-dir/child.txt").is_none());
+        assert!(mount.placeholder_records().is_empty());
+        assert_eq!(
+            mount
+                .read_file("deleted-dir/child.txt", &mut hydrator)
+                .expect_err("stale child under tombstoned directory should not materialize")
+                .failure_mode,
+            AccessFailureMode::NotFound
+        );
+        assert_eq!(hydrator.total_fetches(), 0);
     }
 
     #[test]

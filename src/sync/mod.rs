@@ -1747,6 +1747,34 @@ fn tombstone_obsoletes_manifest_entry(
         || ancestor_tombstone_obsoletes_manifest_entry(remote_state, entry)
 }
 
+pub fn filter_manifest_replay_tombstones(
+    manifest: &TreeManifest,
+    remote_state: &ReplayState,
+) -> TreeManifest {
+    let mut entries = Vec::with_capacity(manifest.entries.len());
+    for entry in &manifest.entries {
+        if !tombstone_obsoletes_manifest_entry(Some(remote_state), entry) {
+            entries.push(entry.clone());
+        }
+    }
+    TreeManifest::new(manifest.id.clone(), manifest.project_id.clone(), entries)
+}
+
+fn entries_by_path_filtering_replay_tombstones(
+    manifest: &TreeManifest,
+    remote_state: Option<&ReplayState>,
+) -> BTreeMap<String, TreeEntry> {
+    let Some(remote_state) = remote_state else {
+        return entries_by_path(manifest);
+    };
+    manifest
+        .entries
+        .iter()
+        .filter(|entry| !tombstone_obsoletes_manifest_entry(Some(remote_state), entry))
+        .map(|entry| (entry.path.clone(), entry.clone()))
+        .collect()
+}
+
 fn ancestor_tombstone_obsoletes_manifest_entry(
     remote_state: &ReplayState,
     entry: &TreeEntry,
@@ -1854,7 +1882,7 @@ impl ConvergenceEngine {
         policy: &Policy,
     ) -> ConvergencePlan {
         let remote_entries = remote_manifest
-            .map(entries_by_path)
+            .map(|manifest| entries_by_path_filtering_replay_tombstones(manifest, remote_state))
             .unwrap_or_default();
         let local_paths = snapshot
             .entries
