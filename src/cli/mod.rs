@@ -2172,6 +2172,12 @@ fn path_descends_from_any(path: &str, parents: &BTreeSet<String>) -> bool {
     parents.iter().any(|parent| is_descendant_path(path, parent))
 }
 
+fn path_matches_or_descends_from_any(path: &str, parents: &BTreeSet<String>) -> bool {
+    parents
+        .iter()
+        .any(|parent| path == parent.as_str() || is_descendant_path(path, parent))
+}
+
 fn operation_touches_any_path(operation: &OperationRecord, paths: &BTreeSet<String>) -> bool {
     paths.contains(&operation.path)
         || operation
@@ -2324,12 +2330,15 @@ fn execute_planned_foreground_sync_pass(
     let mut remote_changed = false;
     let mut local_tree_changed_by_remote = false;
     let mut deleted_local_tree_roots = BTreeSet::new();
+    let mut preserved_local_tree_roots = BTreeSet::new();
 
     for action in &planned.plan.actions {
         if convergence_action_touches_any_path(action, &blocked_conflict_paths) {
             continue;
         }
-        if convergence_action_descends_from_any_path(action, &deleted_local_tree_roots) {
+        if convergence_action_descends_from_any_path(action, &deleted_local_tree_roots)
+            || convergence_action_descends_from_any_path(action, &preserved_local_tree_roots)
+        {
             continue;
         }
 
@@ -2398,6 +2407,9 @@ fn execute_planned_foreground_sync_pass(
                     }
                     ForegroundDeleteLocalOutcome::PreservedChanged => {
                         preserved_manifest_paths.insert(path.clone());
+                        if delete_local_was_directory {
+                            preserved_local_tree_roots.insert(path.clone());
+                        }
                         false
                     }
                 };
@@ -2848,7 +2860,12 @@ fn delete_foreground_local_path(
     };
     if current_entry != planned_entry
         || !remote_tombstone_obsoletes_snapshot_entry(remote_state, current_entry)
-        || !foreground_delete_descendants_safe(remote_state, &current_snapshot, &relative)
+        || !foreground_delete_descendants_safe(
+            remote_state,
+            planned_snapshot,
+            &current_snapshot,
+            &relative,
+        )
     {
         return Ok(ForegroundDeleteLocalOutcome::PreservedChanged);
     }
@@ -2871,18 +2888,23 @@ fn delete_foreground_local_path(
 
 fn foreground_delete_descendants_safe(
     remote_state: &ReplayState,
-    snapshot: &IndexedSnapshot,
+    planned_snapshot: &IndexedSnapshot,
+    current_snapshot: &IndexedSnapshot,
     delete_root: &str,
 ) -> bool {
-    snapshot
+    current_snapshot
         .entries
         .iter()
         .filter(|entry| is_descendant_path(entry.path(), delete_root))
-        .all(|entry| {
-            entry.allows_content_sync()
+        .all(|current_entry| {
+            let Some(planned_entry) = planned_snapshot.entry(current_entry.path()) else {
+                return false;
+            };
+            current_entry == planned_entry
+                && current_entry.allows_content_sync()
                 && remote_tombstone_obsoletes_snapshot_entry_at_or_under(
                     remote_state,
-                    entry,
+                    current_entry,
                     delete_root,
                 )
         })
@@ -3122,14 +3144,16 @@ fn foreground_manifest_entries(
             manifest
                 .entries
                 .iter()
-                .filter(|entry| preserved_manifest_paths.contains(&entry.path))
+                .filter(|entry| {
+                    path_matches_or_descends_from_any(&entry.path, preserved_manifest_paths)
+                })
                 .map(|entry| (entry.path.clone(), entry.clone()))
                 .collect::<BTreeMap<_, _>>()
         })
         .unwrap_or_default();
 
     for entry in snapshot.content_sync_entries() {
-        if preserved_manifest_paths.contains(entry.path()) {
+        if path_matches_or_descends_from_any(entry.path(), preserved_manifest_paths) {
             continue;
         }
 
@@ -4379,6 +4403,91 @@ mod tests {
             unrelated_entry.content_hash.as_deref(),
             Some(sync_content_hash(unrelated_bytes).as_str()),
         );
+    }
+
+    #[test]
+    fn foreground_pass_preserves_changed_descendant_under_tombstoned_directory() {
+        let fixture = Fixture::new("foreground-preserve-dir-tombstone-descendant");
+        let remote_bytes = b"remote child deleted with directory elsewhere";
+        let changed_bytes = b"local descendant edit after planning must survive";
+        let unrelated_bytes = b"unrelated foreground push";
+        fixture.seed_remote_file_with_metadata(
+            "manifest-preserve-dir-tombstone-before",
+            "stale/child.txt",
+            remote_bytes,
+            1,
+            10,
+            0o644,
+        );
+        fixture.run(["dropbox-dev", "sync", "start"]).unwrap();
+        let root = &fixture.runtime.config.root_paths[0];
+        let stale_dir = root.join("stale");
+        let child_path = stale_dir.join("child.txt");
+        assert_eq!(fs::read(&child_path).unwrap(), remote_bytes);
+
+        fixture.append_remote_delete_tombstone(
+            "manifest-preserve-dir-tombstone-after",
+            "stale",
+            3,
+            u64::MAX,
+        );
+        fixture.write_file("unrelated.txt", unrelated_bytes);
+        let controller = DaemonController::new(&fixture.runtime);
+        let state = controller.load_state().unwrap();
+        let planned = plan_current_worktree(&fixture.runtime, &state).unwrap();
+        assert!(planned.plan.actions.iter().any(|action| matches!(
+            action,
+            ConvergenceAction::DeleteLocal { path } if path == "stale"
+        )));
+        assert!(planned.plan.actions.iter().any(|action| matches!(
+            action,
+            ConvergenceAction::PushContent { path, .. } if path == "unrelated.txt"
+        )));
+
+        fixture.write_file("stale/child.txt", changed_bytes);
+        let (report, applied_actions, unsupported_actions, _final_manifest) =
+            execute_planned_foreground_sync_pass(&fixture.runtime, &state, planned).unwrap();
+
+        assert!(stale_dir.is_dir());
+        assert_eq!(fs::read(&child_path).unwrap(), changed_bytes);
+        assert_eq!(applied_actions, 1);
+        assert_eq!(unsupported_actions, 0);
+        assert_eq!(report.status, WorktreeStatus::Stale);
+        assert_eq!(report.queued_count, 0);
+        assert!(report.action_count > 0);
+        assert_eq!(
+            foreground_pass_error(
+                unsupported_actions,
+                report.queued_count,
+                report.status == WorktreeStatus::Stale,
+            )
+            .as_deref(),
+            Some("foreground sync pass left convergence actions pending"),
+        );
+        let pending = plan_current_worktree(&fixture.runtime, &state).unwrap();
+        assert!(pending.plan.actions.iter().any(|action| matches!(
+            action,
+            ConvergenceAction::DeleteLocal { path } if path == "stale"
+        )));
+
+        let store = connect_transport(&fixture.runtime).unwrap();
+        let operations = store.load_operation_log().unwrap();
+        assert!(operations.iter().any(|operation| {
+            operation.kind == OperationKind::PutContent
+                && operation.path == "unrelated.txt"
+                && operation.payload_id.as_deref()
+                    == Some(sync_content_hash(unrelated_bytes).as_str())
+        }));
+        assert!(!operations.iter().any(|operation| {
+            operation.kind == OperationKind::PutContent
+                && operation.path == "stale/child.txt"
+                && operation.payload_id.as_deref()
+                    == Some(sync_content_hash(changed_bytes).as_str())
+        }));
+        let manifest = latest_remote_manifest(&store, &operations).unwrap().unwrap();
+        assert!(!manifest.entries.iter().any(|entry| {
+            entry.path == "stale" || is_descendant_path(&entry.path, "stale")
+        }));
     }
 
     #[test]
