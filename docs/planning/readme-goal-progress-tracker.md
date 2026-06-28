@@ -17,9 +17,9 @@
 
 ## Next Up
 
-CHUNK-05 is merged on `master` at `3379287`. Current dependency-ready unchecked chunks are CHUNK-06 and CHUNK-07.
+CHUNK-06 and CHUNK-07 are merged on `master` at `f27cfa6` and `7de9fb2`. Current dependency-ready unchecked chunk is CHUNK-08.
 
-Task-level `👉 NEXT` markers are active on CHUNK-06 `Choose VFS approach...` and CHUNK-07 `Choose encryption key management...`.
+Task-level `👉 NEXT` marker is active on CHUNK-08 `Implement CLI commands...` / U8 supervision resolution.
 
 Dependency order: `01 → {02, 03} → 04 → 05 → {06, 07} → 08 → 09`. CHUNK-04 and CHUNK-05 are serialized (04 before 05); there is no 04 ∥ 05 parallel wave. When the `{02, 03}` or `{06, 07}` waves become dependency-ready, this section and the task lists must show multiple simultaneous `👉 NEXT` markers.
 
@@ -198,64 +198,64 @@ Dependency order: `01 → {02, 03} → 04 → 05 → {06, 07} → 08 → 09`. CH
 
 ## CHUNK-06-LAZY-HYDRATION-VFS
 
-- **Status:** `[ ]` not started
-- **Owner branch / worktree:** —
-- **Commit(s):** —
-- **Review status:** pending
-- **Blocker / deferred reason:** U6 (VFS approach — FUSE/platform native vs editor plugin vs stub files) — **blocker**; verification approach depends on it (checklist item + review criterion).
+- **Status:** `[x]` done — implementation verified, review accepted, and merged
+- **Owner branch / worktree:** `chunk-06-lazy-hydration-vfs` / `../dropbox-dev-chunk-06-lazy-hydration-vfs` (merged; worktree removal pending)
+- **Commit(s):** `f27cfa6` (`feat(vfs): add lazy hydration cache`)
+- **Review status:** accepted — VFS and wave integration reviews clean after fixes
+- **Blocker / deferred reason:** U6 resolved 2026-06-27: transparent stub-file/metadata-cache approach with frozen Hydrator/VfsMount seam for later FUSE/native adapters. No CHUNK-06 blocker remains.
 - **Depends on:** CHUNK-05-SYNC-STORE-CONVERGENCE (catalog/policy/foundation are transitive through CHUNK-05 unless this chunk deliberately records a direct import)
 - **Parallel with:** CHUNK-07-ENV-SYNC
 
 ### Tasks
-- [ ] Choose VFS approach (resolve U6) with rationale (PR + tracker)
-- [ ] Implement structure-first sync with placeholder metadata (no content fetched)
-- [ ] Implement on-demand content hydration on file access
-- [ ] Integration test: fresh machine shows full structure with zero content fetched
-- [ ] Integration test: reading placeholder triggers exactly one fetch + caches
-- [ ] Integration test: remote update invalidates cached content (coherency)
-- [ ] Hydration test: all policy outcomes (`ignore`, `rebuild-locally`, `platform-pin`) and Git metadata/submodule outcomes enforced through CHUNK-05's exposed contract; no direct CHUNK-03 import unless explicitly recorded
-- [ ] Document access latency + failure modes
-- [ ] Record verification evidence (see subsection below)
+- [x] Choose VFS approach (resolve U6) with rationale (PR + tracker)
+- [x] Implement structure-first sync with placeholder metadata (no content fetched)
+- [x] Implement on-demand content hydration on file access
+- [x] Integration test: fresh machine shows full structure with zero content fetched
+- [x] Integration test: reading placeholder triggers exactly one fetch + caches
+- [x] Integration test: remote update invalidates cached content (coherency)
+- [x] Hydration test: all policy outcomes (`ignore`, `rebuild-locally`, `platform-pin`) and Git metadata/submodule outcomes enforced through CHUNK-05's exposed contract; no direct CHUNK-03 import unless explicitly recorded
+- [x] Document access latency + failure modes
+- [x] Record verification evidence (see subsection below)
 
 ### Verification evidence
 
 | Slot | Command/scenario | Result | Date / SHA | Output artifact / pasted summary | Tracker/evidence commit(s) |
 |------|------------------|--------|------------|----------------------------------|----------------------------|
-| Acceptance evidence | _ | _ | _ | _ | _ |
-| Additional task evidence (append rows as needed) | _ | _ | _ | _ | _ |
+| Acceptance evidence | `cargo test --locked -p dropbox-dev vfs::`; `cargo clippy --locked --all-targets -- -D warnings` | Passed | 2026-06-27 / `f27cfa6` | VFS tests passed 8 tests; clippy passed; final wave acceptance returned clean | `f27cfa6` |
+| Additional task evidence | Staged `src/vfs/mod.rs` review | Passed | 2026-06-27 / `f27cfa6` | Stub-file/metadata-cache VFS; zero-fetch structure materialization; one-fetch hydration cache; coherency invalidation; CHUNK-05 policy/Git enforcement; conflict winner hydration; platform redirected denial | `f27cfa6` |
 
 ---
 
 ## CHUNK-07-ENV-SYNC
 
-- **Status:** `[ ]` not started
-- **Owner branch / worktree:** —
-- **Commit(s):** —
-- **Review status:** pending
-- **Blocker / deferred reason:** U7 (encryption key management) — **blocker**; cannot ship env sync without it (checklist item + review criterion).
+- **Status:** `[x]` done — implementation verified, review accepted, and merged
+- **Owner branch / worktree:** `chunk-07-env-sync` / `../dropbox-dev-chunk-07-env-sync` (merged; worktree removal pending)
+- **Commit(s):** `7de9fb2` (`feat(env): add encrypted environment sync`)
+- **Review status:** accepted — env and wave integration reviews clean after fixes
+- **Blocker / deferred reason:** U7 resolved 2026-06-27: per-machine keyring abstraction with local master key material supplied out-of-band, target-only override secrets, key versions, and rotation. No CHUNK-07 blocker remains.
 - **Depends on:** CHUNK-05-SYNC-STORE-CONVERGENCE
 - **Parallel with:** CHUNK-06-LAZY-HYDRATION-VFS
 
 ### Tasks
-- [ ] Choose encryption key management (resolve U7) with rationale (PR + tracker)
-- [ ] Define env payload schema carried over CHUNK-05's generic authenticated/encrypted transport contract (no env-specific transport bypass)
-- [ ] Implement env var sync with per-machine override semantics
-- [ ] Implement env materialization usable by developer processes through the documented shell/session/daemon-launch mechanism
-- [ ] Implement encryption at rest + env-specific in-transit/no-plaintext checks over CHUNK-05 transport
-- [ ] Security test: secrets encrypted at rest; env plaintext never appears in transport captures/logs/artifacts/tracker evidence
-- [ ] Key-management test: provisioning/rotation; a machine without the key cannot decrypt
-- [ ] Unit/integration test: env var on machine A appears on B with overrides honored and materialized for a developer process
-- [ ] Audit test: every env sync op emits auditable record
-- [ ] Env sync conflicts reuse resolved U5 policy (last-writer-wins + conflict sidecar)
-- [ ] Write `env_*` initial migration on CHUNK-01's empty baseline; verify apply + rollback
-- [ ] Record verification evidence (see subsection below)
+- [x] Choose encryption key management (resolve U7) with rationale (PR + tracker)
+- [x] Define env payload schema carried over CHUNK-05's generic authenticated/encrypted transport contract (no env-specific transport bypass)
+- [x] Implement env var sync with per-machine override semantics
+- [x] Implement env materialization usable by developer processes through the documented shell/session/daemon-launch mechanism
+- [x] Implement encryption at rest + env-specific in-transit/no-plaintext checks over CHUNK-05 transport
+- [x] Security test: secrets encrypted at rest; env plaintext never appears in transport captures/logs/artifacts/tracker evidence
+- [x] Key-management test: provisioning/rotation; a machine without the key cannot decrypt
+- [x] Unit/integration test: env var on machine A appears on B with overrides honored and materialized for a developer process
+- [x] Audit test: every env sync op emits auditable record
+- [x] Env sync conflicts reuse resolved U5 policy (last-writer-wins + conflict sidecar)
+- [x] Write `env_*` initial migration on CHUNK-01's empty baseline; verify apply + rollback
+- [x] Record verification evidence (see subsection below)
 
 ### Verification evidence
 
 | Slot | Command/scenario | Result | Date / SHA | Output artifact / pasted summary | Tracker/evidence commit(s) |
 |------|------------------|--------|------------|----------------------------------|----------------------------|
-| Acceptance evidence | _ | _ | _ | _ | _ |
-| Additional task evidence (append rows as needed) | _ | _ | _ | _ | _ |
+| Acceptance evidence | `cargo test --locked -p dropbox-dev env::`; `cargo clippy --locked --all-targets -- -D warnings` | Passed | 2026-06-27 / `7de9fb2` | Env tests passed 12 tests; clippy passed; final wave acceptance returned clean | `7de9fb2` |
+| Additional task evidence | Staged `src/env/mod.rs` review | Passed | 2026-06-27 / `7de9fb2` | Env payload schema over CHUNK-05 transport; per-machine overrides; target-only override encryption; never-sync policy; audit timestamps; materialization; conflict sidecars; env migration | `7de9fb2` |
 
 ---
 
@@ -345,9 +345,9 @@ Dependency order: `01 → {02, 03} → 04 → 05 → {06, 07} → 08 → 09`. CH
 | CHUNK-03-IGNORE-PLATFORM-POLICY | `[x]` | 01 | 02 | U3 resolved; merged `8e73304` | accepted |
 | CHUNK-04-WATCHER-INDEXER | `[x]` | 02, 03 | — | U4 resolved; merged `97351fc` | accepted |
 | CHUNK-05-SYNC-STORE-CONVERGENCE | `[x]` | 04, 03 | — | U5 resolved; U10 resolved; merged `3379287` | accepted |
-| CHUNK-06-LAZY-HYDRATION-VFS | `[ ]` | 05 | 07 | U6 (blocker) | pending |
-| CHUNK-07-ENV-SYNC | `[ ]` | 05 | 06 | U7 (blocker) | pending |
+| CHUNK-06-LAZY-HYDRATION-VFS | `[x]` | 05 | 07 | U6 resolved; merged `f27cfa6` | accepted |
+| CHUNK-07-ENV-SYNC | `[x]` | 05 | 06 | U7 resolved; merged `7de9fb2` | accepted |
 | CHUNK-08-CLI-DAEMON-UX | `[ ]` | 04, 05, 06, 07 | — | U8 (deferred) | pending |
 | CHUNK-09-E2E-HARDENING | `[ ]` | 08 | — | none (U9 resolved by CHUNK-01; consumed after merge) | pending |
 
-**Current resume state:** CHUNK-05 is merged. CHUNK-06 and CHUNK-07 are dependency-ready in the parallel wave; task-level `👉 NEXT` markers are active on both first unchecked tasks.
+**Current resume state:** CHUNK-06 and CHUNK-07 are merged. CHUNK-08 is dependency-ready; task-level `👉 NEXT` marker is active on its first unchecked task.
