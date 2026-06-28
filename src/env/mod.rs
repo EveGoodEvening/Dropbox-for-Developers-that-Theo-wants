@@ -1277,6 +1277,7 @@ pub enum EnvAuditOperation {
     PayloadFetched,
     PayloadDecrypted,
     ValueApplied,
+    ValueSkipped,
     ConflictSidecarRecorded,
     Materialized,
     DecryptFailed,
@@ -1290,6 +1291,7 @@ impl EnvAuditOperation {
             Self::PayloadFetched => "payload-fetched",
             Self::PayloadDecrypted => "payload-decrypted",
             Self::ValueApplied => "value-applied",
+            Self::ValueSkipped => "value-skipped",
             Self::ConflictSidecarRecorded => "conflict-sidecar-recorded",
             Self::Materialized => "materialized",
             Self::DecryptFailed => "decrypt-failed",
@@ -1300,6 +1302,7 @@ impl EnvAuditOperation {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum EnvAuditStatus {
     Succeeded,
+    Skipped,
     Failed,
 }
 
@@ -1307,6 +1310,7 @@ impl EnvAuditStatus {
     pub fn as_wire(&self) -> &'static str {
         match self {
             Self::Succeeded => "succeeded",
+            Self::Skipped => "skipped",
             Self::Failed => "failed",
         }
     }
@@ -1743,15 +1747,20 @@ impl<P: EnvKeyProvider> EnvReplica<P> {
         let event_unix_millis = record.modified_unix_millis;
         let payload_id = artifact.as_ref().map(|artifact| artifact.payload_id.clone());
         let outcome = self.state.apply_record_with_artifact(record, artifact)?;
+        let (operation, status) = if outcome.applied {
+            (EnvAuditOperation::ValueApplied, EnvAuditStatus::Succeeded)
+        } else {
+            (EnvAuditOperation::ValueSkipped, EnvAuditStatus::Skipped)
+        };
         self.audit(EnvAuditDraft {
-            operation: EnvAuditOperation::ValueApplied,
+            operation,
             event_unix_millis,
             actor_machine_id: self.machine_id.clone(),
             env_name: Some(env_name.clone()),
             scope: Some(scope.clone()),
             payload_id: payload_id.clone(),
             key_version: Some(key_version.clone()),
-            status: EnvAuditStatus::Succeeded,
+            status,
         });
         if outcome.conflict_sidecar.is_some() {
             self.audit(EnvAuditDraft {
@@ -2795,6 +2804,54 @@ mod tests {
         assert!(!redacted_lines.contains("audit-secret"));
         assert!(redacted_lines.contains(ENV_REDACTED_VALUE));
         assert!(redacted_lines.contains("event_unix_millis%3D1000"));
+    }
+
+    #[test]
+    fn audit_log_marks_non_applied_conflict_loser_without_value_applied() {
+        let fixture = Fixture::new(&["machine-a"]);
+        let machine_a = fixture.machine("machine-a");
+        let store_a = fixture.store(&machine_a);
+        let provider_a = provider(&machine_a, b"env-key-v1");
+        let mut replica_a = EnvReplica::new("project", machine_a, provider_a).unwrap();
+
+        let winner_report = replica_a
+            .set_shared(&store_a, "AUDIT_CONFLICT", "winner-secret", 2_000)
+            .unwrap();
+        let loser_report = replica_a
+            .set_shared(&store_a, "AUDIT_CONFLICT", "loser-secret", 1_000)
+            .unwrap();
+        let entries = replica_a.audit_log().entries();
+
+        assert!(entries.iter().any(|entry| {
+            entry.operation == EnvAuditOperation::ValueApplied
+                && entry.payload_id.as_deref() == Some(winner_report.payload_id.as_str())
+                && entry.status == EnvAuditStatus::Succeeded
+        }));
+        assert!(!entries.iter().any(|entry| {
+            entry.operation == EnvAuditOperation::ValueApplied
+                && entry.payload_id.as_deref() == Some(loser_report.payload_id.as_str())
+        }));
+        assert!(entries.iter().any(|entry| {
+            entry.operation == EnvAuditOperation::ValueSkipped
+                && entry.payload_id.as_deref() == Some(loser_report.payload_id.as_str())
+                && entry.status == EnvAuditStatus::Skipped
+        }));
+        assert!(entries.iter().any(|entry| {
+            entry.operation == EnvAuditOperation::ConflictSidecarRecorded
+                && entry.payload_id.as_deref() == Some(loser_report.payload_id.as_str())
+                && entry.status == EnvAuditStatus::Succeeded
+        }));
+        assert_eq!(replica_a.state().conflict_sidecars().len(), 1);
+        assert_eq!(
+            replica_a
+                .state()
+                .record(&EnvScope::shared(), "AUDIT_CONFLICT")
+                .unwrap()
+                .value
+                .expose_for_materialization(),
+            "winner-secret"
+        );
+        assert!(!replica_a.audit_log().to_redacted_lines().contains("loser-secret"));
     }
 
     #[test]

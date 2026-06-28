@@ -9,8 +9,8 @@ use crate::catalog::{
     HydrationStatus, TreeEntry, TreeEntryKind, TreeManifest, CATALOG_MANIFEST_FORMAT_VERSION,
 };
 use crate::env::{
-    EnvKeyProvider, EnvKeyVersionRecord, EnvMachineOverrideSecret, EnvMasterKey, EnvReplica,
-    EnvSyncError, ENV_REDACTED_VALUE,
+    EnvKeyProvider, EnvKeyVersionRecord, EnvMachineOverrideSecret, EnvMasterKey,
+    EnvNeverSyncPolicy, EnvReplica, EnvSyncError, ENV_REDACTED_VALUE,
 };
 use crate::foundation::{
     Config, ConfigError, EnvError, InMemoryMigrationStore, LogEvent, LogLevel, Logger,
@@ -36,6 +36,7 @@ use std::fmt::Write as _;
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 pub const APP_NAME: &str = "dropbox-dev";
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -510,51 +511,376 @@ fn env_command(rest: &[String], runtime: &CliRuntime) -> Result<String, SyncErro
             push_kv(&mut output, "redacted_value", ENV_REDACTED_VALUE);
             Ok(output)
         }
-        "export" => {
-            expect_no_args("env export", remaining)?;
-            let controller = DaemonController::new(runtime);
-            let mut state = controller.load_state()?;
-            let store = connect_transport(runtime).inspect_err(|error| {
-                let _ = controller.record_error(&error.to_string());
-            })?;
-            let mut replica = env_replica(runtime).inspect_err(|error| {
-                let _ = controller.record_error(&error.to_string());
-            })?;
-            let ingest = replica
-                .ingest_from_transport(&store)
-                .map_err(env_error)
-                .inspect_err(|error| {
-                    let _ = controller.record_error(&error.to_string());
-                })?;
-            let materialization = replica
-                .materialize()
-                .map_err(env_error)
-                .inspect_err(|error| {
-                    let _ = controller.record_error(&error.to_string());
-                })?;
-            let conflict_sidecars = replica.state().conflict_sidecars().len();
-            state.env_variables = materialization.launcher_environment.len();
-            state.env_conflicts = conflict_sidecars;
-            state.last_error = None;
-            controller.save_state(&state)?;
-
-            let mut output = String::new();
-            push_kv(&mut output, "env_export_status", "ok");
-            push_kv(&mut output, "fetched_payloads", ingest.fetched_payloads);
-            push_kv(&mut output, "applied_records", ingest.applied_records);
-            push_kv(&mut output, "materialized_variables", state.env_variables);
-            push_kv(&mut output, "conflict_sidecars", state.env_conflicts);
-            push_kv(
-                &mut output,
-                "redacted_session_export",
-                materialization.redacted_session_export,
-            );
-            Ok(output)
-        }
+        "export" => env_export_command(remaining, runtime),
+        "list" => env_list_command(remaining, runtime),
+        "audit" => env_audit_command(remaining, runtime),
+        "publish" => env_publish_command(remaining, runtime),
+        "override" => env_override_command(remaining, runtime),
+        "never-sync" => env_never_sync_command(remaining, runtime),
         other => Err(SyncError::cli(format!(
-            "unknown env subcommand `{other}`; expected status or export"
+            "unknown env subcommand `{other}`; expected status, export, list, audit, publish, override, or never-sync"
         ))),
     }
+}
+
+fn env_export_command(remaining: &[String], runtime: &CliRuntime) -> Result<String, SyncError> {
+    expect_no_args("env export", remaining)?;
+    let controller = DaemonController::new(runtime);
+    let mut state = controller.load_state()?;
+    let store = connect_transport(runtime).inspect_err(|error| {
+        let _ = controller.record_error(&error.to_string());
+    })?;
+    let mut replica = env_replica(runtime).inspect_err(|error| {
+        let _ = controller.record_error(&error.to_string());
+    })?;
+    let ingest = replica
+        .ingest_from_transport(&store)
+        .map_err(env_error)
+        .inspect_err(|error| {
+            let _ = controller.record_error(&error.to_string());
+        })?;
+    let materialization = replica
+        .materialize()
+        .map_err(env_error)
+        .inspect_err(|error| {
+            let _ = controller.record_error(&error.to_string());
+        })?;
+    let conflict_sidecars = replica.state().conflict_sidecars().len();
+    state.env_variables = materialization.launcher_environment.len();
+    state.env_conflicts = conflict_sidecars;
+    state.last_error = None;
+    controller.save_state(&state)?;
+
+    let mut output = String::new();
+    push_kv(&mut output, "env_export_status", "ok");
+    push_kv(&mut output, "fetched_payloads", ingest.fetched_payloads);
+    push_kv(&mut output, "applied_records", ingest.applied_records);
+    push_kv(&mut output, "materialized_variables", state.env_variables);
+    push_kv(&mut output, "conflict_sidecars", state.env_conflicts);
+    push_kv(
+        &mut output,
+        "redacted_session_export",
+        materialization.redacted_session_export,
+    );
+    Ok(output)
+}
+
+fn env_list_command(remaining: &[String], runtime: &CliRuntime) -> Result<String, SyncError> {
+    expect_no_args("env list", remaining)?;
+    let controller = DaemonController::new(runtime);
+    let mut state = controller.load_state()?;
+    let store = connect_transport(runtime).inspect_err(|error| {
+        let _ = controller.record_error(&error.to_string());
+    })?;
+    let mut replica = env_replica(runtime).inspect_err(|error| {
+        let _ = controller.record_error(&error.to_string());
+    })?;
+    let ingest = replica
+        .ingest_from_transport(&store)
+        .map_err(env_error)
+        .inspect_err(|error| {
+            let _ = controller.record_error(&error.to_string());
+        })?;
+    let materialization = replica
+        .materialize()
+        .map_err(env_error)
+        .inspect_err(|error| {
+            let _ = controller.record_error(&error.to_string());
+        })?;
+    let conflict_sidecars = replica.state().conflict_sidecars().len();
+    state.env_variables = materialization.launcher_environment.len();
+    state.env_conflicts = conflict_sidecars;
+    state.last_error = None;
+    controller.save_state(&state)?;
+
+    let records = replica.state().records();
+    let mut output = String::new();
+    push_kv(&mut output, "env_list_status", "ok");
+    push_kv(&mut output, "fetched_payloads", ingest.fetched_payloads);
+    push_kv(&mut output, "applied_records", ingest.applied_records);
+    push_kv(&mut output, "record_count", records.len());
+    push_kv(&mut output, "materialized_variables", state.env_variables);
+    push_kv(&mut output, "conflict_sidecars", state.env_conflicts);
+    push_kv(&mut output, "redacted_value", ENV_REDACTED_VALUE);
+    for (index, record) in records.iter().enumerate() {
+        let prefix = format!("env.{}", index + 1);
+        push_kv(&mut output, &format!("{prefix}.name"), &record.name);
+        push_kv(&mut output, &format!("{prefix}.scope"), record.scope.as_wire());
+        push_kv(
+            &mut output,
+            &format!("{prefix}.author_machine_id"),
+            &record.author_machine_id,
+        );
+        push_kv(&mut output, &format!("{prefix}.key_version"), &record.key_version);
+        push_kv(&mut output, &format!("{prefix}.value"), ENV_REDACTED_VALUE);
+    }
+    Ok(output)
+}
+
+fn env_audit_command(remaining: &[String], runtime: &CliRuntime) -> Result<String, SyncError> {
+    expect_no_args("env audit", remaining)?;
+    let controller = DaemonController::new(runtime);
+    let mut state = controller.load_state()?;
+    let store = connect_transport(runtime).inspect_err(|error| {
+        let _ = controller.record_error(&error.to_string());
+    })?;
+    let mut replica = env_replica(runtime).inspect_err(|error| {
+        let _ = controller.record_error(&error.to_string());
+    })?;
+    let ingest = replica
+        .ingest_from_transport(&store)
+        .map_err(env_error)
+        .inspect_err(|error| {
+            let _ = controller.record_error(&error.to_string());
+        })?;
+    let materialization = replica
+        .materialize()
+        .map_err(env_error)
+        .inspect_err(|error| {
+            let _ = controller.record_error(&error.to_string());
+        })?;
+    let conflict_sidecars = replica.state().conflict_sidecars().len();
+    state.env_variables = materialization.launcher_environment.len();
+    state.env_conflicts = conflict_sidecars;
+    state.last_error = None;
+    controller.save_state(&state)?;
+
+    let entries = replica.audit_log().entries();
+    let mut output = String::new();
+    push_kv(&mut output, "env_audit_status", "ok");
+    push_kv(&mut output, "fetched_payloads", ingest.fetched_payloads);
+    push_kv(&mut output, "applied_records", ingest.applied_records);
+    push_kv(&mut output, "materialized_variables", state.env_variables);
+    push_kv(&mut output, "conflict_sidecars", state.env_conflicts);
+    push_kv(&mut output, "audit_events", entries.len());
+    for (index, entry) in entries.iter().enumerate() {
+        let prefix = format!("audit.{}", index + 1);
+        push_kv(&mut output, &format!("{prefix}.ordinal"), entry.ordinal);
+        push_kv(
+            &mut output,
+            &format!("{prefix}.event_unix_millis"),
+            entry.event_unix_millis,
+        );
+        push_kv(&mut output, &format!("{prefix}.operation"), entry.operation.as_wire());
+        push_kv(&mut output, &format!("{prefix}.status"), entry.status.as_wire());
+        push_kv(&mut output, &format!("{prefix}.actor_machine_id"), &entry.actor_machine_id);
+        push_kv(
+            &mut output,
+            &format!("{prefix}.env_name"),
+            entry.env_name.as_deref().unwrap_or("none"),
+        );
+        push_kv(
+            &mut output,
+            &format!("{prefix}.scope"),
+            entry
+                .scope
+                .as_ref()
+                .map(|scope| scope.as_wire())
+                .unwrap_or_else(|| "none".to_owned()),
+        );
+        push_kv(
+            &mut output,
+            &format!("{prefix}.payload_id"),
+            entry.payload_id.as_deref().unwrap_or("none"),
+        );
+        push_kv(
+            &mut output,
+            &format!("{prefix}.key_version"),
+            entry.key_version.as_deref().unwrap_or("none"),
+        );
+        push_kv(&mut output, &format!("{prefix}.value"), entry.redacted_value);
+    }
+    Ok(output)
+}
+
+fn env_publish_command(remaining: &[String], runtime: &CliRuntime) -> Result<String, SyncError> {
+    expect_arg_count("env publish", remaining, 2, "NAME VALUE")?;
+    let controller = DaemonController::new(runtime);
+    let mut state = controller.load_state()?;
+    let store = connect_transport(runtime).inspect_err(|error| {
+        let _ = controller.record_error(&error.to_string());
+    })?;
+    let mut replica = env_replica(runtime).inspect_err(|error| {
+        let _ = controller.record_error(&error.to_string());
+    })?;
+    let ingest = replica
+        .ingest_from_transport(&store)
+        .map_err(env_error)
+        .inspect_err(|error| {
+            let _ = controller.record_error(&error.to_string());
+        })?;
+    let report = replica
+        .set_shared(&store, &remaining[0], &remaining[1], cli_current_unix_millis())
+        .map_err(env_error)
+        .inspect_err(|error| {
+            let _ = controller.record_error(&error.to_string());
+        })?;
+    let materialization = replica
+        .materialize()
+        .map_err(env_error)
+        .inspect_err(|error| {
+            let _ = controller.record_error(&error.to_string());
+        })?;
+    let conflict_sidecars = replica.state().conflict_sidecars().len();
+    state.env_variables = materialization.launcher_environment.len();
+    state.env_conflicts = conflict_sidecars;
+    state.last_error = None;
+    controller.save_state(&state)?;
+
+    let mut output = String::new();
+    push_kv(&mut output, "env_publish_status", "ok");
+    push_kv(&mut output, "fetched_payloads", ingest.fetched_payloads);
+    push_kv(&mut output, "applied_records", ingest.applied_records);
+    push_kv(&mut output, "env_name", report.env_name);
+    push_kv(&mut output, "scope", report.scope.as_wire());
+    push_kv(&mut output, "payload_id", report.payload_id);
+    push_kv(&mut output, "operation_id", report.operation_id);
+    push_kv(&mut output, "key_version", report.key_version);
+    push_kv(&mut output, "redacted_value", report.redacted_value);
+    push_kv(&mut output, "materialized_variables", state.env_variables);
+    push_kv(&mut output, "conflict_sidecars", state.env_conflicts);
+    Ok(output)
+}
+
+fn env_override_command(remaining: &[String], runtime: &CliRuntime) -> Result<String, SyncError> {
+    expect_arg_count("env override", remaining, 3, "TARGET_MACHINE_ID NAME VALUE")?;
+    let controller = DaemonController::new(runtime);
+    let mut state = controller.load_state()?;
+    let store = connect_transport(runtime).inspect_err(|error| {
+        let _ = controller.record_error(&error.to_string());
+    })?;
+    let mut replica = env_replica(runtime).inspect_err(|error| {
+        let _ = controller.record_error(&error.to_string());
+    })?;
+    let ingest = replica
+        .ingest_from_transport(&store)
+        .map_err(env_error)
+        .inspect_err(|error| {
+            let _ = controller.record_error(&error.to_string());
+        })?;
+    let report = replica
+        .set_override_for_machine(
+            &store,
+            &remaining[0],
+            &remaining[1],
+            &remaining[2],
+            cli_current_unix_millis(),
+        )
+        .map_err(env_error)
+        .inspect_err(|error| {
+            let _ = controller.record_error(&error.to_string());
+        })?;
+    let materialization = replica
+        .materialize()
+        .map_err(env_error)
+        .inspect_err(|error| {
+            let _ = controller.record_error(&error.to_string());
+        })?;
+    let conflict_sidecars = replica.state().conflict_sidecars().len();
+    state.env_variables = materialization.launcher_environment.len();
+    state.env_conflicts = conflict_sidecars;
+    state.last_error = None;
+    controller.save_state(&state)?;
+
+    let mut output = String::new();
+    push_kv(&mut output, "env_override_status", "ok");
+    push_kv(&mut output, "fetched_payloads", ingest.fetched_payloads);
+    push_kv(&mut output, "applied_records", ingest.applied_records);
+    push_kv(&mut output, "target_machine_id", &remaining[0]);
+    push_kv(&mut output, "env_name", report.env_name);
+    push_kv(&mut output, "scope", report.scope.as_wire());
+    push_kv(&mut output, "payload_id", report.payload_id);
+    push_kv(&mut output, "operation_id", report.operation_id);
+    push_kv(&mut output, "key_version", report.key_version);
+    push_kv(&mut output, "redacted_value", report.redacted_value);
+    push_kv(&mut output, "materialized_variables", state.env_variables);
+    push_kv(&mut output, "conflict_sidecars", state.env_conflicts);
+    Ok(output)
+}
+
+fn env_never_sync_command(remaining: &[String], runtime: &CliRuntime) -> Result<String, SyncError> {
+    let action = remaining.first().map(String::as_str).unwrap_or("list");
+    let rest = if remaining.is_empty() { &[][..] } else { &remaining[1..] };
+    match action {
+        "list" => {
+            expect_no_args("env never-sync list", rest)?;
+            let config = load_cli_env_never_sync_config(runtime)?;
+            let mut output = String::new();
+            push_kv(&mut output, "env_never_sync_status", "ok");
+            push_kv(&mut output, "policy_path", env_never_sync_path(runtime).display());
+            append_env_never_sync_config(&mut output, &config);
+            Ok(output)
+        }
+        "add" | "remove" => env_never_sync_update_command(action, rest, runtime),
+        other => Err(SyncError::cli(format!(
+            "unknown env never-sync subcommand `{other}`; expected list, add, or remove"
+        ))),
+    }
+}
+
+fn env_never_sync_update_command(
+    action: &str,
+    remaining: &[String],
+    runtime: &CliRuntime,
+) -> Result<String, SyncError> {
+    expect_arg_count(
+        &format!("env never-sync {action}"),
+        remaining,
+        2,
+        "name|prefix|suffix VALUE",
+    )?;
+    let kind = remaining[0].as_str();
+    let value = remaining[1].as_str();
+    validate_cli_env_never_sync_rule(kind, value)?;
+    let mut config = load_cli_env_never_sync_config(runtime)?;
+    let changed = match (action, kind) {
+        ("add", "name") => config.names.insert(value.to_owned()),
+        ("add", "prefix") => config.prefixes.insert(value.to_owned()),
+        ("add", "suffix") => config.suffixes.insert(value.to_owned()),
+        ("remove", "name") => config.names.remove(value),
+        ("remove", "prefix") => config.prefixes.remove(value),
+        ("remove", "suffix") => config.suffixes.remove(value),
+        _ => unreachable!("validated env never-sync action and kind"),
+    };
+    save_cli_env_never_sync_config(runtime, &config)?;
+
+    let mut output = String::new();
+    push_kv(&mut output, "env_never_sync_status", "ok");
+    push_kv(&mut output, "action", action);
+    push_kv(&mut output, "changed", changed);
+    push_kv(&mut output, "rule_kind", kind);
+    push_kv(&mut output, "rule_value", value);
+    push_kv(&mut output, "policy_path", env_never_sync_path(runtime).display());
+    append_env_never_sync_config(&mut output, &config);
+    Ok(output)
+}
+
+fn validate_cli_env_never_sync_rule(kind: &str, value: &str) -> Result<(), SyncError> {
+    let mut policy = EnvNeverSyncPolicy::allow_all();
+    match kind {
+        "name" => {
+            policy.deny_name(value).map_err(env_error)?;
+        }
+        "prefix" => {
+            policy.deny_prefix(value).map_err(env_error)?;
+        }
+        "suffix" => {
+            policy.deny_suffix(value).map_err(env_error)?;
+        }
+        other => {
+            return Err(SyncError::cli(format!(
+                "unknown env never-sync rule kind `{other}`; expected name, prefix, or suffix"
+            )));
+        }
+    }
+    Ok(())
+}
+
+fn cli_current_unix_millis() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_millis().min(u128::from(u64::MAX)) as u64)
+        .unwrap_or(0)
 }
 
 fn doctor_from_env(logger: &dyn Logger) -> Result<String, SyncError> {
@@ -838,7 +1164,7 @@ fn recover_stale_worktree(runtime: &CliRuntime) -> Result<String, SyncError> {
 
 fn help() -> String {
     format!(
-        "{APP_NAME} {VERSION}\n\nCommands:\n  init                 Initialize cache and daemon state\n  status               Print daemon, sync, hydration, env, and stale-worktree state\n  sync [status]        Print sync/transport state\n  sync start|stop      Run one foreground sync pass or stop persisted controls\n  sync pause|resume    Pause/resume sync and expose queue state\n  sync recover-stale   Materialize missing remote files from the sync transport\n  catalog              Print current project catalog snapshot\n  policy [path]        Evaluate .syncignore/platform policy for a path\n  watch                Poll current project and print watcher events\n  hydrate [path]       Print VFS hydration state, or hydrate one transport-backed path\n  env [status|export]  Print redacted environment sync state\n  info                 Print configuration and migration metadata\n  version-info         Print version and daemon-supervision rationale\n  doctor               Check config, cache, transport, permissions, and policy\n"
+        "{APP_NAME} {VERSION}\n\nCommands:\n  init                 Initialize cache and daemon state\n  status               Print daemon, sync, hydration, env, and stale-worktree state\n  sync [status]        Print sync/transport state\n  sync start|stop      Run one foreground sync pass or stop persisted controls\n  sync pause|resume    Pause/resume sync and expose queue state\n  sync recover-stale   Materialize missing remote files from the sync transport\n  catalog              Print current project catalog snapshot\n  policy [path]        Evaluate .syncignore/platform policy for a path\n  watch                Poll current project and print watcher events\n  hydrate [path]       Print VFS hydration state, or hydrate one transport-backed path\n  env status|export    Print or materialize redacted environment sync state\n  env list|audit       List redacted env records or audit events\n  env publish NAME VALUE\n                       Publish a shared env value without printing plaintext\n  env override TARGET_MACHINE_ID NAME VALUE\n                       Publish a machine override without printing plaintext\n  env never-sync list|add|remove name|prefix|suffix VALUE\n                       Manage local env names that must never be published\n  info                 Print configuration and migration metadata\n  version-info         Print version and daemon-supervision rationale\n  doctor               Check config, cache, transport, permissions, and policy\n"
     )
 }
 
@@ -1459,6 +1785,9 @@ fn connect_transport(runtime: &CliRuntime) -> Result<FileBackedSyncStore, SyncEr
 
 const CLI_ENV_KEY_VERSION: &str = "v1";
 const CLI_ENV_KEY_CREATED_LOGICAL_MILLIS: u64 = 0;
+const CLI_ENV_NEVER_SYNC_FORMAT_VERSION: &str = "dropbox-dev-env-never-sync-v1";
+const CLI_ENV_NEVER_SYNC_FILE_STEM: &str = "env-never-sync";
+const CLI_ENV_NEVER_SYNC_FILE_EXTENSION: &str = "txt";
 
 /// CLI adapter for CHUNK-07's out-of-band key provider seam.
 ///
@@ -1542,10 +1871,12 @@ impl EnvKeyProvider for CliEnvKeyProvider {
 }
 
 fn env_replica(runtime: &CliRuntime) -> Result<EnvReplica<CliEnvKeyProvider>, SyncError> {
-    EnvReplica::new(
+    let never_sync_policy = load_cli_env_never_sync_config(runtime)?.to_policy()?;
+    EnvReplica::new_with_never_sync_policy(
         runtime.project_id.clone(),
         runtime.config.machine_id.clone(),
         CliEnvKeyProvider::new(runtime)?,
+        never_sync_policy,
     )
     .map_err(env_error)
 }
@@ -1575,6 +1906,154 @@ fn push_env_key_material_part(material: &mut Vec<u8>, value: &str) {
 
 fn env_error(error: impl fmt::Display) -> SyncError {
     SyncError::from(EnvError::invalid(error.to_string()))
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+struct CliEnvNeverSyncConfig {
+    names: BTreeSet<String>,
+    prefixes: BTreeSet<String>,
+    suffixes: BTreeSet<String>,
+}
+
+impl CliEnvNeverSyncConfig {
+    fn parse(text: &str) -> Result<Self, SyncError> {
+        let mut config = Self::default();
+        let mut format_seen = false;
+        for (line_index, line) in text.lines().enumerate() {
+            if line.trim().is_empty() {
+                continue;
+            }
+            let Some((key, value)) = line.split_once('=') else {
+                return Err(SyncError::cli(format!(
+                    "env never-sync policy line {} is not key=value",
+                    line_index + 1
+                )));
+            };
+            let key = key.trim();
+            let value = decode_state_value(value.trim())?;
+            match key {
+                "format" => {
+                    if value != CLI_ENV_NEVER_SYNC_FORMAT_VERSION {
+                        return Err(SyncError::cli(format!(
+                            "unsupported env never-sync policy format `{value}`"
+                        )));
+                    }
+                    format_seen = true;
+                }
+                "name" => {
+                    config.names.insert(value);
+                }
+                "prefix" => {
+                    config.prefixes.insert(value);
+                }
+                "suffix" => {
+                    config.suffixes.insert(value);
+                }
+                other => {
+                    return Err(SyncError::cli(format!(
+                        "env never-sync policy contains unknown key `{other}`"
+                    )));
+                }
+            }
+        }
+        if !format_seen {
+            return Err(SyncError::cli("env never-sync policy is missing format"));
+        }
+        let _ = config.to_policy()?;
+        Ok(config)
+    }
+
+    fn serialize(&self) -> String {
+        let mut output = String::new();
+        push_raw_state(&mut output, "format", CLI_ENV_NEVER_SYNC_FORMAT_VERSION);
+        for name in &self.names {
+            push_raw_state(&mut output, "name", name);
+        }
+        for prefix in &self.prefixes {
+            push_raw_state(&mut output, "prefix", prefix);
+        }
+        for suffix in &self.suffixes {
+            push_raw_state(&mut output, "suffix", suffix);
+        }
+        output
+    }
+
+    fn to_policy(&self) -> Result<EnvNeverSyncPolicy, SyncError> {
+        let mut policy = EnvNeverSyncPolicy::allow_all();
+        for name in &self.names {
+            policy.deny_name(name.clone()).map_err(env_error)?;
+        }
+        for prefix in &self.prefixes {
+            policy.deny_prefix(prefix.clone()).map_err(env_error)?;
+        }
+        for suffix in &self.suffixes {
+            policy.deny_suffix(suffix.clone()).map_err(env_error)?;
+        }
+        Ok(policy)
+    }
+
+    fn rule_count(&self) -> usize {
+        self.names.len() + self.prefixes.len() + self.suffixes.len()
+    }
+}
+
+fn load_cli_env_never_sync_config(
+    runtime: &CliRuntime,
+) -> Result<CliEnvNeverSyncConfig, SyncError> {
+    let path = env_never_sync_path(runtime);
+    match fs::read_to_string(&path) {
+        Ok(text) => CliEnvNeverSyncConfig::parse(&text),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(CliEnvNeverSyncConfig::default()),
+        Err(error) => Err(SyncError::from(ConfigError::io(
+            path,
+            format!("read env never-sync policy failed: {error}"),
+        ))),
+    }
+}
+
+fn save_cli_env_never_sync_config(
+    runtime: &CliRuntime,
+    config: &CliEnvNeverSyncConfig,
+) -> Result<(), SyncError> {
+    fs::create_dir_all(&runtime.config.cache_dir).map_err(|error| {
+        SyncError::from(ConfigError::io(
+            runtime.config.cache_dir.clone(),
+            format!("create cache dir failed: {error}"),
+        ))
+    })?;
+    let path = env_never_sync_path(runtime);
+    fs::write(&path, config.serialize()).map_err(|error| {
+        SyncError::from(ConfigError::io(
+            path,
+            format!("write env never-sync policy failed: {error}"),
+        ))
+    })
+}
+
+fn env_never_sync_path(runtime: &CliRuntime) -> PathBuf {
+    let root = daemon_state_root_identity(runtime);
+    let project = safe_filename_component(&runtime.project_id);
+    let root_text = root.to_string_lossy();
+    let identity_hash = stable_identity_hash(&runtime.project_id, root_text.as_bytes());
+    runtime.config.cache_dir.join(format!(
+        "{CLI_ENV_NEVER_SYNC_FILE_STEM}-{project}-{identity_hash}.{CLI_ENV_NEVER_SYNC_FILE_EXTENSION}"
+    ))
+}
+
+fn append_env_never_sync_config(output: &mut String, config: &CliEnvNeverSyncConfig) {
+    push_kv(output, "never_sync_rules", config.rule_count());
+    push_kv(output, "name_count", config.names.len());
+    push_kv(output, "prefix_count", config.prefixes.len());
+    push_kv(output, "suffix_count", config.suffixes.len());
+    for (index, name) in config.names.iter().enumerate() {
+        push_kv(output, &format!("never_sync.name.{}", index + 1), name);
+    }
+    for (index, prefix) in config.prefixes.iter().enumerate() {
+        push_kv(output, &format!("never_sync.prefix.{}", index + 1), prefix);
+    }
+    for (index, suffix) in config.suffixes.iter().enumerate() {
+        push_kv(output, &format!("never_sync.suffix.{}", index + 1), suffix);
+    }
 }
 
 fn latest_remote_manifest(
@@ -2725,6 +3204,22 @@ fn expect_no_args(command: &str, rest: &[String]) -> Result<(), SyncError> {
     }
 }
 
+fn expect_arg_count(
+    command: &str,
+    rest: &[String],
+    expected_count: usize,
+    usage: &str,
+) -> Result<(), SyncError> {
+    if rest.len() == expected_count {
+        Ok(())
+    } else {
+        Err(SyncError::cli(format!(
+            "command `{command}` expects {usage}; received {} argument(s)",
+            rest.len()
+        )))
+    }
+}
+
 fn default_project_id(config: &Config, current_dir: &Path) -> String {
     let source = config.root_paths.first().map(PathBuf::as_path).unwrap_or(current_dir);
     let Some(name) = source.file_name().and_then(|name| name.to_str()) else {
@@ -3180,6 +3675,107 @@ mod tests {
         let state = DaemonController::new(&fixture.runtime).load_state().unwrap();
         assert_eq!(state.env_variables, 1);
         assert_eq!(state.env_conflicts, 0);
+    }
+
+    #[test]
+    fn env_cli_exposes_list_audit_publish_override_and_never_sync_management() {
+        let fixture = Fixture::new("env-cli-management");
+        let machine_id = fixture.runtime.config.machine_id.clone();
+
+        let publish = fixture
+            .run(["dropbox-dev", "env", "publish", "API_TOKEN", "super-secret"])
+            .unwrap();
+        assert_contains(&publish, "env_publish_status=ok");
+        assert_contains(&publish, "env_name=API_TOKEN");
+        assert_contains(&publish, "scope=shared");
+        assert_contains(&publish, "redacted_value=<redacted>");
+        assert!(!publish.contains("super-secret"), "publish leaked secret: {publish}");
+
+        let override_output = run_with_runtime(
+            vec![
+                "dropbox-dev".to_owned(),
+                "env".to_owned(),
+                "override".to_owned(),
+                machine_id.clone(),
+                "API_TOKEN".to_owned(),
+                "override-secret".to_owned(),
+            ],
+            &NullLogger,
+            &fixture.runtime,
+        )
+        .unwrap();
+        assert_contains(&override_output, "env_override_status=ok");
+        assert_contains(&override_output, &format!("target_machine_id={machine_id}"));
+        assert_contains(&override_output, "scope=machine:");
+        assert_contains(&override_output, "redacted_value=<redacted>");
+        assert!(
+            !override_output.contains("override-secret"),
+            "override leaked secret: {override_output}"
+        );
+
+        let list = fixture.run(["dropbox-dev", "env", "list"]).unwrap();
+        assert_contains(&list, "env_list_status=ok");
+        assert_contains(&list, "record_count=2");
+        assert_contains(&list, "materialized_variables=1");
+        assert_contains(&list, "env.1.value=<redacted>");
+        assert_contains(&list, "scope=shared");
+        assert_contains(&list, &format!("scope=machine:{machine_id}"));
+        assert!(!list.contains("super-secret"), "list leaked shared secret: {list}");
+        assert!(!list.contains("override-secret"), "list leaked override secret: {list}");
+
+        let audit = fixture.run(["dropbox-dev", "env", "audit"]).unwrap();
+        assert_contains(&audit, "env_audit_status=ok");
+        assert_contains(&audit, "operation=value-applied");
+        assert_contains(&audit, "value=<redacted>");
+        assert!(!audit.contains("super-secret"), "audit leaked shared secret: {audit}");
+        assert!(!audit.contains("override-secret"), "audit leaked override secret: {audit}");
+
+        let add_never_sync = fixture
+            .run([
+                "dropbox-dev",
+                "env",
+                "never-sync",
+                "add",
+                "name",
+                "LOCAL_ONLY_TOKEN",
+            ])
+            .unwrap();
+        assert_contains(&add_never_sync, "env_never_sync_status=ok");
+        assert_contains(&add_never_sync, "changed=true");
+        assert_contains(&add_never_sync, "never_sync.name.1=LOCAL_ONLY_TOKEN");
+
+        let policy = fixture.run(["dropbox-dev", "env", "never-sync", "list"]).unwrap();
+        assert_contains(&policy, "env_never_sync_status=ok");
+        assert_contains(&policy, "name_count=1");
+        assert_contains(&policy, "never_sync.name.1=LOCAL_ONLY_TOKEN");
+
+        let denied = fixture
+            .run([
+                "dropbox-dev",
+                "env",
+                "publish",
+                "LOCAL_ONLY_TOKEN",
+                "local-only-secret",
+            ])
+            .unwrap_err();
+        assert_contains(&denied.to_string(), "never-sync");
+        assert!(
+            !denied.to_string().contains("local-only-secret"),
+            "never-sync error leaked secret: {denied}"
+        );
+
+        let remove_never_sync = fixture
+            .run([
+                "dropbox-dev",
+                "env",
+                "never-sync",
+                "remove",
+                "name",
+                "LOCAL_ONLY_TOKEN",
+            ])
+            .unwrap();
+        assert_contains(&remove_never_sync, "changed=true");
+        assert_contains(&remove_never_sync, "name_count=0");
     }
 
     #[test]
