@@ -1718,15 +1718,17 @@ fn tombstone_obsoletes_entry(
 fn tombstone_obsoletes_snapshot_entry(
     tombstone: Option<&DeleteTombstone>,
     entry: &SnapshotEntry,
-    local_machine_id: &str,
+    _local_machine_id: &str,
 ) -> bool {
     tombstone
         .map(|tombstone| {
-            tombstone
-                .modified_unix_millis
-                .cmp(&entry.catalog_entry.modified_unix_millis)
-                .then_with(|| tombstone.source_machine_id.as_str().cmp(local_machine_id))
-                != std::cmp::Ordering::Less
+            // A snapshot entry does not carry the machine id that last wrote
+            // its mtime, so the local machine id is not a valid source-machine
+            // tie-break against a remote delete/move tombstone. Watcher delete
+            // and move records intentionally reuse the deleted source entry's
+            // modified time; on an equal timestamp, prefer the tombstone so a
+            // stale local path is deleted instead of re-uploaded.
+            tombstone.modified_unix_millis >= entry.catalog_entry.modified_unix_millis
         })
         .unwrap_or(false)
 }
@@ -5165,6 +5167,53 @@ mod tests {
     }
 
     #[test]
+    fn snapshot_planning_uses_equal_mtime_lower_remote_delete_tombstone_instead_of_reuploading_stale_local_file() {
+        let local_machine = "dropbox-dev-ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff".to_owned();
+        let remote_machine = "dropbox-dev-0000000000000000000000000000000000000000000000000000000000000000".to_owned();
+        assert!(remote_machine.as_str() < local_machine.as_str());
+        let platform = linux_platform(&local_machine);
+        let engine = ConvergenceEngine::new(local_machine, platform);
+        let snapshot = IndexedSnapshot::new(
+            "project",
+            vec![SnapshotEntry::new(
+                TreeEntry::file("deleted-equal.txt", 1, 20, 0o644, Some("hash-stale".to_owned())),
+                PolicyMetadata::from_action(Action::Sync),
+            )],
+        );
+        let remote_manifest = TreeManifest::new("remote-after-equal-delete", "project", Vec::new());
+        let delete_operation = OperationRecord::from_draft(
+            OperationDraft::new(
+                1,
+                "project",
+                remote_machine,
+                OperationKind::DeletePath,
+                "deleted-equal.txt",
+            )
+            .modified_unix_millis(20),
+        );
+        let remote_state = replay_operation_log(&[delete_operation]);
+
+        let plan = engine.plan_snapshot_with_remote_state(
+            &snapshot,
+            Some(&remote_manifest),
+            Some(&remote_state),
+            true,
+            0,
+            &Policy::new(),
+        );
+
+        assert!(plan.actions.iter().any(|action| matches!(
+            action,
+            ConvergenceAction::DeleteLocal { path } if path == "deleted-equal.txt"
+        )));
+        assert!(!plan.actions.iter().any(|action| matches!(
+            action,
+            ConvergenceAction::PushContent { path, .. } if path == "deleted-equal.txt"
+        )));
+        assert!(plan.queued_operations.is_empty());
+    }
+
+    #[test]
     fn snapshot_planning_uses_remote_move_tombstone_instead_of_reuploading_stale_source() {
         let local_machine = app_scoped_machine_id("machine-a").expect("machine id");
         let remote_machine = app_scoped_machine_id("machine-b").expect("machine id");
@@ -5218,6 +5267,71 @@ mod tests {
         assert!(!plan.actions.iter().any(|action| matches!(
             action,
             ConvergenceAction::PushContent { path, .. } if path == "old-name.txt"
+        )));
+    }
+
+    #[test]
+    fn snapshot_planning_uses_equal_mtime_lower_remote_move_tombstone_instead_of_reuploading_stale_source() {
+        let local_machine = "dropbox-dev-ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff".to_owned();
+        let remote_machine = "dropbox-dev-0000000000000000000000000000000000000000000000000000000000000000".to_owned();
+        assert!(remote_machine.as_str() < local_machine.as_str());
+        let platform = linux_platform(&local_machine);
+        let engine = ConvergenceEngine::new(local_machine, platform);
+        let snapshot = IndexedSnapshot::new(
+            "project",
+            vec![SnapshotEntry::new(
+                TreeEntry::file("old-equal-name.txt", 1, 20, 0o644, Some("hash-stale".to_owned())),
+                PolicyMetadata::from_action(Action::Sync),
+            )],
+        );
+        let remote_manifest = TreeManifest::new(
+            "remote-after-equal-move",
+            "project",
+            vec![TreeEntry::file(
+                "new-equal-name.txt",
+                1,
+                20,
+                0o644,
+                Some("store-hash-new".to_owned()),
+            )],
+        );
+        let move_operation = OperationRecord::from_draft(
+            OperationDraft::new(
+                1,
+                "project",
+                remote_machine,
+                OperationKind::MovePath,
+                "new-equal-name.txt",
+            )
+            .previous_path("old-equal-name.txt")
+            .content_hash("source-hash-new")
+            .payload_id("store-hash-new")
+            .modified_unix_millis(20)
+            .permissions(0o644),
+        );
+        let remote_state = replay_operation_log(&[move_operation]);
+
+        let plan = engine.plan_snapshot_with_remote_state(
+            &snapshot,
+            Some(&remote_manifest),
+            Some(&remote_state),
+            true,
+            0,
+            &Policy::new(),
+        );
+
+        assert!(plan.actions.iter().any(|action| matches!(
+            action,
+            ConvergenceAction::DeleteLocal { path } if path == "old-equal-name.txt"
+        )));
+        assert!(plan.actions.iter().any(|action| matches!(
+            action,
+            ConvergenceAction::FetchContent { path, store_blob_id, .. }
+                if path == "new-equal-name.txt" && store_blob_id.as_deref() == Some("store-hash-new")
+        )));
+        assert!(!plan.actions.iter().any(|action| matches!(
+            action,
+            ConvergenceAction::PushContent { path, .. } if path == "old-equal-name.txt"
         )));
     }
 
