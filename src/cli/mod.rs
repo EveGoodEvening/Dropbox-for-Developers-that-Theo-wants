@@ -2299,6 +2299,14 @@ fn execute_foreground_sync_pass(
     state: &DaemonState,
 ) -> Result<(WorktreeReport, usize, usize, TreeManifest), SyncError> {
     let planned = plan_current_worktree(runtime, state)?;
+    execute_planned_foreground_sync_pass(runtime, state, planned)
+}
+
+fn execute_planned_foreground_sync_pass(
+    runtime: &CliRuntime,
+    state: &DaemonState,
+    planned: PlannedWorktree,
+) -> Result<(WorktreeReport, usize, usize, TreeManifest), SyncError> {
     if planned_queue_count(&planned.plan) > 0 {
         let report = worktree_report_from_plan(state, &planned);
         let unsupported_count = report.unsupported_count;
@@ -2388,7 +2396,10 @@ fn execute_foreground_sync_pass(
                         local_tree_changed_by_remote = true;
                         true
                     }
-                    ForegroundDeleteLocalOutcome::PreservedChanged => false,
+                    ForegroundDeleteLocalOutcome::PreservedChanged => {
+                        preserved_manifest_paths.insert(path.clone());
+                        false
+                    }
                 };
                 if delete_local_applied && delete_local_was_directory {
                     deleted_local_tree_roots.insert(path.clone());
@@ -4284,6 +4295,90 @@ mod tests {
         let final_state = controller.load_state().unwrap();
         assert_eq!(final_state.stale_worktree, WorktreeStatus::Clean);
         assert_eq!(final_state.last_error, None);
+    }
+
+    #[test]
+    fn foreground_pass_preserves_changed_tombstoned_path_when_publishing_unrelated_push() {
+        let fixture = Fixture::new("foreground-preserve-changed-tombstone");
+        let remote_bytes = b"remote contents deleted elsewhere";
+        let changed_bytes = b"local edit after planning must survive";
+        let unrelated_bytes = b"unrelated foreground push";
+        fixture.seed_remote_file_with_metadata(
+            "manifest-preserve-tombstone-before",
+            "stale.txt",
+            remote_bytes,
+            1,
+            10,
+            0o644,
+        );
+        fixture.run(["dropbox-dev", "sync", "start"]).unwrap();
+        let root = &fixture.runtime.config.root_paths[0];
+        let stale_path = root.join("stale.txt");
+        assert_eq!(fs::read(&stale_path).unwrap(), remote_bytes);
+
+        fixture.append_remote_delete_tombstone(
+            "manifest-preserve-tombstone-after",
+            "stale.txt",
+            3,
+            u64::MAX,
+        );
+        fixture.write_file("unrelated.txt", unrelated_bytes);
+        let controller = DaemonController::new(&fixture.runtime);
+        let state = controller.load_state().unwrap();
+        let planned = plan_current_worktree(&fixture.runtime, &state).unwrap();
+        assert!(planned.plan.actions.iter().any(|action| matches!(
+            action,
+            ConvergenceAction::DeleteLocal { path } if path == "stale.txt"
+        )));
+        assert!(planned.plan.actions.iter().any(|action| matches!(
+            action,
+            ConvergenceAction::PushContent { path, .. } if path == "unrelated.txt"
+        )));
+
+        fixture.write_file("stale.txt", changed_bytes);
+        let (report, applied_actions, unsupported_actions, _final_manifest) =
+            execute_planned_foreground_sync_pass(&fixture.runtime, &state, planned).unwrap();
+
+        assert_eq!(fs::read(&stale_path).unwrap(), changed_bytes);
+        assert_eq!(applied_actions, 1);
+        assert_eq!(unsupported_actions, 0);
+        assert_eq!(report.status, WorktreeStatus::Stale);
+        assert_eq!(report.queued_count, 0);
+        assert!(report.action_count > 0);
+        assert_eq!(
+            foreground_pass_error(
+                unsupported_actions,
+                report.queued_count,
+                report.status == WorktreeStatus::Stale,
+            )
+            .as_deref(),
+            Some("foreground sync pass left convergence actions pending"),
+        );
+        let pending = plan_current_worktree(&fixture.runtime, &state).unwrap();
+        assert!(pending.plan.actions.iter().any(|action| matches!(
+            action,
+            ConvergenceAction::DeleteLocal { path } if path == "stale.txt"
+        )));
+
+        let store = connect_transport(&fixture.runtime).unwrap();
+        let operations = store.load_operation_log().unwrap();
+        assert!(operations.iter().any(|operation| {
+            operation.kind == OperationKind::PutContent
+                && operation.path == "unrelated.txt"
+                && operation.payload_id.as_deref()
+                    == Some(sync_content_hash(unrelated_bytes).as_str())
+        }));
+        let manifest = latest_remote_manifest(&store, &operations).unwrap().unwrap();
+        assert!(!manifest.entries.iter().any(|entry| entry.path == "stale.txt"));
+        let unrelated_entry = manifest
+            .entries
+            .iter()
+            .find(|entry| entry.path == "unrelated.txt")
+            .unwrap();
+        assert_eq!(
+            unrelated_entry.content_hash.as_deref(),
+            Some(sync_content_hash(unrelated_bytes).as_str()),
+        );
     }
 
     #[test]
