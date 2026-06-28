@@ -37,7 +37,13 @@ static TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 #[test]
 fn multi_machine_project_sync_env_hydration_and_ignore_hardening() {
-    let harness = Harness::new("project-env-hydration", &["mac-mini", "linux-box"]);
+    let harness = Harness::new_with_platforms(
+        "project-env-hydration",
+        &[
+            ("mac-mini", OsFamily::Macos, Architecture::Aarch64),
+            ("linux-box", OsFamily::Linux, Architecture::X86_64),
+        ],
+    );
     let mac = harness.machine("mac-mini");
     let linux = harness.machine("linux-box");
 
@@ -48,6 +54,8 @@ fn multi_machine_project_sync_env_hydration_and_ignore_hardening() {
     mac.write_file("src/app.rs", b"fn main() { println!(\"hello\"); }\n");
     mac.write_file("src/lazy.txt", b"lazy remote contents\n");
     mac.write_file("src/adjacent.txt", b"adjacent content syncs\n");
+    mac.write_file("native/addon.node", b"mac native artifact stays local\n");
+    linux.write_file("native/helper.node", b"linux native artifact stays local\n");
     mac.write_file("ignored.log", b"ignored local log\n");
     mac.write_file("ignored-dir/private.txt", b"ignored private dir\n");
     mac.write_file("secrets.local", b"machine local secret file\n");
@@ -55,6 +63,10 @@ fn multi_machine_project_sync_env_hydration_and_ignore_hardening() {
 
     expect_success(mac.run(["init"]));
     expect_success(linux.run(["init"]));
+    let mac_policy = expect_success(mac.run(["policy", "native/addon.node"]));
+    assert_output_contains(&mac_policy.stdout, "action=platform-pin:macos:aarch64");
+    let linux_policy = expect_success(linux.run(["policy", "native/helper.node"]));
+    assert_output_contains(&linux_policy.stdout, "action=platform-pin:linux:x86_64");
     let mac_start = expect_success(mac.run(["sync", "start"]));
     assert_output_contains(&mac_start.stdout, "sync_start=foreground-complete");
     assert_output_contains(&mac_start.stdout, "foreground_work=ok");
@@ -90,6 +102,8 @@ fn multi_machine_project_sync_env_hydration_and_ignore_hardening() {
     assert!(!linux.path("ignored-dir/private.txt").exists());
     assert!(!linux.path("secrets.local").exists());
     assert!(!linux.path("node_modules/pkg/index.js").exists());
+    assert!(!linux.path("native/addon.node").exists());
+    assert!(!mac.path("native/helper.node").exists());
 
     let operation_paths = harness.operation_paths(mac);
     for forbidden in [
@@ -97,6 +111,8 @@ fn multi_machine_project_sync_env_hydration_and_ignore_hardening() {
         "ignored-dir/private.txt",
         "secrets.local",
         "node_modules/pkg/index.js",
+        "native/addon.node",
+        "native/helper.node",
     ] {
         assert!(
             !operation_paths.iter().any(|path| path == forbidden),
@@ -326,12 +342,62 @@ fn git_metadata_stale_worktree_and_failure_injection_are_observable_and_recovera
     let saved_transport = harness.root.join("transport.saved");
     fs::rename(&harness.transport_root, &saved_transport).unwrap();
     fs::write(&harness.transport_root, b"not a directory during partition").unwrap();
+    machine_a.write_file("offline/from-a.txt", b"offline edit from machine a\n");
+    machine_b.write_file("offline/from-b.txt", b"offline edit from machine b\n");
+    assert!(!machine_b.path("offline/from-a.txt").exists());
+    assert!(!machine_a.path("offline/from-b.txt").exists());
     let partitioned = expect_success(machine_b.run(["sync", "status"]));
     assert_output_contains(&partitioned.stdout, "transport=error");
     fs::remove_file(&harness.transport_root).unwrap();
     fs::rename(&saved_transport, &harness.transport_root).unwrap();
     let healed = expect_success(machine_b.run(["sync", "status"]));
     assert_output_contains(&healed.stdout, "transport=ok");
+    let reconnect_a = expect_success(machine_a.run(["sync", "start"]));
+    assert_output_contains(&reconnect_a.stdout, "sync_start=foreground-complete");
+    assert_output_contains(&reconnect_a.stdout, "foreground_work=ok");
+    let reconnect_b = expect_success(machine_b.run(["sync", "start"]));
+    assert_output_contains(&reconnect_b.stdout, "sync_start=foreground-complete");
+    assert_output_contains(&reconnect_b.stdout, "foreground_work=ok");
+    let converge_a = expect_success(machine_a.run(["sync", "start"]));
+    assert_output_contains(&converge_a.stdout, "sync_start=foreground-complete");
+    assert_output_contains(&converge_a.stdout, "foreground_work=ok");
+    assert_eq!(
+        machine_a.read_file("offline/from-a.txt"),
+        b"offline edit from machine a\n"
+    );
+    assert_eq!(
+        machine_a.read_file("offline/from-b.txt"),
+        b"offline edit from machine b\n"
+    );
+    assert_eq!(
+        machine_b.read_file("offline/from-a.txt"),
+        b"offline edit from machine a\n"
+    );
+    assert_eq!(
+        machine_b.read_file("offline/from-b.txt"),
+        b"offline edit from machine b\n"
+    );
+    let assert_no_pending_work = |output: &str| {
+        // Raw convergence_actions can include informational policy actions
+        // such as git-metadata-local-only entries; actionable work is covered
+        // by the status plus transfer, queue, and unsupported counters below.
+        assert_eq!(output_value(output, "remote_fetch_actions"), "0");
+        assert_eq!(output_value(output, "local_push_actions"), "0");
+        assert_eq!(output_value(output, "queued_operations"), "0");
+        assert_eq!(output_value(output, "queued_operations_observed"), "0");
+        assert_eq!(output_value(output, "unsupported_actions_observed"), "0");
+    };
+    let clean_a = expect_success(machine_a.run(["status"]));
+    assert_eq!(output_value(&clean_a.stdout, "state_stale_worktree"), "clean");
+    assert_eq!(output_value(&clean_a.stdout, "stale_worktree"), "clean");
+    assert_no_pending_work(&clean_a.stdout);
+    let recovered_b = expect_success(machine_b.run(["status"]));
+    assert_eq!(
+        output_value(&recovered_b.stdout, "state_stale_worktree"),
+        "recovered"
+    );
+    assert_eq!(output_value(&recovered_b.stdout, "stale_worktree"), "recovered");
+    assert_no_pending_work(&recovered_b.stdout);
 
     seed_manifest_without_blob(
         &harness,
@@ -887,6 +953,12 @@ impl Drop for TempRoot {
     }
 }
 
+#[derive(Debug, Clone)]
+struct SimulatedPlatform {
+    os_family: OsFamily,
+    architecture: Architecture,
+}
+
 #[derive(Debug)]
 struct Harness {
     root: PathBuf,
@@ -899,6 +971,33 @@ struct Harness {
 
 impl Harness {
     fn new(label: &str, machine_labels: &[&str]) -> Self {
+        let machine_specs = machine_labels
+            .iter()
+            .map(|machine_label| ((*machine_label).to_owned(), None))
+            .collect::<Vec<_>>();
+        Self::from_machine_specs(label, &machine_specs)
+    }
+
+    fn new_with_platforms(
+        label: &str,
+        machine_platforms: &[(&str, OsFamily, Architecture)],
+    ) -> Self {
+        let machine_specs = machine_platforms
+            .iter()
+            .map(|(machine_label, os_family, architecture)| {
+                (
+                    (*machine_label).to_owned(),
+                    Some(SimulatedPlatform {
+                        os_family: os_family.clone(),
+                        architecture: architecture.clone(),
+                    }),
+                )
+            })
+            .collect::<Vec<_>>();
+        Self::from_machine_specs(label, &machine_specs)
+    }
+
+    fn from_machine_specs(label: &str, machine_specs: &[(String, Option<SimulatedPlatform>)]) -> Self {
         let temp = TempRoot::new(label);
         let root = temp.path.clone();
         let transport_root = root.join("transport");
@@ -906,9 +1005,9 @@ impl Harness {
         let project_id = format!("project-{label}");
         let pairing_token = format!("pairing-token-{label}");
         let mut machines = BTreeMap::new();
-        for machine_label in machine_labels {
+        for (machine_label, platform_override) in machine_specs {
             let machine_id = app_scoped_machine_id(&format!("{label}-{machine_label}")).unwrap();
-            let machine_root = root.join(machine_label);
+            let machine_root = root.join(machine_label.as_str());
             let project_root = machine_root.join("project");
             let cache_dir = machine_root.join("cache");
             let config_path = machine_root.join("config").join("config.kv");
@@ -927,13 +1026,14 @@ impl Harness {
             )
             .unwrap();
             machines.insert(
-                (*machine_label).to_owned(),
+                machine_label.clone(),
                 Machine {
                     machine_id,
                     project_root,
                     config_path,
                     project_id: project_id.clone(),
                     pairing_token: pairing_token.clone(),
+                    platform_override: platform_override.clone(),
                 },
             );
         }
@@ -986,6 +1086,7 @@ struct Machine {
     config_path: PathBuf,
     project_id: String,
     pairing_token: String,
+    platform_override: Option<SimulatedPlatform>,
 }
 
 impl Machine {
@@ -1027,6 +1128,8 @@ impl Machine {
             .env_remove("DROPBOX_DEV_PROJECT_ID")
             .env_remove("DROPBOX_DEV_PAIRING_TOKEN")
             .env_remove("DROPBOX_DEV_AUTHORIZED_MACHINE_IDS")
+            .env_remove("DROPBOX_DEV_PLATFORM_OS")
+            .env_remove("DROPBOX_DEV_PLATFORM_ARCH")
             .env("DROPBOX_DEV_CONFIG", &self.config_path)
             .env("DROPBOX_DEV_PROJECT_ID", &self.project_id)
             .env("DROPBOX_DEV_PAIRING_TOKEN", &self.pairing_token)
@@ -1034,6 +1137,11 @@ impl Machine {
                 "DROPBOX_DEV_AUTHORIZED_MACHINE_IDS",
                 self.authorized_from_config_dir(),
             );
+        if let Some(platform) = &self.platform_override {
+            command
+                .env("DROPBOX_DEV_PLATFORM_OS", platform.os_family.as_str())
+                .env("DROPBOX_DEV_PLATFORM_ARCH", platform.architecture.as_str());
+        }
         command
     }
 

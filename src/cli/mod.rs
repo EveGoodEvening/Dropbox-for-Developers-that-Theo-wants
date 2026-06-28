@@ -13,8 +13,9 @@ use crate::env::{
     EnvNeverSyncPolicy, EnvReplica, EnvSyncError, ENV_REDACTED_VALUE,
 };
 use crate::foundation::{
-    Config, ConfigError, EnvError, InMemoryMigrationStore, LogEvent, LogLevel, Logger,
-    MigrationRunner, StderrLogger, SyncError,
+    Architecture, Config, ConfigError, EnvError, InMemoryMigrationStore, LogEvent, LogLevel,
+    Logger, MachineId, MigrationRunner, OsFamily, Platform, PlatformCapabilities, StderrLogger,
+    SyncError,
 };
 use crate::policy::{Action, Policy, SYNCIGNORE_FILE_NAME};
 use crate::sync::{
@@ -46,6 +47,8 @@ const DAEMON_STATE_FILE_STEM: &str = "daemon-state";
 const DAEMON_STATE_FILE_EXTENSION: &str = "txt";
 const DEFAULT_PROJECT_ID: &str = "default-project";
 const UNCONFIGURED_TRANSPORT: &str = "unconfigured";
+const PLATFORM_OS_OVERRIDE_ENV: &str = "DROPBOX_DEV_PLATFORM_OS";
+const PLATFORM_ARCH_OVERRIDE_ENV: &str = "DROPBOX_DEV_PLATFORM_ARCH";
 const QUEUED_OPERATIONS_UNDRAINED: &str =
     "queued operations remain pending; no durable queue payloads were available to drain";
 
@@ -1200,9 +1203,10 @@ impl CliRuntime {
             .map(|value| parse_csv(&value))
             .filter(|values| !values.is_empty())
             .unwrap_or_else(|| vec![config.machine_id.clone()]);
+        let platform = platform_from_process_env(&config)?;
         Ok(Self {
             config,
-            platform: crate::foundation::Platform::detect(),
+            platform,
             current_dir,
             project_id,
             pairing_token,
@@ -3238,6 +3242,70 @@ fn default_project_id(config: &Config, current_dir: &Path) -> String {
         DEFAULT_PROJECT_ID.to_owned()
     } else {
         format!("project-{sanitized}")
+    }
+}
+
+fn platform_from_process_env(config: &Config) -> Result<Platform, SyncError> {
+    let mut platform = Platform::detect();
+    let mut override_applied = false;
+
+    if let Some(os_family) = platform_os_override()? {
+        platform.os_family = os_family;
+        platform.os_version = Some(format!("simulated-{}", platform.os_family.as_str()));
+        platform.capabilities = PlatformCapabilities::for_os(&platform.os_family);
+        override_applied = true;
+    }
+    if let Some(architecture) = platform_architecture_override()? {
+        platform.architecture = architecture;
+        override_applied = true;
+    }
+
+    if override_applied {
+        platform.machine_id = MachineId {
+            value: config.machine_id.clone(),
+            provenance: config.machine_id_provenance.clone(),
+        };
+    }
+
+    Ok(platform)
+}
+
+fn platform_os_override() -> Result<Option<OsFamily>, SyncError> {
+    let Some(value) = required_trimmed_env(PLATFORM_OS_OVERRIDE_ENV)? else {
+        return Ok(None);
+    };
+    Ok(Some(match value.to_ascii_lowercase().as_str() {
+        "linux" => OsFamily::Linux,
+        "macos" | "darwin" => OsFamily::Macos,
+        "windows" => OsFamily::Windows,
+        other => OsFamily::Other(other.to_owned()),
+    }))
+}
+
+fn platform_architecture_override() -> Result<Option<Architecture>, SyncError> {
+    let Some(value) = required_trimmed_env(PLATFORM_ARCH_OVERRIDE_ENV)? else {
+        return Ok(None);
+    };
+    Ok(Some(match value.to_ascii_lowercase().as_str() {
+        "x86_64" | "amd64" => Architecture::X86_64,
+        "aarch64" | "arm64" => Architecture::Aarch64,
+        "arm" => Architecture::Arm,
+        other => Architecture::Other(other.to_owned()),
+    }))
+}
+
+fn required_trimmed_env(key: &str) -> Result<Option<String>, SyncError> {
+    match env::var(key) {
+        Ok(value) => {
+            let trimmed = value.trim();
+            if trimmed.is_empty() {
+                Err(SyncError::cli(format!("{key} must not be empty when set")))
+            } else {
+                Ok(Some(trimmed.to_owned()))
+            }
+        }
+        Err(env::VarError::NotPresent) => Ok(None),
+        Err(error) => Err(SyncError::platform(format!("read {key} failed: {error}"))),
     }
 }
 
