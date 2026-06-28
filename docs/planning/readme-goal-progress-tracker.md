@@ -17,9 +17,9 @@
 
 ## Next Up
 
-CHUNK-08 is merged on `master` at `82cc44b`. Current dependency-ready unchecked chunk is CHUNK-09.
+All planned chunks CHUNK-01 through CHUNK-09 are merged on `master`; final split review/classification is the only remaining orchestration gate.
 
-Task-level `👉 NEXT` marker is active on CHUNK-09 `Run full smoke/e2e...`.
+No task-level `👉 NEXT` marker remains: all durable checklist chunks are implemented, verified, reviewed, and merged.
 
 Dependency order: `01 → {02, 03} → 04 → 05 → {06, 07} → 08 → 09`. CHUNK-04 and CHUNK-05 are serialized (04 before 05); there is no 04 ∥ 05 parallel wave. When the `{02, 03}` or `{06, 07}` waves become dependency-ready, this section and the task lists must show multiple simultaneous `👉 NEXT` markers.
 
@@ -290,49 +290,49 @@ Dependency order: `01 → {02, 03} → 04 → 05 → {06, 07} → 08 → 09`. CH
 
 ## CHUNK-09-E2E-HARDENING
 
-- **Status:** `[ ]` not started
-- **Owner branch / worktree:** —
-- **Commit(s):** —
-- **Review status:** pending
-- **Blocker / deferred reason:** None for CHUNK-09 itself (consumes prior decisions, including resolved U5 and CHUNK-01's recorded U9 decision only after CHUNK-01 has resolved and recorded U9).
+- **Status:** `[x]` done — implementation verified, review accepted, and merged
+- **Owner branch / worktree:** `chunk-09-e2e-hardening` / `../dropbox-dev-chunk-09-e2e-hardening` (merged; worktree removal pending)
+- **Commit(s):** `d8bba01` (`test(e2e): add hardening gates`)
+- **Review status:** accepted — final CHUNK-09 review clean after runbook gate fixes
+- **Blocker / deferred reason:** None. CHUNK-09 complete; U9 was already resolved by CHUNK-01 and consumed here.
 - **Depends on:** CHUNK-08-CLI-DAEMON-UX (all previous chunks transitive through the integrated CLI/daemon surface)
 - **Parallel with:** — (final hardening layer; tests/runbook/fuzz only — no production module internals)
 
 ### Tasks
-- [ ] Build multi-machine E2E simulation (Mac + Linux) over the production transport's local multi-daemon harness
-- [ ] E2E test: sync real project tree with `node_modules`, ignored files (`.syncignore`), env vars (with a secret), lazy-hydrated file — assert convergence, no unwanted sync of ignored content, no plaintext secrets at rest or in transit, correct hydration
-- [ ] Queued `sync pause`/`sync resume` scenario: while `sync pause` is active, changes queue without content transfer; `sync resume` drains them in order with observable status
-- [ ] Ignore scenario: `.syncignore`-ignored content not transmitted/hydrated/reported-missing across two machines; adjacent non-ignored content still syncs
-- [ ] In-transit scenario: env secret encrypted over the production transport; transport capture contains no plaintext
-- [ ] Git metadata/submodule scenario: repo root `.git/`, submodule `.git` pointer file, `.gitmodules`, and submodule path contents follow CHUNK-03 disposition; local-only Git metadata is not transmitted/hydrated, and permitted folder contents sync normally
-- [ ] Stale-worktree/missed-git-pull scenario: one machine starts from a stale project tree that missed upstream Git updates; daemon/CLI makes the stale state observable and recovers through the product sync path without destructive Git operations
-- [ ] Edge-case coverage: conflicts, renames, deletes, permissions, symlinks, binary/large files
-- [ ] Offline/reconnect test: divergence converges on reconnect
-- [ ] Failure-injection scenarios: daemon kill/restart, network partition/heal, offline hydration-source unavailability
-- [ ] Mac↔Linux divergence test: platform-specific handling correct
-- [ ] Platform matrix: Mac↔Linux and same-OS machine combinations exercise shared `Platform` identity and platform-specific policy outcomes
-- [ ] Rollout/rollback drill: bad sync and schema migration upgrade/downgrade rolled back to known-good state (exercising CHUNK-05 procedure + release runbook)
-- [ ] Soak test: sustained watcher activity converges without lost events/divergence
-- [ ] Declare CHUNK-09 performance budgets before measurement: threshold values for 10k-file structure/index/sync work and hydration latency, with rationale recorded in evidence
-- [ ] 10k-file/performance test: large tree indexing/sync and hydration latency are measured after budget declaration and compared against the recorded thresholds
-- [ ] Document rollout/rollback procedure (runbook) including schema migration rollback and operator evidence capture
-- [ ] Run bounded fuzz target commands (fixed seed + time/iteration cap) for both manifest/policy pure functions and public command/protocol parsing surface
-- [ ] For any CHUNK-09 failure that belongs upstream, pause CHUNK-09, create/record a scoped upstream fix task under the affected existing chunk ID with immediate dependency + owner, move `👉 NEXT` to that fix work, record fix evidence/review status, then resume CHUNK-09 from the failed scenario
-- [ ] Record verification evidence (see subsection below)
+- [x] Build multi-machine E2E simulation (Mac + Linux) over the production transport's local multi-daemon harness
+- [x] E2E test: sync real project tree with `node_modules`, ignored files (`.syncignore`), env vars (with a secret), lazy-hydrated file — assert convergence, no unwanted sync of ignored content, no plaintext secrets at rest or in transit, correct hydration
+- [x] Queued `sync pause`/`sync resume` scenario: while `sync pause` is active, changes queue without content transfer; `sync resume` drains them in order with observable status
+- [x] Ignore scenario: `.syncignore`-ignored content not transmitted/hydrated/reported-missing across two machines; adjacent non-ignored content still syncs
+- [x] In-transit scenario: env secret encrypted over the production transport; transport capture contains no plaintext
+- [x] Git metadata/submodule scenario: repo root `.git/`, submodule `.git` pointer file, `.gitmodules`, and submodule path contents follow CHUNK-03 disposition; local-only Git metadata is not transmitted/hydrated, and permitted folder contents sync normally
+- [x] Stale-worktree/missed-git-pull scenario: one machine starts from a stale project tree that missed upstream Git updates; daemon/CLI makes the stale state observable and recovers through the product sync path without destructive Git operations
+- [x] Edge-case coverage: conflicts, renames, deletes, permissions, symlinks, binary/large files
+- [x] Offline/reconnect test: divergence converges on reconnect
+- [x] Failure-injection scenarios: daemon kill/restart, network partition/heal, offline hydration-source unavailability
+- [x] Mac↔Linux divergence test: platform-specific handling correct
+- [x] Platform matrix: Mac↔Linux and same-OS machine combinations exercise shared `Platform` identity and platform-specific policy outcomes
+- [x] Rollout/rollback drill: bad sync and schema migration upgrade/downgrade rolled back to known-good state (exercising CHUNK-05 procedure + release runbook)
+- [x] Soak test: sustained watcher activity converges without lost events/divergence
+- [x] Declare CHUNK-09 performance budgets before measurement: threshold values for 10k-file structure/index/sync work and hydration latency, with rationale recorded in evidence
+- [x] 10k-file/performance test: large tree indexing/sync and hydration latency are measured after budget declaration and compared against the recorded thresholds
+- [x] Document rollout/rollback procedure (runbook) including schema migration rollback and operator evidence capture
+- [x] Run bounded fuzz target commands (fixed seed + time/iteration cap) for both manifest/policy pure functions and public command/protocol parsing surface
+- [x] For any CHUNK-09 failure that belongs upstream, pause CHUNK-09, create/record a scoped upstream fix task under the affected existing chunk ID with immediate dependency + owner, move `👉 NEXT` to that fix work, record fix evidence/review status, then resume CHUNK-09 from the failed scenario
+- [x] Record verification evidence (see subsection below)
 
 ### Verification evidence
 
 | Slot | Command/scenario | Result | Date / SHA | Output artifact / pasted summary | Tracker/evidence commit(s) |
 |------|------------------|--------|------------|----------------------------------|----------------------------|
-| Acceptance evidence | _ | _ | _ | _ | _ |
-| Upstream fix/resume evidence (append rows as needed) | _ | _ | _ | _ | _ |
-| Queued `sync pause`/`sync resume` gate | _ | _ | _ | _ | _ |
-| Stale-worktree/missed-git-pull E2E gate | _ | _ | _ | _ | _ |
-| Failure-injection gate (daemon kill, network partition, offline hydration source) | _ | _ | _ | _ | _ |
-| Platform matrix gate | _ | _ | _ | _ | _ |
-| Predeclared performance budget + 10k-file/hydration comparison gate | _ | _ | _ | _ | _ |
-| Rollout/rollback runbook + schema migration gate | _ | _ | _ | _ | _ |
-| Bounded fuzz targets gate (manifest/policy + public command/protocol parsing) | _ | _ | _ | _ | _ |
+| Acceptance evidence | `cargo test --locked --test e2e`; `cargo test --locked -p dropbox-dev`; `cargo clippy --locked --all-targets -- -D warnings` | Passed | 2026-06-27 / `d8bba01` | E2E tests passed 9; package tests passed 160; clippy passed; final CHUNK-09 review returned clean | `d8bba01` |
+| Upstream fix/resume evidence (append rows as needed) | CHUNK-09 upstream blocker scan | Passed | 2026-06-27 / `d8bba01` | No upstream production blockers found; only tests/runbook added | `d8bba01` |
+| Queued `sync pause`/`sync resume` gate | `cargo test --locked --test e2e queued_pause_resume_keeps_content_off_transport_until_resume` | Passed | 2026-06-27 / `d8bba01` | Queued changes stay off transport while paused and drain on resume | `d8bba01` |
+| Stale-worktree/missed-git-pull E2E gate | `cargo test --locked --test e2e git_metadata_stale_worktree_and_failure_injection_are_observable_and_recoverable` | Passed | 2026-06-27 / `d8bba01` | Stale worktree observable/recoverable through product sync path | `d8bba01` |
+| Failure-injection gate (daemon kill, network partition, offline hydration source) | `cargo test --locked --test e2e daemon_process_interruption_restart_recovers_foreground_sync` plus failure-injection E2E | Passed | 2026-06-27 / `d8bba01` | Daemon interruption/restart, network partition/heal, and offline hydration source covered | `d8bba01` |
+| Platform matrix gate | `cargo test --locked --test e2e edge_cases_platform_matrix_and_soak_cover_cross_os_policy` | Passed | 2026-06-27 / `d8bba01` | Mac/Linux and same-OS platform identities and policy outcomes covered | `d8bba01` |
+| Predeclared performance budget + 10k-file/hydration comparison gate | `cargo test --locked --test e2e performance_budget_10k_and_hydration_are_predeclared_and_enforced` | Passed | 2026-06-27 / `d8bba01` | 10k index/sync, 10k structure diff, and hydration budgets declared and enforced | `d8bba01` |
+| Rollout/rollback runbook + schema migration gate | `docs/runbooks/chunk-09-rollout-rollback.md`; `cargo test --locked --test e2e rollout_rollback_runbook_schema_and_store_restore_drill_are_exercised` | Passed | 2026-06-27 / `d8bba01` | Runbook created; schema/store rollback drill exercised | `d8bba01` |
+| Bounded fuzz targets gate (manifest/policy + public command/protocol parsing) | `cargo test --locked --test e2e bounded_fuzz_manifest_policy_public_cli_and_daemon_control_parsing` | Passed | 2026-06-27 / `d8bba01` | Bounded fuzz covers manifest/policy plus public CLI and daemon-control parsing | `d8bba01` |
 
 ---
 
@@ -348,6 +348,6 @@ Dependency order: `01 → {02, 03} → 04 → 05 → {06, 07} → 08 → 09`. CH
 | CHUNK-06-LAZY-HYDRATION-VFS | `[x]` | 05 | 07 | U6 resolved; merged `f27cfa6` | accepted |
 | CHUNK-07-ENV-SYNC | `[x]` | 05 | 06 | U7 resolved; merged `7de9fb2` | accepted |
 | CHUNK-08-CLI-DAEMON-UX | `[x]` | 04, 05, 06, 07 | — | U8 resolved; merged `82cc44b` | accepted |
-| CHUNK-09-E2E-HARDENING | `[ ]` | 08 | — | none (U9 resolved by CHUNK-01; consumed after merge) | pending |
+| CHUNK-09-E2E-HARDENING | `[x]` | 08 | — | U9 consumed; merged `d8bba01` | accepted |
 
-**Current resume state:** CHUNK-08 is merged. CHUNK-09 is dependency-ready; task-level `👉 NEXT` marker is active on its first unchecked task.
+**Current resume state:** All chunks CHUNK-01 through CHUNK-09 are complete, verified, reviewed, and merged. No unchecked doable checklist tasks remain.
