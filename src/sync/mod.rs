@@ -1707,10 +1707,13 @@ fn tombstone_obsoletes_entry(
 ) -> bool {
     tombstone
         .map(|tombstone| {
-            tombstone.modified_unix_millis
-                .cmp(&entry.modified_unix_millis)
-                .then_with(|| tombstone.source_machine_id.cmp(&entry.source_machine_id))
-                != std::cmp::Ordering::Less
+            // Delete and move records intentionally reuse the removed source
+            // entry's modified time. A source-machine tie-break is meaningful
+            // between two materialized entries, but it resurrects stale content
+            // when an equal-time tombstone was replayed after the original put.
+            // Treat equal mtimes as deleted/moved for replay, matching snapshot
+            // tombstone handling below.
+            tombstone.modified_unix_millis >= entry.modified_unix_millis
         })
         .unwrap_or(false)
 }
@@ -5167,12 +5170,12 @@ mod tests {
     }
 
     #[test]
-    fn snapshot_planning_uses_equal_mtime_lower_remote_delete_tombstone_instead_of_reuploading_stale_local_file() {
-        let local_machine = "dropbox-dev-ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff".to_owned();
-        let remote_machine = "dropbox-dev-0000000000000000000000000000000000000000000000000000000000000000".to_owned();
-        assert!(remote_machine.as_str() < local_machine.as_str());
-        let platform = linux_platform(&local_machine);
-        let engine = ConvergenceEngine::new(local_machine, platform);
+    fn snapshot_planning_keeps_equal_mtime_replayed_delete_tombstone_after_higher_machine_put() {
+        let source_machine = "dropbox-dev-ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff".to_owned();
+        let deleting_machine = "dropbox-dev-0000000000000000000000000000000000000000000000000000000000000000".to_owned();
+        assert!(deleting_machine.as_str() < source_machine.as_str());
+        let platform = linux_platform(&source_machine);
+        let engine = ConvergenceEngine::new(source_machine.clone(), platform);
         let snapshot = IndexedSnapshot::new(
             "project",
             vec![SnapshotEntry::new(
@@ -5181,17 +5184,32 @@ mod tests {
             )],
         );
         let remote_manifest = TreeManifest::new("remote-after-equal-delete", "project", Vec::new());
-        let delete_operation = OperationRecord::from_draft(
+        let original_put = OperationRecord::from_draft(
             OperationDraft::new(
                 1,
                 "project",
-                remote_machine,
+                source_machine,
+                OperationKind::PutContent,
+                "deleted-equal.txt",
+            )
+            .content_hash("hash-stale")
+            .payload_id("store-hash-stale")
+            .modified_unix_millis(20)
+            .permissions(0o644),
+        );
+        let delete_operation = OperationRecord::from_draft(
+            OperationDraft::new(
+                2,
+                "project",
+                deleting_machine,
                 OperationKind::DeletePath,
                 "deleted-equal.txt",
             )
             .modified_unix_millis(20),
         );
-        let remote_state = replay_operation_log(&[delete_operation]);
+        let remote_state = replay_operation_log(&[original_put, delete_operation]);
+        assert!(!remote_state.entries.contains_key("deleted-equal.txt"));
+        assert!(remote_state.tombstones.contains_key("deleted-equal.txt"));
 
         let plan = engine.plan_snapshot_with_remote_state(
             &snapshot,
@@ -5271,12 +5289,12 @@ mod tests {
     }
 
     #[test]
-    fn snapshot_planning_uses_equal_mtime_lower_remote_move_tombstone_instead_of_reuploading_stale_source() {
-        let local_machine = "dropbox-dev-ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff".to_owned();
-        let remote_machine = "dropbox-dev-0000000000000000000000000000000000000000000000000000000000000000".to_owned();
-        assert!(remote_machine.as_str() < local_machine.as_str());
-        let platform = linux_platform(&local_machine);
-        let engine = ConvergenceEngine::new(local_machine, platform);
+    fn snapshot_planning_keeps_equal_mtime_replayed_move_tombstone_after_higher_machine_put() {
+        let source_machine = "dropbox-dev-ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff".to_owned();
+        let moving_machine = "dropbox-dev-0000000000000000000000000000000000000000000000000000000000000000".to_owned();
+        assert!(moving_machine.as_str() < source_machine.as_str());
+        let platform = linux_platform(&source_machine);
+        let engine = ConvergenceEngine::new(source_machine.clone(), platform);
         let snapshot = IndexedSnapshot::new(
             "project",
             vec![SnapshotEntry::new(
@@ -5295,11 +5313,24 @@ mod tests {
                 Some("store-hash-new".to_owned()),
             )],
         );
-        let move_operation = OperationRecord::from_draft(
+        let original_put = OperationRecord::from_draft(
             OperationDraft::new(
                 1,
                 "project",
-                remote_machine,
+                source_machine,
+                OperationKind::PutContent,
+                "old-equal-name.txt",
+            )
+            .content_hash("source-hash-stale")
+            .payload_id("store-hash-stale")
+            .modified_unix_millis(20)
+            .permissions(0o644),
+        );
+        let move_operation = OperationRecord::from_draft(
+            OperationDraft::new(
+                2,
+                "project",
+                moving_machine,
                 OperationKind::MovePath,
                 "new-equal-name.txt",
             )
@@ -5309,7 +5340,16 @@ mod tests {
             .modified_unix_millis(20)
             .permissions(0o644),
         );
-        let remote_state = replay_operation_log(&[move_operation]);
+        let remote_state = replay_operation_log(&[original_put, move_operation]);
+        assert!(!remote_state.entries.contains_key("old-equal-name.txt"));
+        assert!(remote_state.tombstones.contains_key("old-equal-name.txt"));
+        assert_eq!(
+            remote_state
+                .entries
+                .get("new-equal-name.txt")
+                .and_then(|entry| entry.content_hash.as_deref()),
+            Some("source-hash-new")
+        );
 
         let plan = engine.plan_snapshot_with_remote_state(
             &snapshot,
