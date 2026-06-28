@@ -1736,6 +1736,42 @@ fn tombstone_obsoletes_snapshot_entry(
         .unwrap_or(false)
 }
 
+fn tombstone_obsoletes_manifest_entry(
+    remote_state: Option<&ReplayState>,
+    entry: &TreeEntry,
+) -> bool {
+    let Some(remote_state) = remote_state else {
+        return false;
+    };
+    tombstone_obsoletes_tree_entry(remote_state.tombstones.get(entry.path.as_str()), entry)
+        || ancestor_tombstone_obsoletes_manifest_entry(remote_state, entry)
+}
+
+fn ancestor_tombstone_obsoletes_manifest_entry(
+    remote_state: &ReplayState,
+    entry: &TreeEntry,
+) -> bool {
+    let path = entry.path.as_str();
+    let mut end = path.len();
+    while let Some(separator_index) = path[..end].rfind('/') {
+        let tombstone = remote_state.tombstones.get(&path[..separator_index]);
+        if tombstone_obsoletes_tree_entry(tombstone, entry) {
+            return true;
+        }
+        end = separator_index;
+    }
+    false
+}
+
+fn tombstone_obsoletes_tree_entry(
+    tombstone: Option<&DeleteTombstone>,
+    entry: &TreeEntry,
+) -> bool {
+    tombstone
+        .map(|tombstone| tombstone.modified_unix_millis >= entry.modified_unix_millis)
+        .unwrap_or(false)
+}
+
 fn tombstone_obsoletes_tombstone(left: &DeleteTombstone, right: &DeleteTombstone) -> bool {
     left.modified_unix_millis
         .cmp(&right.modified_unix_millis)
@@ -1896,6 +1932,9 @@ impl ConvergenceEngine {
                 let branch = self.local_policy_branch_for_remote_only_path(snapshot, &path, policy);
                 self.push_policy_action(&mut plan, &path, &branch);
                 if branch != PolicyBranch::Sync {
+                    continue;
+                }
+                if tombstone_obsoletes_manifest_entry(remote_state, &remote_entry) {
                     continue;
                 }
                 let remote_replayed_entry = remote_state.and_then(|state| state.entries.get(&path));
@@ -5127,6 +5166,92 @@ mod tests {
         assert!(!plan.actions.iter().any(|action| matches!(
             action,
             ConvergenceAction::DeleteLocal { path } if path == "local-only.txt"
+        )));
+    }
+
+    #[test]
+    fn snapshot_planning_suppresses_remote_only_stale_manifest_file_with_replay_tombstone() {
+        let local_machine = app_scoped_machine_id("machine-a").expect("machine id");
+        let remote_machine = app_scoped_machine_id("machine-b").expect("machine id");
+        let engine = ConvergenceEngine::new(local_machine, linux_platform("machine-a"));
+        let snapshot = IndexedSnapshot::new("project", Vec::new());
+        let remote_manifest = TreeManifest::new(
+            "remote-stale-delete",
+            "project",
+            vec![TreeEntry::file(
+                "deleted.txt",
+                1,
+                10,
+                0o644,
+                Some("hash-stale".to_owned()),
+            )],
+        );
+        let delete_operation = OperationRecord::from_draft(
+            OperationDraft::new(1, "project", remote_machine, OperationKind::DeletePath, "deleted.txt")
+                .modified_unix_millis(20),
+        );
+        let remote_state = replay_operation_log(&[delete_operation]);
+
+        let plan = engine.plan_snapshot_with_remote_state(
+            &snapshot,
+            Some(&remote_manifest),
+            Some(&remote_state),
+            true,
+            0,
+            &Policy::new(),
+        );
+
+        assert!(plan.actions.is_empty());
+        assert!(!plan.actions.iter().any(|action| matches!(
+            action,
+            ConvergenceAction::FetchContent { path, .. } if path == "deleted.txt"
+        )));
+        assert!(!plan.actions.iter().any(|action| matches!(
+            action,
+            ConvergenceAction::PropagatePermissions { path, .. } if path == "deleted.txt"
+        )));
+    }
+
+    #[test]
+    fn snapshot_planning_suppresses_remote_only_stale_manifest_child_under_directory_tombstone() {
+        let local_machine = app_scoped_machine_id("machine-a").expect("machine id");
+        let remote_machine = app_scoped_machine_id("machine-b").expect("machine id");
+        let engine = ConvergenceEngine::new(local_machine, linux_platform("machine-a"));
+        let snapshot = IndexedSnapshot::new("project", Vec::new());
+        let remote_manifest = TreeManifest::new(
+            "remote-stale-directory-delete",
+            "project",
+            vec![TreeEntry::file(
+                "deleted-dir/child.txt",
+                1,
+                10,
+                0o644,
+                Some("hash-child".to_owned()),
+            )],
+        );
+        let delete_operation = OperationRecord::from_draft(
+            OperationDraft::new(1, "project", remote_machine, OperationKind::DeletePath, "deleted-dir")
+                .modified_unix_millis(20),
+        );
+        let remote_state = replay_operation_log(&[delete_operation]);
+
+        let plan = engine.plan_snapshot_with_remote_state(
+            &snapshot,
+            Some(&remote_manifest),
+            Some(&remote_state),
+            true,
+            0,
+            &Policy::new(),
+        );
+
+        assert!(plan.actions.is_empty());
+        assert!(!plan.actions.iter().any(|action| matches!(
+            action,
+            ConvergenceAction::FetchContent { path, .. } if path == "deleted-dir/child.txt"
+        )));
+        assert!(!plan.actions.iter().any(|action| matches!(
+            action,
+            ConvergenceAction::PropagatePermissions { path, .. } if path == "deleted-dir/child.txt"
         )));
     }
 
