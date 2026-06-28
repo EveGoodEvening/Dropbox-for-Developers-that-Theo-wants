@@ -21,7 +21,7 @@ use crate::policy::{Action, Policy, SYNCIGNORE_FILE_NAME};
 use crate::sync::{
     replay_operation_log, store_blob_id_for_content, write_content_atomically, ConvergenceAction,
     ConvergenceEngine, ConvergencePlan, EndpointSecurityConfig, FileBackedSyncStore,
-    OperationKind, OperationRecord, SharedSecret, TransportMode,
+    OperationKind, OperationRecord, ReplayState, SharedSecret, TransportMode,
 };
 use crate::vfs::{
     AccessLatency, HydrationRequest, Hydrator, VfsAccessError, VfsMount, VfsResult,
@@ -1439,6 +1439,7 @@ struct PlannedWorktree {
     store: FileBackedSyncStore,
     operations: Vec<OperationRecord>,
     remote_manifest: Option<TreeManifest>,
+    remote_state: ReplayState,
     plan: ConvergencePlan,
     local_events: Vec<FsEvent>,
 }
@@ -2153,6 +2154,24 @@ fn convergence_action_touches_any_path(
     }
 }
 
+fn convergence_action_descends_from_any_path(
+    action: &ConvergenceAction,
+    paths: &BTreeSet<String>,
+) -> bool {
+    match action {
+        ConvergenceAction::MovePath { from, to } => {
+            path_descends_from_any(from, paths) || path_descends_from_any(to, paths)
+        }
+        _ => convergence_action_path(action)
+            .map(|path| path_descends_from_any(path, paths))
+            .unwrap_or(false),
+    }
+}
+
+fn path_descends_from_any(path: &str, parents: &BTreeSet<String>) -> bool {
+    parents.iter().any(|parent| is_descendant_path(path, parent))
+}
+
 fn operation_touches_any_path(operation: &OperationRecord, paths: &BTreeSet<String>) -> bool {
     paths.contains(&operation.path)
         || operation
@@ -2226,6 +2245,7 @@ fn plan_current_worktree(
         store,
         operations,
         remote_manifest,
+        remote_state: replay,
         plan,
         local_events,
     })
@@ -2294,9 +2314,14 @@ fn execute_foreground_sync_pass(
     let mut next_operation_sequence = next_sequence(&planned.operations);
     let mut applied_actions = 0usize;
     let mut remote_changed = false;
+    let mut local_tree_changed_by_remote = false;
+    let mut deleted_local_tree_roots = BTreeSet::new();
 
     for action in &planned.plan.actions {
         if convergence_action_touches_any_path(action, &blocked_conflict_paths) {
+            continue;
+        }
+        if convergence_action_descends_from_any_path(action, &deleted_local_tree_roots) {
             continue;
         }
 
@@ -2331,10 +2356,42 @@ fn execute_foreground_sync_pass(
                     "create foreground sync parent failed",
                 )?;
                 match outcome {
-                    ProjectFetchOutcome::Materialized => applied_actions += 1,
+                    ProjectFetchOutcome::Materialized => {
+                        applied_actions += 1;
+                        local_tree_changed_by_remote = true;
+                    }
                     ProjectFetchOutcome::PreservedExisting => {
                         preserved_manifest_paths.insert(path.clone());
                     }
+                }
+            }
+            ConvergenceAction::DeleteLocal { path } => {
+                let delete_local_was_directory = planned
+                    .snapshot
+                    .entry(path)
+                    .map(|entry| entry.catalog_entry.kind == TreeEntryKind::Directory)
+                    .unwrap_or(false);
+                let delete_local_applied = match delete_foreground_local_path(
+                    runtime,
+                    &planned.root,
+                    &planned.policy,
+                    &planned.snapshot,
+                    &planned.remote_state,
+                    path,
+                )? {
+                    ForegroundDeleteLocalOutcome::Removed => {
+                        applied_actions += 1;
+                        local_tree_changed_by_remote = true;
+                        true
+                    }
+                    ForegroundDeleteLocalOutcome::AlreadyAbsent => {
+                        local_tree_changed_by_remote = true;
+                        true
+                    }
+                    ForegroundDeleteLocalOutcome::PreservedChanged => false,
+                };
+                if delete_local_applied && delete_local_was_directory {
+                    deleted_local_tree_roots.insert(path.clone());
                 }
             }
             ConvergenceAction::DeleteRemote { .. } | ConvergenceAction::MovePath { .. } => {
@@ -2421,6 +2478,9 @@ fn execute_foreground_sync_pass(
             &preserved_manifest_paths,
             &mut next_operation_sequence,
         )?;
+        final_state.last_local_manifest = Some(snapshot.manifest);
+    } else if local_tree_changed_by_remote {
+        let snapshot = index_snapshot(runtime, &planned.root, planned.policy.clone())?;
         final_state.last_local_manifest = Some(snapshot.manifest);
     }
     if !final_state.sync_paused {
@@ -2572,7 +2632,9 @@ fn foreground_action_supported(
             store_blob_id: Some(_),
             ..
         } => true,
-        ConvergenceAction::DeleteRemote { .. } | ConvergenceAction::MovePath { .. } => true,
+        ConvergenceAction::DeleteLocal { .. }
+        | ConvergenceAction::DeleteRemote { .. }
+        | ConvergenceAction::MovePath { .. } => true,
         ConvergenceAction::PropagatePermissions { .. } => true,
         ConvergenceAction::Noop { .. }
         | ConvergenceAction::Ignore { .. }
@@ -2583,7 +2645,6 @@ fn foreground_action_supported(
         | ConvergenceAction::QueueOffline { .. } => true,
         ConvergenceAction::FetchContent { store_blob_id: None, .. }
         | ConvergenceAction::FetchSymlinkTargetMetadata { .. }
-        | ConvergenceAction::DeleteLocal { .. }
         | ConvergenceAction::PropagateSymlink { .. }
         | ConvergenceAction::ConflictSidecar { .. } => false,
     }
@@ -2745,6 +2806,126 @@ fn plan_has_push_content(plan: &ConvergencePlan, path: &str) -> bool {
             ConvergenceAction::PushContent { path: action_path, .. } if action_path == path
         )
     })
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ForegroundDeleteLocalOutcome {
+    Removed,
+    AlreadyAbsent,
+    PreservedChanged,
+}
+
+fn delete_foreground_local_path(
+    runtime: &CliRuntime,
+    root: &Path,
+    policy: &Policy,
+    planned_snapshot: &IndexedSnapshot,
+    remote_state: &ReplayState,
+    path: &str,
+) -> Result<ForegroundDeleteLocalOutcome, SyncError> {
+    let relative = normalize_relative_cli_path(path)?;
+    let Some(planned_entry) = planned_snapshot.entry(&relative) else {
+        return Ok(ForegroundDeleteLocalOutcome::AlreadyAbsent);
+    };
+    if !remote_tombstone_obsoletes_snapshot_entry(remote_state, planned_entry) {
+        return Ok(ForegroundDeleteLocalOutcome::PreservedChanged);
+    }
+
+    let current_snapshot = index_snapshot(runtime, root, policy.clone())?;
+    let Some(current_entry) = current_snapshot.entry(&relative) else {
+        return Ok(ForegroundDeleteLocalOutcome::AlreadyAbsent);
+    };
+    if current_entry != planned_entry
+        || !remote_tombstone_obsoletes_snapshot_entry(remote_state, current_entry)
+        || !foreground_delete_descendants_safe(remote_state, &current_snapshot, &relative)
+    {
+        return Ok(ForegroundDeleteLocalOutcome::PreservedChanged);
+    }
+
+    let target = resolve_project_path(root, &relative)?;
+    let metadata = match fs::symlink_metadata(&target) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+            return Ok(ForegroundDeleteLocalOutcome::AlreadyAbsent);
+        }
+        Err(error) => {
+            return Err(SyncError::from(ConfigError::io(
+                target,
+                format!("inspect local tombstone target failed: {error}"),
+            )));
+        }
+    };
+    remove_foreground_delete_target(&target, metadata.file_type().is_dir())
+}
+
+fn foreground_delete_descendants_safe(
+    remote_state: &ReplayState,
+    snapshot: &IndexedSnapshot,
+    delete_root: &str,
+) -> bool {
+    snapshot
+        .entries
+        .iter()
+        .filter(|entry| is_descendant_path(entry.path(), delete_root))
+        .all(|entry| {
+            entry.allows_content_sync()
+                && remote_tombstone_obsoletes_snapshot_entry_at_or_under(
+                    remote_state,
+                    entry,
+                    delete_root,
+                )
+        })
+}
+
+fn is_descendant_path(path: &str, parent: &str) -> bool {
+    path.len() > parent.len()
+        && path.starts_with(parent)
+        && path.as_bytes().get(parent.len()) == Some(&b'/')
+}
+
+fn remote_tombstone_obsoletes_snapshot_entry(
+    remote_state: &ReplayState,
+    entry: &SnapshotEntry,
+) -> bool {
+    remote_state
+        .tombstones
+        .get(entry.path())
+        .map(|tombstone| tombstone.modified_unix_millis >= entry.catalog_entry.modified_unix_millis)
+        .unwrap_or(false)
+}
+
+fn remote_tombstone_obsoletes_snapshot_entry_at_or_under(
+    remote_state: &ReplayState,
+    entry: &SnapshotEntry,
+    delete_root: &str,
+) -> bool {
+    remote_state
+        .tombstones
+        .get(entry.path())
+        .or_else(|| remote_state.tombstones.get(delete_root))
+        .map(|tombstone| tombstone.modified_unix_millis >= entry.catalog_entry.modified_unix_millis)
+        .unwrap_or(false)
+}
+
+fn remove_foreground_delete_target(
+    path: &Path,
+    is_directory: bool,
+) -> Result<ForegroundDeleteLocalOutcome, SyncError> {
+    let result = if is_directory {
+        fs::remove_dir_all(path)
+    } else {
+        fs::remove_file(path)
+    };
+    match result {
+        Ok(()) => Ok(ForegroundDeleteLocalOutcome::Removed),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+            Ok(ForegroundDeleteLocalOutcome::AlreadyAbsent)
+        }
+        Err(error) => Err(SyncError::from(ConfigError::io(
+            path.to_path_buf(),
+            format!("delete local tombstone target failed: {error}"),
+        ))),
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -4051,6 +4232,125 @@ mod tests {
     }
 
     #[test]
+    fn sync_start_applies_remote_delete_tombstone_to_stale_local_path() {
+        let fixture = Fixture::new("foreground-remote-delete-tombstone");
+        let bytes = b"remote contents deleted elsewhere";
+        fixture.seed_remote_file_with_metadata(
+            "manifest-remote-delete-before",
+            "stale.txt",
+            bytes,
+            1,
+            10,
+            0o644,
+        );
+        fixture.run(["dropbox-dev", "sync", "start"]).unwrap();
+        let local_path = fixture.runtime.config.root_paths[0].join("stale.txt");
+        assert_eq!(fs::read(&local_path).unwrap(), bytes);
+
+        fixture.append_remote_delete_tombstone(
+            "manifest-remote-delete-after",
+            "stale.txt",
+            3,
+            u64::MAX,
+        );
+        let controller = DaemonController::new(&fixture.runtime);
+        let state = controller.load_state().unwrap();
+        let planned = plan_current_worktree(&fixture.runtime, &state).unwrap();
+        assert!(planned.plan.actions.iter().any(|action| matches!(
+            action,
+            ConvergenceAction::DeleteLocal { path } if path == "stale.txt"
+        )));
+        assert_eq!(
+            unsupported_foreground_action_count(&planned.plan, planned.remote_manifest.as_ref()),
+            0
+        );
+
+        let start = fixture.run(["dropbox-dev", "sync", "start"]).unwrap();
+
+        assert_contains(&start, "sync_start=foreground-complete");
+        assert_contains(&start, "foreground_work=ok");
+        assert_contains(&start, "foreground_actions_applied=1");
+        assert_contains(&start, "foreground_unsupported_actions=0");
+        assert_contains(&start, "last_error=none");
+        assert_contains(&start, "stale_worktree=clean");
+        assert!(!local_path.exists());
+        let status = fixture.run(["dropbox-dev", "status"]).unwrap();
+        assert_contains(&status, "state_stale_worktree=clean");
+        assert_contains(&status, "stale_worktree=clean");
+        assert_contains(&status, "remote_fetch_actions=0");
+        assert_contains(&status, "local_push_actions=0");
+        assert_contains(&status, "queued_operations_observed=0");
+        assert_contains(&status, "unsupported_actions_observed=0");
+        let final_state = controller.load_state().unwrap();
+        assert_eq!(final_state.stale_worktree, WorktreeStatus::Clean);
+        assert_eq!(final_state.last_error, None);
+    }
+
+    #[test]
+    fn sync_start_applies_remote_move_tombstone_by_removing_stale_source() {
+        let fixture = Fixture::new("foreground-remote-move-tombstone");
+        let bytes = b"remote contents moved elsewhere";
+        fixture.seed_remote_file_with_metadata(
+            "manifest-remote-move-before",
+            "old-name.txt",
+            bytes,
+            1,
+            10,
+            0o644,
+        );
+        fixture.run(["dropbox-dev", "sync", "start"]).unwrap();
+        let root = &fixture.runtime.config.root_paths[0];
+        let old_path = root.join("old-name.txt");
+        let new_path = root.join("new-name.txt");
+        assert_eq!(fs::read(&old_path).unwrap(), bytes);
+
+        fixture.append_remote_move_tombstone(
+            "manifest-remote-move-after",
+            "old-name.txt",
+            "new-name.txt",
+            bytes,
+            3,
+            u64::MAX,
+        );
+        let controller = DaemonController::new(&fixture.runtime);
+        let state = controller.load_state().unwrap();
+        let planned = plan_current_worktree(&fixture.runtime, &state).unwrap();
+        assert!(planned.plan.actions.iter().any(|action| matches!(
+            action,
+            ConvergenceAction::DeleteLocal { path } if path == "old-name.txt"
+        )));
+        assert!(planned.plan.actions.iter().any(|action| matches!(
+            action,
+            ConvergenceAction::FetchContent { path, .. } if path == "new-name.txt"
+        )));
+        assert_eq!(
+            unsupported_foreground_action_count(&planned.plan, planned.remote_manifest.as_ref()),
+            0
+        );
+
+        let start = fixture.run(["dropbox-dev", "sync", "start"]).unwrap();
+
+        assert_contains(&start, "sync_start=foreground-complete");
+        assert_contains(&start, "foreground_work=ok");
+        assert_contains(&start, "foreground_actions_applied=3");
+        assert_contains(&start, "foreground_unsupported_actions=0");
+        assert_contains(&start, "last_error=none");
+        assert_contains(&start, "stale_worktree=clean");
+        assert!(!old_path.exists());
+        assert_eq!(fs::read(&new_path).unwrap(), bytes);
+        let status = fixture.run(["dropbox-dev", "status"]).unwrap();
+        assert_contains(&status, "state_stale_worktree=clean");
+        assert_contains(&status, "stale_worktree=clean");
+        assert_contains(&status, "remote_fetch_actions=0");
+        assert_contains(&status, "local_push_actions=0");
+        assert_contains(&status, "queued_operations_observed=0");
+        assert_contains(&status, "unsupported_actions_observed=0");
+        let final_state = controller.load_state().unwrap();
+        assert_eq!(final_state.stale_worktree, WorktreeStatus::Clean);
+        assert_eq!(final_state.last_error, None);
+    }
+
+    #[test]
     fn sync_start_leaves_conflict_sidecar_paths_pending_without_overwriting_loser() {
         let fixture = Fixture::new("foreground-conflict-sidecar");
         let local_bytes = b"local loser contents";
@@ -4692,6 +4992,9 @@ mod tests {
             fs::create_dir_all(&cache_dir).unwrap();
             fs::create_dir_all(&transport_dir).unwrap();
             let machine_id = app_scoped_machine_id(&format!("{label}-machine")).unwrap();
+            let project_id = format!("project-{label}");
+            let remote_machine_id =
+                app_scoped_machine_id(&format!("{project_id}-remote-peer")).unwrap();
             let config = Config {
                 machine_id: machine_id.clone(),
                 machine_id_provenance: MachineIdProvenance::ConfigFile(config_path.clone()),
@@ -4705,9 +5008,9 @@ mod tests {
                 config,
                 platform,
                 project_root,
-                format!("project-{label}"),
+                project_id,
                 format!("pairing-token-{label}"),
-                vec![machine_id],
+                vec![machine_id, remote_machine_id],
             );
             Self { root, runtime }
         }
@@ -4884,6 +5187,114 @@ mod tests {
             );
             store.append_operation(&manifest_operation).unwrap();
             blob_id
+        }
+
+        fn append_remote_delete_tombstone(
+            &self,
+            manifest_id: &str,
+            relative: &str,
+            sequence: u64,
+            modified_unix_millis: u64,
+        ) {
+            let remote_machine_id = self.remote_peer_machine_id();
+            let store = self.remote_peer_store(&remote_machine_id);
+            let delete_operation = OperationRecord::from_draft(
+                OperationDraft::new(
+                    sequence,
+                    self.runtime.project_id.clone(),
+                    remote_machine_id.clone(),
+                    OperationKind::DeletePath,
+                    relative,
+                )
+                .modified_unix_millis(modified_unix_millis),
+            );
+            store.append_operation(&delete_operation).unwrap();
+            let remote_manifest = TreeManifest::new(
+                manifest_id,
+                self.runtime.project_id.clone(),
+                Vec::<TreeEntry>::new(),
+            );
+            store.put_manifest(&remote_manifest).unwrap();
+            let manifest_operation = OperationRecord::from_draft(
+                OperationDraft::new(
+                    sequence + 1,
+                    self.runtime.project_id.clone(),
+                    remote_machine_id,
+                    OperationKind::PutManifest,
+                    "manifest",
+                )
+                .manifest_id(remote_manifest.id.clone())
+                .payload_id(remote_manifest.id.clone())
+                .modified_unix_millis(sequence + 1),
+            );
+            store.append_operation(&manifest_operation).unwrap();
+        }
+
+        fn append_remote_move_tombstone(
+            &self,
+            manifest_id: &str,
+            from: &str,
+            to: &str,
+            bytes: &[u8],
+            sequence: u64,
+            modified_unix_millis: u64,
+        ) {
+            let remote_machine_id = self.remote_peer_machine_id();
+            let store = self.remote_peer_store(&remote_machine_id);
+            let blob_id = sync_content_hash(bytes);
+            store.put_content_blob(&blob_id, bytes).unwrap();
+            let source_hash = watcher_content_hash(bytes);
+            let move_operation = OperationRecord::from_draft(
+                OperationDraft::new(
+                    sequence,
+                    self.runtime.project_id.clone(),
+                    remote_machine_id.clone(),
+                    OperationKind::MovePath,
+                    to,
+                )
+                .previous_path(from)
+                .content_hash(source_hash)
+                .payload_id(blob_id.clone())
+                .modified_unix_millis(modified_unix_millis)
+                .permissions(0o644),
+            );
+            store.append_operation(&move_operation).unwrap();
+            let remote_manifest = TreeManifest::new(
+                manifest_id,
+                self.runtime.project_id.clone(),
+                vec![TreeEntry::file(
+                    to,
+                    bytes.len() as u64,
+                    modified_unix_millis,
+                    0o644,
+                    Some(blob_id),
+                )],
+            );
+            store.put_manifest(&remote_manifest).unwrap();
+            let manifest_operation = OperationRecord::from_draft(
+                OperationDraft::new(
+                    sequence + 1,
+                    self.runtime.project_id.clone(),
+                    remote_machine_id,
+                    OperationKind::PutManifest,
+                    "manifest",
+                )
+                .manifest_id(remote_manifest.id.clone())
+                .payload_id(remote_manifest.id.clone())
+                .modified_unix_millis(sequence + 1),
+            );
+            store.append_operation(&manifest_operation).unwrap();
+        }
+
+        fn remote_peer_store(&self, remote_machine_id: &str) -> FileBackedSyncStore {
+            let mut runtime = self.runtime.clone();
+            runtime.config.machine_id = remote_machine_id.to_owned();
+            runtime.platform = test_platform(remote_machine_id);
+            connect_transport(&runtime).unwrap()
+        }
+
+        fn remote_peer_machine_id(&self) -> String {
+            app_scoped_machine_id(&format!("{}-remote-peer", self.runtime.project_id)).unwrap()
         }
     }
 
