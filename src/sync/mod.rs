@@ -1714,6 +1714,23 @@ fn tombstone_obsoletes_entry(
         })
         .unwrap_or(false)
 }
+
+fn tombstone_obsoletes_snapshot_entry(
+    tombstone: Option<&DeleteTombstone>,
+    entry: &SnapshotEntry,
+    local_machine_id: &str,
+) -> bool {
+    tombstone
+        .map(|tombstone| {
+            tombstone
+                .modified_unix_millis
+                .cmp(&entry.catalog_entry.modified_unix_millis)
+                .then_with(|| tombstone.source_machine_id.as_str().cmp(local_machine_id))
+                != std::cmp::Ordering::Less
+        })
+        .unwrap_or(false)
+}
+
 fn tombstone_obsoletes_tombstone(left: &DeleteTombstone, right: &DeleteTombstone) -> bool {
     left.modified_unix_millis
         .cmp(&right.modified_unix_millis)
@@ -1806,13 +1823,24 @@ impl ConvergenceEngine {
         let mut plan = ConvergencePlan::default();
         let mut next_sequence = start_sequence;
         for entry in &snapshot.entries {
+            if is_sync_partial_artifact(entry.path()) {
+                push_sync_partial_artifact_ignore(&mut plan, entry.path());
+                continue;
+            }
             let branch = PolicyBranch::from_entry(entry);
             self.push_policy_action(&mut plan, entry.path(), &branch);
             if branch != PolicyBranch::Sync {
                 continue;
             }
             let remote_entry = remote_entries.get(entry.path());
+            let remote_tombstone = remote_state.and_then(|state| state.tombstones.get(entry.path()));
             let remote_replayed_entry = remote_state.and_then(|state| state.entries.get(entry.path()));
+            if tombstone_obsoletes_snapshot_entry(remote_tombstone, entry, &self.local_machine_id) {
+                plan.actions.push(ConvergenceAction::DeleteLocal {
+                    path: entry.path().to_owned(),
+                });
+                continue;
+            }
             if let Some(remote_entry) = remote_entry {
                 if self.push_snapshot_conflict_resolution(
                     &mut plan,
@@ -1855,6 +1883,10 @@ impl ConvergenceEngine {
             );
         }
         for (path, remote_entry) in remote_entries {
+            if is_sync_partial_artifact(&path) {
+                push_sync_partial_artifact_ignore(&mut plan, &path);
+                continue;
+            }
             if !local_paths.contains(&path) {
                 let branch = self.local_policy_branch_for_remote_only_path(snapshot, &path, policy);
                 self.push_policy_action(&mut plan, &path, &branch);
@@ -1892,6 +1924,13 @@ impl ConvergenceEngine {
         sequence: u64,
     ) -> ConvergencePlan {
         let mut plan = ConvergencePlan::default();
+        if event_touches_sync_partial_artifact(event) {
+            plan.actions.push(ConvergenceAction::Noop {
+                reason: "internal sync partial artifact ignored".to_owned(),
+            });
+            plan.sort_actions();
+            return plan;
+        }
         let branch = event
             .policy_metadata()
             .map(|metadata| PolicyBranch::from_metadata(&event.path, metadata))
@@ -3041,6 +3080,25 @@ fn local_metadata_wins(
         .cmp(&remote_modified_unix_millis)
         .then_with(|| local_machine_id.cmp(SYNC_REMOTE_MANIFEST_MACHINE_ID))
         == std::cmp::Ordering::Greater
+}
+
+fn is_sync_partial_artifact(path: &str) -> bool {
+    path.split('/').any(|component| component.ends_with(SYNC_PARTIAL_SUFFIX))
+}
+
+fn event_touches_sync_partial_artifact(event: &FsEvent) -> bool {
+    is_sync_partial_artifact(&event.path)
+        || event
+            .previous_path
+            .as_deref()
+            .map(is_sync_partial_artifact)
+            .unwrap_or(false)
+}
+
+fn push_sync_partial_artifact_ignore(plan: &mut ConvergencePlan, path: &str) {
+    plan.actions.push(ConvergenceAction::Ignore {
+        path: path.to_owned(),
+    });
 }
 
 fn entries_by_path(manifest: &TreeManifest) -> BTreeMap<String, TreeEntry> {
@@ -5066,6 +5124,166 @@ mod tests {
             ConvergenceAction::DeleteLocal { path } if path == "local-only.txt"
         )));
     }
+
+    #[test]
+    fn snapshot_planning_uses_remote_delete_tombstone_instead_of_reuploading_stale_local_file() {
+        let local_machine = app_scoped_machine_id("machine-a").expect("machine id");
+        let remote_machine = app_scoped_machine_id("machine-b").expect("machine id");
+        let engine = ConvergenceEngine::new(local_machine, linux_platform("machine-a"));
+        let snapshot = IndexedSnapshot::new(
+            "project",
+            vec![SnapshotEntry::new(
+                TreeEntry::file("deleted.txt", 1, 10, 0o644, Some("hash-stale".to_owned())),
+                PolicyMetadata::from_action(Action::Sync),
+            )],
+        );
+        let remote_manifest = TreeManifest::new("remote-after-delete", "project", Vec::new());
+        let delete_operation = OperationRecord::from_draft(
+            OperationDraft::new(1, "project", remote_machine, OperationKind::DeletePath, "deleted.txt")
+                .modified_unix_millis(20),
+        );
+        let remote_state = replay_operation_log(&[delete_operation]);
+
+        let plan = engine.plan_snapshot_with_remote_state(
+            &snapshot,
+            Some(&remote_manifest),
+            Some(&remote_state),
+            true,
+            0,
+            &Policy::new(),
+        );
+
+        assert!(plan.actions.iter().any(|action| matches!(
+            action,
+            ConvergenceAction::DeleteLocal { path } if path == "deleted.txt"
+        )));
+        assert!(!plan.actions.iter().any(|action| matches!(
+            action,
+            ConvergenceAction::PushContent { path, .. } if path == "deleted.txt"
+        )));
+        assert!(plan.queued_operations.is_empty());
+    }
+
+    #[test]
+    fn snapshot_planning_uses_remote_move_tombstone_instead_of_reuploading_stale_source() {
+        let local_machine = app_scoped_machine_id("machine-a").expect("machine id");
+        let remote_machine = app_scoped_machine_id("machine-b").expect("machine id");
+        let engine = ConvergenceEngine::new(local_machine, linux_platform("machine-a"));
+        let snapshot = IndexedSnapshot::new(
+            "project",
+            vec![SnapshotEntry::new(
+                TreeEntry::file("old-name.txt", 1, 10, 0o644, Some("hash-stale".to_owned())),
+                PolicyMetadata::from_action(Action::Sync),
+            )],
+        );
+        let remote_manifest = TreeManifest::new(
+            "remote-after-move",
+            "project",
+            vec![TreeEntry::file(
+                "new-name.txt",
+                1,
+                20,
+                0o644,
+                Some("store-hash-new".to_owned()),
+            )],
+        );
+        let move_operation = OperationRecord::from_draft(
+            OperationDraft::new(1, "project", remote_machine, OperationKind::MovePath, "new-name.txt")
+                .previous_path("old-name.txt")
+                .content_hash("source-hash-new")
+                .payload_id("store-hash-new")
+                .modified_unix_millis(20)
+                .permissions(0o644),
+        );
+        let remote_state = replay_operation_log(&[move_operation]);
+
+        let plan = engine.plan_snapshot_with_remote_state(
+            &snapshot,
+            Some(&remote_manifest),
+            Some(&remote_state),
+            true,
+            0,
+            &Policy::new(),
+        );
+
+        assert!(plan.actions.iter().any(|action| matches!(
+            action,
+            ConvergenceAction::DeleteLocal { path } if path == "old-name.txt"
+        )));
+        assert!(plan.actions.iter().any(|action| matches!(
+            action,
+            ConvergenceAction::FetchContent { path, store_blob_id, .. }
+                if path == "new-name.txt" && store_blob_id.as_deref() == Some("store-hash-new")
+        )));
+        assert!(!plan.actions.iter().any(|action| matches!(
+            action,
+            ConvergenceAction::PushContent { path, .. } if path == "old-name.txt"
+        )));
+    }
+
+    #[test]
+    fn snapshot_planning_ignores_sync_partial_artifacts_instead_of_uploading_them() {
+        let engine = ConvergenceEngine::new(
+            app_scoped_machine_id("machine-a").expect("machine id"),
+            linux_platform("machine-a"),
+        );
+        let partial_path = format!("dir/.file.txt{SYNC_PARTIAL_SUFFIX}");
+        let snapshot = IndexedSnapshot::new(
+            "project",
+            vec![SnapshotEntry::new(
+                TreeEntry::file(partial_path.clone(), 1, 10, 0o644, Some("hash-partial".to_owned())),
+                PolicyMetadata::from_action(Action::Sync),
+            )],
+        );
+        let remote_manifest = TreeManifest::new("remote-empty", "project", Vec::new());
+
+        let plan = engine.plan_snapshot(&snapshot, Some(&remote_manifest), true, 0, &Policy::new());
+
+        assert!(plan.actions.iter().any(|action| matches!(
+            action,
+            ConvergenceAction::Ignore { path } if path == &partial_path
+        )));
+        assert!(!plan.actions.iter().any(|action| matches!(
+            action,
+            ConvergenceAction::PushContent { path, .. } if path == &partial_path
+        )));
+        assert!(!plan.actions.iter().any(|action| matches!(
+            action,
+            ConvergenceAction::PropagatePermissions { path, .. } if path == &partial_path
+        )));
+    }
+
+    #[test]
+    fn event_planning_ignores_sync_partial_artifact_moves() {
+        let engine = ConvergenceEngine::new(
+            app_scoped_machine_id("machine-a").expect("machine id"),
+            linux_platform("machine-a"),
+        );
+        let before = snapshot_entry(
+            &format!("dir/.file.txt{SYNC_PARTIAL_SUFFIX}"),
+            Action::Sync,
+            Some("hash-partial"),
+        );
+        let after = snapshot_entry("dir/file.txt", Action::Sync, Some("hash-final"));
+        let event = FsEvent::moved(before, after);
+
+        let plan = engine.plan_event("project", &event, true, 1);
+
+        assert!(plan.actions.iter().any(|action| matches!(
+            action,
+            ConvergenceAction::Noop { reason } if reason == "internal sync partial artifact ignored"
+        )));
+        assert!(!plan.actions.iter().any(|action| matches!(
+            action,
+            ConvergenceAction::MovePath { from, to }
+                if from.ends_with(SYNC_PARTIAL_SUFFIX) || to == "dir/file.txt"
+        )));
+        assert!(!plan.actions.iter().any(|action| matches!(
+            action,
+            ConvergenceAction::PushContent { path, .. } if path == "dir/file.txt"
+        )));
+    }
+
 
     #[test]
     fn snapshot_planning_uses_metadata_actions_for_local_only_directories_and_symlinks() {
