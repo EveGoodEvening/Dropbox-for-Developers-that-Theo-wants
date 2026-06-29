@@ -53,6 +53,9 @@ tempfile = "3.20.0"
 insta = { version = "1.43.1", features = ["json", "redactions"] }
 unicode-normalization = "0.1.24"
 globset = "0.4.18"
+axum = "0.8.9"
+tower = "0.5.2"
+hyper = "1.6.0"
 
 [profile.dev]
 debug = 1
