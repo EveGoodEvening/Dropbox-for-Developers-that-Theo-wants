@@ -263,15 +263,18 @@ impl InboundLoop {
                 Err(e) => {
                     let msg = format!("{e}");
                     if msg.contains("revision_conflict") || msg.contains("conflict") {
-                        // Stale base revision: record a conflict and drop the op.
+                        // Stale base revision: record a conflict preserving the
+                        // local revision reference and mark the node conflict
+                        // state so its bytes are not evicted (design §13.3/§7.3).
+                        let device_name = hostname::get()
+                            .map_or_else(|_| "unknown".to_owned(), |h| h.to_string_lossy().to_string());
                         if let Some(node_id) = op.target_node() {
-                            let conflict_path = format!("conflict-{}", op_data.op_id);
-                            if let Err(err) = self.store.record_conflict(
+                            if let Err(err) = record_stale_op_conflict(
+                                &self.store,
                                 workspace_id,
                                 node_id,
-                                &conflict_path,
-                                None,
-                                None,
+                                &op,
+                                &device_name,
                             ) {
                                 warn!("rebase: failed to record conflict: {err}");
                             }
@@ -369,6 +372,70 @@ impl InboundLoop {
     }
 }
 
+/// Record a conflict for a stale operation, preserving the local revision
+/// reference and marking the node's hydration state as `conflict` so its
+/// bytes are not evicted (`design.md` §13.3/§7.3).
+///
+/// # Errors
+/// Returns an error if the conflict cannot be recorded or the node state
+/// cannot be updated.
+fn record_stale_op_conflict(
+    store: &fs2_sync::LocalStore,
+    workspace_id: fs2_core::WorkspaceId,
+    node_id: fs2_core::NodeId,
+    op: &fs2_core::Operation,
+    device_name: &str,
+) -> anyhow::Result<()> {
+    let ts = chrono::Utc::now()
+        .format("%Y-%m-%dT%H-%M-%S")
+        .to_string();
+    // Derive a display filename from the node, if known.
+    let base_name = store
+        .get_node_by_id(node_id)
+        .ok()
+        .flatten()
+        .map_or_else(|| node_id.to_string(), |n| n.name);
+    let conflict_path = conflict_filename(&base_name, device_name, &ts);
+    // Extract the local revision id from a PutFileRevision op.
+    let local_rev = match &op.kind {
+        fs2_core::OperationKind::PutFileRevision { revision, .. } => {
+            Some(revision.revision_id.to_string())
+        }
+        _ => None,
+    };
+    store.record_conflict(
+        workspace_id,
+        node_id,
+        &conflict_path,
+        None,
+        local_rev.as_deref(),
+    )?;
+    // Mark the node's local state as Conflict so its bytes are not evicted.
+    store.set_hydration_state(node_id, "conflict")?;
+    Ok(())
+}
+
+/// Generate a deterministic conflict filename per `design.md` §13.3:
+/// `<filename>.conflict.<device-name>.<timestamp>.<ext>`.
+///
+/// Sanitizes the device name and preserves the file extension.
+fn conflict_filename(base_name: &str, device_name: &str, ts: &str) -> String {
+    let sanitized_device: String = device_name
+        .chars()
+        .map(|c| if c.is_alphanumeric() || c == '-' || c == '_' { c } else { '-' })
+        .collect();
+    // Split base_name into stem + extension.
+    let (stem, ext) = match base_name.rfind('.') {
+        Some(idx) if idx > 0 => (&base_name[..idx], &base_name[idx + 1..]),
+        _ => (base_name, ""),
+    };
+    if ext.is_empty() {
+        format!("{stem}.conflict.{sanitized_device}.{ts}")
+    } else {
+        format!("{stem}.conflict.{sanitized_device}.{ts}.{ext}")
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -381,5 +448,129 @@ mod tests {
         assert!(state.is_online());
         state.set_online(false);
         assert!(!state.is_online());
+    }
+
+    #[test]
+    fn conflict_filename_preserves_extension() {
+        let name = conflict_filename("app.ts", "mac-mini-2", "2026-06-28T13-04-11");
+        assert_eq!(name, "app.conflict.mac-mini-2.2026-06-28T13-04-11.ts");
+    }
+
+    #[test]
+    fn conflict_filename_no_extension() {
+        let name = conflict_filename("README", "laptop", "2026-06-29T00-00-00");
+        assert_eq!(name, "README.conflict.laptop.2026-06-29T00-00-00");
+    }
+
+    #[test]
+    fn conflict_filename_sanitizes_device_name() {
+        let name = conflict_filename("app.ts", "my device/name", "2026-06-29T00-00-00");
+        assert_eq!(name, "app.conflict.my-device-name.2026-06-29T00-00-00.ts");
+    }
+
+    #[test]
+    fn record_stale_op_conflict_preserves_local_revision_and_marks_state() {
+        use fs2_core::{Cursor, DeviceId, NodeKind, NodeRevision, Operation, OperationKind,
+            RevisionContent, RevisionId, WorkspaceId};
+        use fs2_sync::LocalStore;
+
+        let store = LocalStore::open_in_memory().unwrap();
+        let ws_id = WorkspaceId::new();
+        let root_id = fs2_core::NodeId::new();
+        let device = DeviceId::new();
+        store.upsert_workspace(ws_id, "test-ws", root_id).unwrap();
+        store.insert_root_node(ws_id, root_id).unwrap();
+
+        // Create a file node via operation replay.
+        let file_node_id = fs2_core::NodeId::new();
+        let rev_id = RevisionId::new();
+        let blob_id = format!("sha256:{file_node_id}");
+        let op = Operation::new(
+            ws_id,
+            device,
+            Cursor::zero(),
+            OperationKind::CreateNode {
+                parent_id: root_id,
+                name: "app.ts".to_owned(),
+                kind: NodeKind::File,
+                initial_revision: Some(NodeRevision {
+                    revision_id: rev_id,
+                    node_id: file_node_id,
+                    workspace_id: ws_id,
+                    device_id: device,
+                    base_revision_id: None,
+                    content: RevisionContent::File {
+                        blob_id: blob_id.clone(),
+                        chunk_ids: vec![],
+                        content_hash: "hash".to_owned(),
+                        encryption_header: None,
+                    },
+                    posix_mode: 0o644,
+                    mtime: chrono::Utc::now(),
+                    size: 10,
+                    executable: false,
+                    created_at: chrono::Utc::now(),
+                }),
+            },
+            chrono::Utc::now(),
+        );
+        store.apply_operation(&op, Cursor::from(1)).unwrap();
+        let file_node = store
+            .get_node_by_path(ws_id, "app.ts")
+            .unwrap()
+            .expect("file node");
+
+        // Build a PutFileRevision op (the stale local edit) carrying a new revision.
+        let new_rev_id = RevisionId::new();
+        let stale_op = Operation::new(
+            ws_id,
+            device,
+            Cursor::from(1),
+            OperationKind::PutFileRevision {
+                node_id: file_node.node_id,
+                base_revision_id: Some(rev_id),
+                revision: NodeRevision {
+                    revision_id: new_rev_id,
+                    node_id: file_node.node_id,
+                    workspace_id: ws_id,
+                    device_id: device,
+                    base_revision_id: Some(rev_id),
+                    content: RevisionContent::File {
+                        blob_id: format!("sha256:{new_rev_id}"),
+                        chunk_ids: vec![],
+                        content_hash: "hash2".to_owned(),
+                        encryption_header: None,
+                    },
+                    posix_mode: 0o644,
+                    mtime: chrono::Utc::now(),
+                    size: 12,
+                    executable: false,
+                    created_at: chrono::Utc::now(),
+                },
+            },
+            chrono::Utc::now(),
+        );
+
+        // Record the conflict as the rebase path would.
+        record_stale_op_conflict(&store, ws_id, file_node.node_id, &stale_op, "laptop-1")
+            .unwrap();
+
+        // A conflict row exists with the local revision id preserved.
+        let conflicts = store.list_conflicts(ws_id).unwrap();
+        assert_eq!(conflicts.len(), 1);
+        assert_eq!(
+            conflicts[0].local_revision_id.as_deref(),
+            Some(new_rev_id.to_string().as_str()),
+            "local revision id must be preserved in the conflict row"
+        );
+        assert!(conflicts[0].conflict_path.contains("app.conflict.laptop-1."));
+        assert_eq!(std::path::Path::new(&conflicts[0].conflict_path).extension().and_then(|e| e.to_str()), Some("ts"), "conflict path preserves extension");
+
+        // The node's hydration state is 'conflict' (non-evictable).
+        let state = store
+            .get_hydration_state(file_node.node_id)
+            .unwrap()
+            .expect("state row");
+        assert_eq!(state, "conflict");
     }
 }

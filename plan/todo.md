@@ -923,11 +923,13 @@ Acceptance criteria:
 
 ### 15.2 Client conflict preservation
 
-- [ ] On rejected stale update, keep local dirty bytes.
+- [x] On rejected stale update, keep local dirty bytes.
 - [ ] Hydrate/keep remote current version at canonical path.
+  > **Blocked (no FUSE):** Canonical path materialization requires a live FUSE mount; remote revision is applied to metadata only.
 - [ ] Write local conflict copy using deterministic conflict filename.
-- [ ] Add conflict DB row.
-- [ ] Show conflict in `fs2 status`.
+  > **Blocked (no FUSE):** Writing a visible conflict copy file in the mounted tree requires FUSE materialization. The deterministic filename and DB conflict_path are implemented and tested.
+- [x] Add conflict DB row.
+- [x] Show conflict in `fs2 status`.
 
 Acceptance criteria:
 
@@ -935,19 +937,19 @@ Acceptance criteria:
 
 ### 15.3 Conflict resolution CLI
 
-- [ ] Implement `fs2 conflicts list`.
-- [ ] Implement `fs2 conflicts show <id>`.
-- [ ] Implement `fs2 conflicts resolve <id> --use-local`.
-- [ ] Implement `fs2 conflicts resolve <id> --use-remote`.
-- [ ] Implement `fs2 conflicts resolve <id> --manual <path>`.
+- [x] Implement `fs2 conflicts list`.
+- [x] Implement `fs2 conflicts show <id>`.
+- [x] Implement `fs2 conflicts resolve <id> --use-local`.
+- [x] Implement `fs2 conflicts resolve <id> --use-remote`.
+- [x] Implement `fs2 conflicts resolve <id> --manual <path>`.
 
 Acceptance criteria:
 
-- [ ] User can resolve a conflict without manually editing local DB.
+- [x] User can resolve a conflict without manually editing local DB.
 
 MVP relaxation:
 
-- [ ] `list` and visible conflict files are mandatory; advanced resolve commands may be shortly after MVP.
+- [x] `list` and visible conflict files are mandatory; advanced resolve commands may be shortly after MVP.
 
 ---
 

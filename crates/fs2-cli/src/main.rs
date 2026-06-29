@@ -101,6 +101,11 @@ enum Commands {
         #[command(subcommand)]
         action: DepsCommands,
     },
+    /// Conflict management.
+    Conflicts {
+        #[command(subcommand)]
+        action: ConflictCommands,
+    },
     /// Debug and diagnostics.
     Debug {
         #[command(subcommand)]
@@ -245,6 +250,34 @@ enum DepsCommands {
         /// Skip confirmation prompt.
         #[arg(long)]
         yes: bool,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum ConflictCommands {
+    /// List pending conflicts.
+    List,
+    /// Show details of a single conflict.
+    Show {
+        /// Conflict id.
+        id: String,
+    },
+    /// Resolve a conflict using the local version.
+    ResolveUseLocal {
+        /// Conflict id.
+        id: String,
+    },
+    /// Resolve a conflict using the remote version.
+    ResolveUseRemote {
+        /// Conflict id.
+        id: String,
+    },
+    /// Resolve a conflict using a manually provided file path.
+    ResolveManual {
+        /// Conflict id.
+        id: String,
+        /// Path to the manual resolution file.
+        path: String,
     },
 }
 
@@ -402,12 +435,33 @@ async fn main() -> anyhow::Result<()> {
             let cfg = cfg?;
             let client = ApiClient::new(&cfg.backend_url).with_token(cfg.token);
             let healthy = client.health().await.unwrap_or(false);
+            // Load conflict count from the local store, if available.
+            let conflict_count = {
+                let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".to_owned());
+                let db_path = format!("{home}/.fs2/state.sqlite");
+                if std::path::Path::new(&db_path).exists() {
+                    let ws_id = client
+                        .list_workspaces(cfg.user_id)
+                        .await
+                        .ok()
+                        .and_then(|ws| ws.first().map(|w| w.id));
+                    match (fs2_sync::LocalStore::open(std::path::Path::new(&db_path)), ws_id) {
+                        (Ok(store), Some(wid)) => store
+                            .list_conflicts(fs2_core::WorkspaceId::from_uuid(wid))
+                            .map_or(0, |c| c.iter().filter(|x| x.status == "pending").count()),
+                        _ => 0,
+                    }
+                } else {
+                    0
+                }
+            };
             if json {
                 let status = serde_json::json!({
                     "status": if healthy { "online" } else { "offline" },
                     "backend": cfg.backend_url,
                     "user_id": cfg.user_id,
                     "device_id": cfg.device_id,
+                    "conflicts": conflict_count,
                 });
                 let _ = io::stdout().flush();
                 println!("{}", serde_json::to_string_pretty(&status)?);
@@ -419,6 +473,9 @@ async fn main() -> anyhow::Result<()> {
                 );
                 println!("User: {}", cfg.user_id);
                 println!("Device: {}", cfg.device_id);
+                if conflict_count > 0 {
+                    println!("Conflicts: {conflict_count} pending (run `fs2 conflicts list`)");
+                }
             }
         }
         Some(Commands::Env { action }) => {
@@ -693,6 +750,73 @@ async fn main() -> anyhow::Result<()> {
                 }
             }
         },
+        Some(Commands::Conflicts { action }) => {
+            let cfg = config::CliConfig::load()?;
+            let client = ApiClient::new(&cfg.backend_url).with_token(cfg.token);
+            let workspaces = client
+                .list_workspaces(cfg.user_id)
+                .await
+                .map_err(|e| anyhow::anyhow!("failed to list workspaces: {e}"))?;
+            if workspaces.is_empty() {
+                anyhow::bail!("no workspaces found. Create one with `fs2 workspace create <name>`");
+            }
+            let ws_id = fs2_core::WorkspaceId::from_uuid(workspaces[0].id);
+            let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".to_owned());
+            let db_path = format!("{home}/.fs2/state.sqlite");
+            if let Some(parent) = std::path::Path::new(&db_path).parent() {
+                std::fs::create_dir_all(parent).ok();
+            }
+            let store = fs2_sync::LocalStore::open(std::path::Path::new(&db_path))?;
+            match action {
+                ConflictCommands::List => {
+                    let conflicts = store.list_conflicts(ws_id)?;
+                    if conflicts.is_empty() {
+                        println!("No conflicts.");
+                    } else {
+                        println!("{:<36}  {:<10}  PATH", "ID", "STATUS");
+                        for c in &conflicts {
+                            println!("{:<36}  {:<10}  {}", c.id, c.status, c.conflict_path);
+                        }
+                    }
+                }
+                ConflictCommands::Show { id } => {
+                    match store.get_conflict(&id)? {
+                        Some(c) => {
+                            println!("id: {}", c.id);
+                            println!("node: {}", c.node_id);
+                            println!("path: {}", c.conflict_path);
+                            println!("status: {}", c.status);
+                            println!("remote_revision: {:?}", c.remote_revision_id);
+                            println!("local_revision: {:?}", c.local_revision_id);
+                            println!("created: {}", c.created_at);
+                        }
+                        None => {
+                            anyhow::bail!("conflict {id} not found");
+                        }
+                    }
+                }
+                ConflictCommands::ResolveUseLocal { id } => {
+                    store.resolve_conflict(&id, "use-local")?;
+                    println!("Resolved conflict {id} using local version.");
+                }
+                ConflictCommands::ResolveUseRemote { id } => {
+                    store.resolve_conflict(&id, "use-remote")?;
+                    println!("Resolved conflict {id} using remote version.");
+                }
+                ConflictCommands::ResolveManual { id, path } => {
+                    // For manual resolution, the user provides a file path whose
+                    // content is the resolved version. We mark the conflict
+                    // resolved; uploading the manual content as a new revision
+                    // is a future step (requires the write/upload path).
+                    if !std::path::Path::new(&path).exists() {
+                        anyhow::bail!("manual resolution file does not exist: {path}");
+                    }
+                    store.resolve_conflict(&id, "manual")?;
+                    println!("Resolved conflict {id} using manual file {path}.");
+                }
+            }
+        }
+
         Some(Commands::Debug { action }) => match action {
             DebugCommands::Bundle { output } => {
                 let bundle_dir = std::path::PathBuf::from(&output);

@@ -350,7 +350,7 @@ impl LocalStore {
         conflict_path: &str,
         remote_revision_id: Option<&str>,
         local_revision_id: Option<&str>,
-    ) -> LocalStoreResult<()> {
+    ) -> LocalStoreResult<String> {
         let conn = self.conn.lock().unwrap();
         let id = uuid::Uuid::new_v4().to_string();
         conn.execute(
@@ -367,6 +367,71 @@ impl LocalStore {
                 Utc::now().to_rfc3339(),
             ],
         )?;
+        Ok(id)
+    }
+
+    /// List all pending conflicts for a workspace.
+    pub fn list_conflicts(&self, workspace_id: WorkspaceId) -> LocalStoreResult<Vec<Conflict>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT id, workspace_id, node_id, conflict_path, remote_revision_id, local_revision_id, status, created_at \
+             FROM conflicts WHERE workspace_id = ?1 ORDER BY created_at ASC",
+        )?;
+        let conflicts = stmt
+            .query_map(rusqlite::params![workspace_id.to_string()], |row| {
+                Ok(Conflict {
+                    id: row.get(0)?,
+                    workspace_id: row.get(1)?,
+                    node_id: row.get(2)?,
+                    conflict_path: row.get(3)?,
+                    remote_revision_id: row.get(4)?,
+                    local_revision_id: row.get(5)?,
+                    status: row.get(6)?,
+                    created_at: row.get(7)?,
+                })
+            })?
+            .filter_map(std::result::Result::ok)
+            .collect();
+        Ok(conflicts)
+    }
+
+    /// Get a single conflict by id.
+    pub fn get_conflict(&self, conflict_id: &str) -> LocalStoreResult<Option<Conflict>> {
+        let conn = self.conn.lock().unwrap();
+        let result = conn
+            .query_row(
+                "SELECT id, workspace_id, node_id, conflict_path, remote_revision_id, local_revision_id, status, created_at \
+                 FROM conflicts WHERE id = ?1",
+                rusqlite::params![conflict_id],
+                |row| {
+                    Ok(Conflict {
+                        id: row.get(0)?,
+                        workspace_id: row.get(1)?,
+                        node_id: row.get(2)?,
+                        conflict_path: row.get(3)?,
+                        remote_revision_id: row.get(4)?,
+                        local_revision_id: row.get(5)?,
+                        status: row.get(6)?,
+                        created_at: row.get(7)?,
+                    })
+                },
+            )
+            .ok();
+        Ok(result)
+    }
+
+    /// Mark a conflict as resolved with the given strategy.
+    ///
+    /// `strategy` is one of: `use-local`, `use-remote`, `manual`.
+    pub fn resolve_conflict(&self, conflict_id: &str, strategy: &str) -> LocalStoreResult<()> {
+        let conn = self.conn.lock().unwrap();
+        let rows = conn.execute(
+            "UPDATE conflicts SET status = ?1 WHERE id = ?2",
+            rusqlite::params![format!("resolved:{strategy}"), conflict_id],
+        )?;
+        if rows == 0 {
+            return Err(LocalStoreError::NodeNotFound(format!("conflict {conflict_id} not found")));
+        }
         Ok(())
     }
 
@@ -690,6 +755,27 @@ pub struct PendingOp {
     pub retry_count: i64,
     /// Last error message.
     pub last_error: Option<String>,
+}
+
+/// A conflict record.
+#[derive(Debug, Clone)]
+pub struct Conflict {
+    /// Conflict id (UUID string).
+    pub id: String,
+    /// Workspace id (string).
+    pub workspace_id: String,
+    /// Node id (string).
+    pub node_id: String,
+    /// Deterministic conflict path/filename (`design.md` §13.3).
+    pub conflict_path: String,
+    /// Remote revision id, if known.
+    pub remote_revision_id: Option<String>,
+    /// Local revision id, if known.
+    pub local_revision_id: Option<String>,
+    /// Status: `pending` or `resolved:<strategy>`.
+    pub status: String,
+    /// Creation timestamp (RFC3339).
+    pub created_at: String,
 }
 
 /// Apply an operation within a transaction.
@@ -1303,5 +1389,46 @@ mod tests {
         let evicted = store.prune_cache(1000).unwrap();
         assert_eq!(evicted, 0);
         assert_eq!(store.get_cache_size().unwrap(), 100);
+    }
+
+    #[test]
+    fn conflict_record_list_get_resolve() {
+        let (store, _ws_id, _root_id) = setup_store();
+        let ws_id = WorkspaceId::new();
+        let node_id = NodeId::new();
+        let id = store
+            .record_conflict(
+                ws_id,
+                node_id,
+                "app.conflict.laptop-1.2026-06-29T00-00-00.ts",
+                Some("rev-remote"),
+                Some("rev-local"),
+            )
+            .unwrap();
+        // List conflicts.
+        let conflicts = store.list_conflicts(ws_id).unwrap();
+        assert_eq!(conflicts.len(), 1);
+        assert_eq!(conflicts[0].id, id);
+        assert_eq!(conflicts[0].status, "pending");
+        assert_eq!(conflicts[0].conflict_path, "app.conflict.laptop-1.2026-06-29T00-00-00.ts");
+        assert_eq!(conflicts[0].remote_revision_id.as_deref(), Some("rev-remote"));
+        assert_eq!(conflicts[0].local_revision_id.as_deref(), Some("rev-local"));
+        // Get by id.
+        let c = store.get_conflict(&id).unwrap().expect("conflict");
+        assert_eq!(c.id, id);
+        // Resolve.
+        store.resolve_conflict(&id, "use-local").unwrap();
+        let resolved = store.get_conflict(&id).unwrap().expect("conflict");
+        assert_eq!(resolved.status, "resolved:use-local");
+        // list_conflicts still returns it (status filter is not applied); the
+        // CLI filters pending by status.
+        assert_eq!(store.list_conflicts(ws_id).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn resolve_unknown_conflict_is_error() {
+        let (store, _ws_id, _root_id) = setup_store();
+        let err = store.resolve_conflict("nonexistent", "use-local").unwrap_err();
+        assert!(err.to_string().contains("not found"));
     }
 }
