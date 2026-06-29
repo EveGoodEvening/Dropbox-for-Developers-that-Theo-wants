@@ -205,6 +205,97 @@ impl InboundLoop {
         Ok(applied)
     }
 
+    /// Rebase after a reconnect: fetch and apply remote ops since the local
+    /// cursor, then process pending local ops.
+    ///
+    /// Each pending op is submitted to the backend. If the backend rejects it
+    /// because the base revision is stale (revision conflict), a conflict
+    /// record is created locally and the op is removed from the queue.
+    /// Otherwise the op is removed on success and kept for retry on
+    /// transient failures.
+    ///
+    /// # Errors
+    /// Returns an error if fetching/applying remote ops or accessing the
+    /// local store fails.
+    pub async fn rebase_after_reconnect(&self, workspace_id: WorkspaceId) -> anyhow::Result<()> {
+        // 1. Fetch and apply remote ops since the local cursor.
+        let applied = self.sync_remote(workspace_id).await?;
+        if applied > 0 {
+            info!("rebase: applied {applied} remote ops");
+        }
+
+        // 2. Process pending local ops: submit each, create conflict if stale.
+        let pending = self.store.list_pending_ops()?;
+        let mut submitted = 0;
+        let mut conflicts = 0;
+        for op_data in pending {
+            // Deserialize the operation kind from the payload.
+            let op_kind: fs2_core::OperationKind = match serde_json::from_str(&op_data.payload) {
+                Ok(k) => k,
+                Err(e) => {
+                    warn!("rebase: failed to deserialize pending op: {e}");
+                    continue;
+                }
+            };
+
+            let op_id: uuid::Uuid = op_data.op_id.parse().unwrap_or_else(|_| uuid::Uuid::nil());
+            let ws_id: uuid::Uuid = op_data
+                .workspace_id
+                .parse()
+                .unwrap_or_else(|_| uuid::Uuid::nil());
+            let op = fs2_core::Operation {
+                op_id: fs2_core::OpId::from_uuid(op_id),
+                workspace_id: WorkspaceId::from_uuid(ws_id),
+                device_id: fs2_core::DeviceId::from_uuid(uuid::Uuid::nil()),
+                base_cursor: Cursor::zero(),
+                kind: op_kind,
+                created_at: chrono::Utc::now(),
+            };
+
+            match self.client.commit_operation(workspace_id, &op).await {
+                Ok(_response) => {
+                    if let Err(e) = self.store.remove_pending_op(&op_data.op_id) {
+                        warn!("rebase: failed to remove pending op: {e}");
+                    }
+                    submitted += 1;
+                    debug!("rebase: submitted pending op {}", op_data.op_id);
+                }
+                Err(e) => {
+                    let msg = format!("{e}");
+                    if msg.contains("revision_conflict") || msg.contains("conflict") {
+                        // Stale base revision: record a conflict and drop the op.
+                        if let Some(node_id) = op.target_node() {
+                            let conflict_path = format!("conflict-{}", op_data.op_id);
+                            if let Err(err) = self.store.record_conflict(
+                                workspace_id,
+                                node_id,
+                                &conflict_path,
+                                None,
+                                None,
+                            ) {
+                                warn!("rebase: failed to record conflict: {err}");
+                            }
+                        }
+                        if let Err(err) = self.store.remove_pending_op(&op_data.op_id) {
+                            warn!("rebase: failed to remove stale op: {err}");
+                        }
+                        conflicts += 1;
+                        warn!(
+                            "rebase: pending op {} is stale, recorded conflict",
+                            op_data.op_id
+                        );
+                    } else {
+                        // Transient failure: keep in queue for retry.
+                        warn!("rebase: failed to submit pending op {}: {e}", op_data.op_id);
+                    }
+                }
+            }
+        }
+
+        info!("rebase: submitted {submitted} ops, {conflicts} conflicts");
+        Ok(())
+    }
+
     /// Check backend health and update online status.
     pub async fn check_health(&self) {
         let healthy = self.client.health().await.unwrap_or(false);

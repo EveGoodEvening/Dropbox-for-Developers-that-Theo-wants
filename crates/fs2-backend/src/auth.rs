@@ -11,6 +11,8 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use crate::error::{BackendError, BackendResult};
+use crate::routes::AppState;
+use axum::extract::State;
 
 /// JWT claims for an authenticated device.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -86,6 +88,66 @@ impl AuthState {
                     format!("invalid token: {e}"),
                 ))
             })
+    }
+}
+
+/// Axum extractor that reads claims from request extensions.
+/// This is set by the auth middleware.
+#[derive(Debug, Clone)]
+pub struct AuthClaims(pub Claims);
+
+/// Axum middleware that extracts and verifies the JWT from the Authorization header.
+/// On success, inserts `AuthClaims` into request extensions.
+/// On failure, returns 401.
+pub async fn auth_middleware(
+    State(state): State<AppState>,
+    mut req: axum::http::Request<axum::body::Body>,
+    next: axum::middleware::Next,
+) -> axum::response::Response {
+    // Skip auth for health and dev-login endpoints.
+    let path = req.uri().path();
+    if path == "/healthz" || path == "/v1/auth/dev-login" {
+        return next.run(req).await;
+    }
+    // Extract Bearer token from Authorization header.
+    let auth_header = req
+        .headers()
+        .get(axum::http::header::AUTHORIZATION)
+        .and_then(|v| v.to_str().ok());
+    let token = match auth_header {
+        Some(h) if h.starts_with("Bearer ") => &h[7..],
+        _ => {
+            return axum::response::Response::builder()
+                .status(axum::http::StatusCode::UNAUTHORIZED)
+                .body(axum::body::Body::from(
+                    serde_json::json!({
+                        "error": {
+                            "code": "unauthorized",
+                            "message": "missing or invalid Authorization header"
+                        }
+                    })
+                    .to_string(),
+                ))
+                .unwrap();
+        }
+    };
+    match state.auth.verify_token(token) {
+        Ok(claims) => {
+            req.extensions_mut().insert(AuthClaims(claims));
+            next.run(req).await
+        }
+        Err(e) => axum::response::Response::builder()
+            .status(axum::http::StatusCode::UNAUTHORIZED)
+            .body(axum::body::Body::from(
+                serde_json::json!({
+                    "error": {
+                        "code": "unauthorized",
+                        "message": e.to_string()
+                    }
+                })
+                .to_string(),
+            ))
+            .unwrap(),
     }
 }
 

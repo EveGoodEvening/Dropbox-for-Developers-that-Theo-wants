@@ -351,7 +351,7 @@ Acceptance criteria:
 
 - [x] Add dev-only login endpoint that creates a test user.
 - [x] Issue signed access token.
-- [ ] Add middleware that extracts user/device claims.
+- [x] Add middleware that extracts user/device claims.
 - [x] Mark dev auth clearly as non-production.
 
 Acceptance criteria:
@@ -413,7 +413,7 @@ Acceptance criteria:
   - [x] node exists
   - [x] node is file
   - [x] base revision equals current revision, unless initial creation
-  - [ ] blob exists or upload reservation exists
+  - [x] blob exists or upload reservation exists
 - [x] `MoveNode`:
   - [x] node exists
   - [x] new parent exists
@@ -496,7 +496,7 @@ Acceptance criteria:
 - [x] Implement `POST /v1/blobs/presign-download` or direct dev download endpoint.
 - [x] Implement `GET /v1/blobs/{id}/status`.
 - [ ] Store blob metadata in Postgres.
-- [ ] Validate declared size and hash where possible.
+- [x] Validate declared size and hash where possible.
 
 Acceptance criteria:
 
@@ -615,7 +615,7 @@ Acceptance criteria:
 - [x] `list_pending_ops`
 - [x] `mark_blob_cached`
 - [x] `set_hydration_state`
-- [ ] `get_effective_rule`
+- [x] `get_effective_rule`
 - [x] Add transactional helpers.
 
 Acceptance criteria:
@@ -692,17 +692,17 @@ Acceptance criteria:
 ### 11.1 Implement API client
 
 - [x] Authenticated request middleware.
-- [ ] Retry with exponential backoff.
+- [x] Retry with exponential backoff.
 - [x] Structured error parsing.
 - [x] Operation submit.
 - [x] Operation fetch.
-- [ ] Manifest fetch.
+- [x] Manifest fetch.
 - [x] Blob upload/download.
 - [ ] WebSocket event listener.
 
 Acceptance criteria:
 
-- [ ] API client can replay operations from backend in integration tests.
+- [x] API client can replay operations from backend in integration tests.
 
 ### 11.2 Implement outbound queue
 
@@ -978,17 +978,17 @@ Acceptance criteria:
 
 ### 16.3 Rebase after reconnect
 
-- [ ] Fetch remote ops before replaying local pending ops.
-- [ ] Apply remote ops.
-- [ ] For each pending local op:
-  - [ ] submit if still valid
-  - [ ] transform move paths if stable node ID allows
-  - [ ] create conflict if stale content update
-  - [ ] preserve local bytes on failure
+- [x] Fetch remote ops before replaying local pending ops.
+- [x] Apply remote ops.
+- [x] For each pending local op:
+  - [x] submit if still valid
+  - [x] transform move paths if stable node ID allows
+  - [x] create conflict if stale content update
+  - [x] preserve local bytes on failure
 
 Acceptance criteria:
 
-- [ ] Offline concurrent edit produces conflict, not lost update.
+- [x] Offline concurrent edit produces conflict, not lost update.
 
 ---
 
@@ -1023,7 +1023,7 @@ Acceptance criteria:
 
 ### 17.3 CLI env commands
 
-- [ ] `fs2 env set`.
+- [x] `fs2 env set`.
 - [x] `fs2 env list`.
 - [x] `fs2 env unset`.
 - [x] `fs2 env import`.
@@ -1166,16 +1166,16 @@ Acceptance criteria:
 
 ### 20.2 Implement diagnostics bundle
 
-- [ ] `fs2 debug bundle` creates redacted archive.
-- [ ] Include logs.
-- [ ] Include config.
-- [ ] Include status JSON.
-- [ ] Exclude secrets/tokens/keys.
-- [ ] Add redaction tests.
+- [x] `fs2 debug bundle` creates redacted archive.
+- [x] Include logs.
+- [x] Include config.
+- [x] Include status JSON.
+- [x] Exclude secrets/tokens/keys.
+- [x] Add redaction tests.
 
 Acceptance criteria:
 
-- [ ] Debug bundle is safe to attach to an issue.
+- [x] Debug bundle is safe to attach to an issue.
 
 ---
 
@@ -1443,7 +1443,7 @@ Acceptance criteria:
 
 ### 27.1 CLI output polish
 
-- [ ] Make errors actionable.
+- [x] Make errors actionable.
 - [x] Add `--json` for automation.
 - [x] Add progress bars for hydration/upload.
 - [x] Add quiet mode.

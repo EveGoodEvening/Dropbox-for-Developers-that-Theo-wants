@@ -11,7 +11,8 @@ use fs2_core::{Cursor, Operation, WorkspaceId};
 use reqwest::header::{HeaderMap, HeaderValue, AUTHORIZATION};
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
-use tracing::debug;
+use tokio::time::sleep;
+use tracing::{debug, warn};
 
 /// API client for the fs2 backend.
 #[derive(Clone)]
@@ -170,6 +171,45 @@ impl ApiClient {
         format!("{}{path}", self.base_url)
     }
 
+    /// Send a request with retry and exponential backoff.
+    ///
+    /// Retries up to 3 times with backoff (100ms, 200ms, 400ms) on transient
+    /// errors (connection/timeout failures). HTTP error responses (4xx/5xx)
+    /// are returned as-is for the caller to handle — only transport-level
+    /// failures trigger a retry.
+    ///
+    /// # Errors
+    /// Returns the last transport error if all attempts fail.
+    async fn send_with_retry(&self, req: reqwest::RequestBuilder) -> Result<reqwest::Response> {
+        const MAX_ATTEMPTS: usize = 3;
+        const BACKOFF_MS: &[u64] = &[100, 200, 400];
+
+        let mut last_err: Option<anyhow::Error> = None;
+        for (attempt, &backoff) in BACKOFF_MS.iter().enumerate().take(MAX_ATTEMPTS) {
+            // `RequestBuilder` is not `Clone`, but `try_clone` indicates whether
+            // the underlying request can be retried. For bodyless or
+            // simple-body requests reqwest supports cloning the builder.
+            let attempt_req = req
+                .try_clone()
+                .ok_or_else(|| anyhow!("request is not cloneable and cannot be retried"))?;
+            match attempt_req.send().await {
+                Ok(resp) => return Ok(resp),
+                Err(e) => {
+                    last_err = Some(anyhow::Error::from(e));
+                    if attempt + 1 < MAX_ATTEMPTS {
+                        warn!(
+                            attempt = attempt + 1,
+                            max = MAX_ATTEMPTS,
+                            "HTTP request failed, retrying after backoff"
+                        );
+                        sleep(Duration::from_millis(backoff)).await;
+                    }
+                }
+            }
+        }
+        Err(last_err.unwrap_or_else(|| anyhow!("send_with_retry exhausted attempts with no error")))
+    }
+
     /// Dev login: create a test user and device, get a token.
     ///
     /// # Errors
@@ -180,16 +220,15 @@ impl ApiClient {
         device_name: &str,
         public_key: &str,
     ) -> Result<DevLoginResponse> {
-        let resp = self
+        let req = self
             .client
             .post(self.url("/v1/auth/dev-login"))
             .json(&serde_json::json!({
                 "email": email,
                 "device_name": device_name,
                 "public_key": public_key,
-            }))
-            .send()
-            .await?;
+            }));
+        let resp = self.send_with_retry(req).await?;
         if !resp.status().is_success() {
             let status = resp.status();
             let body = resp.text().await.unwrap_or_default();
@@ -209,7 +248,7 @@ impl ApiClient {
         device_id: uuid::Uuid,
         name: &str,
     ) -> Result<WorkspaceResponse> {
-        let resp = self
+        let req = self
             .client
             .post(self.url("/v1/workspaces"))
             .headers(self.build_headers())
@@ -217,9 +256,8 @@ impl ApiClient {
                 "user_id": user_id,
                 "device_id": device_id,
                 "name": name,
-            }))
-            .send()
-            .await?;
+            }));
+        let resp = self.send_with_retry(req).await?;
         Self::parse_response(resp).await
     }
 
@@ -228,13 +266,12 @@ impl ApiClient {
     /// # Errors
     /// Returns an error if the request fails.
     pub async fn list_workspaces(&self, user_id: uuid::Uuid) -> Result<Vec<WorkspaceResponse>> {
-        let resp = self
+        let req = self
             .client
             .get(self.url("/v1/workspaces"))
             .headers(self.build_headers())
-            .query(&[("user_id", user_id.to_string())])
-            .send()
-            .await?;
+            .query(&[("user_id", user_id.to_string())]);
+        let resp = self.send_with_retry(req).await?;
         Self::parse_response(resp).await
     }
 
@@ -243,13 +280,12 @@ impl ApiClient {
     /// # Errors
     /// Returns an error if the request fails.
     pub async fn list_devices(&self, user_id: uuid::Uuid) -> Result<Vec<DeviceResponse>> {
-        let resp = self
+        let req = self
             .client
             .get(self.url("/v1/devices"))
             .headers(self.build_headers())
-            .query(&[("user_id", user_id.to_string())])
-            .send()
-            .await?;
+            .query(&[("user_id", user_id.to_string())]);
+        let resp = self.send_with_retry(req).await?;
         Self::parse_response(resp).await
     }
 
@@ -262,13 +298,12 @@ impl ApiClient {
         workspace_id: WorkspaceId,
         op: &Operation,
     ) -> Result<CommitOpResponse> {
-        let resp = self
+        let req = self
             .client
             .post(self.url(&format!("/v1/workspaces/{workspace_id}/ops")))
             .headers(self.build_headers())
-            .json(&serde_json::json!({ "operation": op }))
-            .send()
-            .await?;
+            .json(&serde_json::json!({ "operation": op }));
+        let resp = self.send_with_retry(req).await?;
         Self::parse_response(resp).await
     }
 
@@ -282,16 +317,15 @@ impl ApiClient {
         since: Cursor,
         limit: usize,
     ) -> Result<FetchOpsResponse> {
-        let resp = self
+        let req = self
             .client
             .get(self.url(&format!("/v1/workspaces/{workspace_id}/ops")))
             .headers(self.build_headers())
             .query(&[
                 ("since", since.as_i64().to_string()),
                 ("limit", limit.to_string()),
-            ])
-            .send()
-            .await?;
+            ]);
+        let resp = self.send_with_retry(req).await?;
         Self::parse_response(resp).await
     }
 
@@ -300,15 +334,14 @@ impl ApiClient {
     /// # Errors
     /// Returns an error if the upload fails.
     pub async fn upload_blob(&self, blob_id: &str, data: Vec<u8>) -> Result<()> {
-        let resp = self
+        let req = self
             .client
             .post(self.url("/v1/blobs/upload"))
             .headers(self.build_headers())
             .header("content-type", "application/octet-stream")
             .header("x-blob-id", blob_id)
-            .body(data)
-            .send()
-            .await?;
+            .body(data);
+        let resp = self.send_with_retry(req).await?;
         if !resp.status().is_success() {
             let status = resp.status();
             let body = resp.text().await.unwrap_or_default();
@@ -322,13 +355,12 @@ impl ApiClient {
     /// # Errors
     /// Returns an error if the download fails.
     pub async fn download_blob(&self, blob_id: &str) -> Result<Vec<u8>> {
-        let resp = self
+        let req = self
             .client
             .get(self.url("/v1/blobs/download"))
             .headers(self.build_headers())
-            .query(&[("blob_id", blob_id)])
-            .send()
-            .await?;
+            .query(&[("blob_id", blob_id)]);
+        let resp = self.send_with_retry(req).await?;
         if !resp.status().is_success() {
             let status = resp.status();
             let body = resp.text().await.unwrap_or_default();
@@ -343,7 +375,8 @@ impl ApiClient {
     /// # Errors
     /// Returns an error if the health check fails.
     pub async fn health(&self) -> Result<bool> {
-        let resp = self.client.get(self.url("/healthz")).send().await?;
+        let req = self.client.get(self.url("/healthz"));
+        let resp = self.send_with_retry(req).await?;
         Ok(resp.status().is_success())
     }
 
@@ -359,7 +392,7 @@ impl ApiClient {
         name: &str,
         encrypted_value: &str,
     ) -> Result<EnvVarApiResponse> {
-        let resp = self
+        let req = self
             .client
             .post(self.url(&format!("/v1/workspaces/{workspace_id}/env")))
             .headers(self.build_headers())
@@ -368,9 +401,8 @@ impl ApiClient {
                 "environment": environment,
                 "name": name,
                 "encrypted_value": encrypted_value,
-            }))
-            .send()
-            .await?;
+            }));
+        let resp = self.send_with_retry(req).await?;
         Self::parse_response(resp).await
     }
 
@@ -384,16 +416,15 @@ impl ApiClient {
         project_path: Option<&str>,
         environment: Option<&str>,
     ) -> Result<Vec<EnvVarApiResponse>> {
-        let resp = self
+        let req = self
             .client
             .get(self.url(&format!("/v1/workspaces/{workspace_id}/env")))
             .headers(self.build_headers())
             .query(&[
                 ("project_path", project_path.unwrap_or("")),
                 ("environment", environment.unwrap_or("")),
-            ])
-            .send()
-            .await?;
+            ]);
+        let resp = self.send_with_retry(req).await?;
         Self::parse_response(resp).await
     }
 
@@ -406,12 +437,11 @@ impl ApiClient {
         workspace_id: WorkspaceId,
         env_var_id: uuid::Uuid,
     ) -> Result<()> {
-        let resp = self
+        let req = self
             .client
             .delete(self.url(&format!("/v1/workspaces/{workspace_id}/env/{env_var_id}")))
-            .headers(self.build_headers())
-            .send()
-            .await?;
+            .headers(self.build_headers());
+        let resp = self.send_with_retry(req).await?;
         if !resp.status().is_success() {
             let status = resp.status();
             let body = resp.text().await.unwrap_or_default();
@@ -430,13 +460,12 @@ impl ApiClient {
         path: &str,
         depth: usize,
     ) -> Result<Vec<ManifestEntry>> {
-        let resp = self
+        let req = self
             .client
             .get(self.url(&format!("/v1/workspaces/{workspace_id}/manifest")))
             .headers(self.build_headers())
-            .query(&[("path", path), ("depth", &depth.to_string())])
-            .send()
-            .await?;
+            .query(&[("path", path), ("depth", &depth.to_string())]);
+        let resp = self.send_with_retry(req).await?;
         Self::parse_response(resp).await
     }
 

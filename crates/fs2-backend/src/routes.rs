@@ -70,7 +70,8 @@ pub fn app(state: AppState) -> Router {
             get(list_env_vars).post(set_env_var),
         )
         .route("/v1/workspaces/:workspace_id/env/:env_var_id", axum::routing::delete(delete_env_var))
-        .with_state(state)
+        .with_state(state.clone())
+        .layer(axum::middleware::from_fn_with_state(state, crate::auth::auth_middleware))
 }
 
 /// GET /healthz
@@ -386,6 +387,13 @@ async fn upload_blob(
                 "missing x-blob-id header",
             ))
         })?;
+    let computed_blob_id = fs2_crypto::compute_blob_id(&body);
+    if computed_blob_id != blob_id {
+        return Err(BackendError::Domain(fs2_core::Fs2Error::new(
+            fs2_core::Fs2ErrorCode::InvalidOperation,
+            "blob hash mismatch: x-blob-id does not match computed hash",
+        )));
+    }
     state
         .blob_store
         .put(blob_id, body)
@@ -693,6 +701,11 @@ mod tests {
             .store
             .register_device(user_id, "laptop", "fake-key")
             .unwrap();
+        // Issue a token for auth.
+        let token = state
+            .auth
+            .issue_token(user_id, device.id.as_uuid())
+            .unwrap();
         let app = app(state);
         let response = app
             .oneshot(
@@ -700,6 +713,7 @@ mod tests {
                     .method("POST")
                     .uri("/v1/workspaces")
                     .header("content-type", "application/json")
+                    .header("authorization", format!("Bearer {token}"))
                     .body(Body::from(
                         serde_json::json!({
                             "user_id": user_id,
@@ -723,13 +737,31 @@ mod tests {
     #[tokio::test]
     async fn blob_upload_download_roundtrip() {
         let state = test_state();
+        let user_id = state.store.create_dev_user("test@example.com").unwrap();
+        let device = state
+            .store
+            .register_device(user_id, "laptop", "fake-key")
+            .unwrap();
+        let token = state
+            .auth
+            .issue_token(user_id, device.id.as_uuid())
+            .unwrap();
         let blob_id = fs2_crypto::compute_blob_id(b"test blob content");
-        // Upload.
-        state
-            .blob_store
-            .put(&blob_id, bytes::Bytes::from(b"test blob content".to_vec()))
+        // Upload via HTTP with auth and correct hash.
+        let app = app(state.clone());
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/blobs/upload")
+                    .header("x-blob-id", &blob_id)
+                    .header("authorization", format!("Bearer {token}"))
+                    .body(Body::from(b"test blob content".to_vec()))
+                    .unwrap(),
+            )
             .await
             .unwrap();
+        assert_eq!(response.status(), StatusCode::CREATED);
         // Download and verify hash.
         let data = state.blob_store.get(&blob_id).await.unwrap();
         assert!(fs2_crypto::verify_blob_id(&data, &blob_id));

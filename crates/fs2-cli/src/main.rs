@@ -72,6 +72,20 @@ enum Commands {
         #[command(subcommand)]
         action: DepsCommands,
     },
+    /// Debug and diagnostics.
+    Debug {
+        #[command(subcommand)]
+        action: DebugCommands,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum DebugCommands {
+    /// Collect diagnostics into a bundle directory.
+    Bundle {
+        /// Output directory path for the bundle.
+        output: String,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -588,6 +602,44 @@ async fn main() -> anyhow::Result<()> {
                 }
             }
         },
+        Some(Commands::Debug { action }) => match action {
+            DebugCommands::Bundle { output } => {
+                let bundle_dir = std::path::PathBuf::from(&output);
+                std::fs::create_dir_all(&bundle_dir)
+                    .map_err(|e| anyhow::anyhow!("failed to create bundle dir {output}: {e}"))?;
+
+                let home = std::env::var("HOME")
+                    .map(std::path::PathBuf::from)
+                    .map_err(|_| {
+                        anyhow::anyhow!("cannot determine home directory (HOME not set)")
+                    })?;
+                let fs2_dir = home.join(".fs2");
+
+                // 1. Redacted config.json
+                let config_path = fs2_dir.join("config.json");
+                if config_path.exists() {
+                    let raw = std::fs::read_to_string(&config_path)
+                        .map_err(|e| anyhow::anyhow!("failed to read config: {e}"))?;
+                    let redacted = redact_secrets(&raw);
+                    std::fs::write(bundle_dir.join("config.json"), redacted)
+                        .map_err(|e| anyhow::anyhow!("failed to write redacted config: {e}"))?;
+                }
+
+                // 2. Logs directory (copied recursively if it exists)
+                let logs_src = fs2_dir.join("logs");
+                if logs_src.is_dir() {
+                    let logs_dst = bundle_dir.join("logs");
+                    copy_dir_recursive(&logs_src, &logs_dst)?;
+                }
+
+                // 3. Status JSON output
+                let status_json = build_status_json().await;
+                std::fs::write(bundle_dir.join("status.json"), status_json)
+                    .map_err(|e| anyhow::anyhow!("failed to write status.json: {e}"))?;
+
+                println!("Debug bundle written to {output}");
+            }
+        },
         None => {
             println!("fs2: see `fs2 --help`");
         }
@@ -599,4 +651,156 @@ async fn main() -> anyhow::Result<()> {
 fn base64_encode(data: &str) -> String {
     use base64::Engine;
     base64::engine::general_purpose::STANDARD.encode(data.as_bytes())
+}
+
+/// Redact secret values in a config JSON string.
+///
+/// Replaces values associated with sensitive keys (`token`, `secret`,
+/// `private_key`, `privateKey`, `password`) with `REDACTED`. Works on the
+/// raw text so it catches both pretty-printed and compact JSON.
+fn redact_secrets(raw: &str) -> String {
+    // Parse as JSON and walk the structure so we only redact values of
+    // sensitive keys, leaving everything else intact.
+    let parsed: serde_json::Value = match serde_json::from_str(raw) {
+        Ok(v) => v,
+        Err(_) => {
+            // Not valid JSON; fall back to a conservative regex-style redaction.
+            return redact_raw_text(raw);
+        }
+    };
+    let mut redacted = parsed;
+    redact_json_value(&mut redacted);
+    serde_json::to_string_pretty(&redacted).unwrap_or_else(|_| raw.to_owned())
+}
+
+/// Recursively redact sensitive values in a JSON value.
+fn redact_json_value(value: &mut serde_json::Value) {
+    match value {
+        serde_json::Value::Object(map) => {
+            for (key, val) in map.iter_mut() {
+                if is_sensitive_key(key) {
+                    *val = serde_json::Value::String("REDACTED".to_owned());
+                } else {
+                    redact_json_value(val);
+                }
+            }
+        }
+        serde_json::Value::Array(items) => {
+            for item in items.iter_mut() {
+                redact_json_value(item);
+            }
+        }
+        _ => {}
+    }
+}
+
+/// Whether a key name refers to a sensitive value.
+fn is_sensitive_key(key: &str) -> bool {
+    let lower = key.to_ascii_lowercase();
+    matches!(
+        lower.as_str(),
+        "token"
+            | "secret"
+            | "secrets"
+            | "private_key"
+            | "privatekey"
+            | "private_keys"
+            | "password"
+            | "passwd"
+            | "api_key"
+            | "apikey"
+            | "access_token"
+            | "refresh_token"
+    )
+}
+
+/// Fallback text redaction for non-JSON config files.
+fn redact_raw_text(raw: &str) -> String {
+    // Redact `"<sensitive-key>": "<value>"` patterns.
+    let sensitive = [
+        "token",
+        "secret",
+        "secrets",
+        "private_key",
+        "privateKey",
+        "private_keys",
+        "password",
+        "passwd",
+        "api_key",
+        "apiKey",
+        "access_token",
+        "refresh_token",
+    ];
+    let mut out = raw.to_owned();
+    for key in sensitive {
+        // Match "key": "value"  (JSON-style)
+        let pattern_json = format!("\"{key}\":");
+        if let Some(pos) = out.find(&pattern_json) {
+            let after = &out[pos + pattern_json.len()..];
+            if let Some(start) = after.find('"') {
+                let value_start = pos + pattern_json.len() + start + 1;
+                if let Some(end_rel) = out[value_start..].find('"') {
+                    let value_end = value_start + end_rel;
+                    out.replace_range(value_start..value_end, "REDACTED");
+                }
+            }
+        }
+        // Match key=value (dotenv-style)
+        let pattern_dotenv = format!("{key}=");
+        if let Some(pos) = out.find(&pattern_dotenv) {
+            let value_start = pos + pattern_dotenv.len();
+            let rest = &out[value_start..];
+            let value_end = rest.find('\n').map_or(out.len(), |e| value_start + e);
+            out.replace_range(value_start..value_end, "REDACTED\n");
+        }
+    }
+    out
+}
+
+/// Recursively copy a directory tree.
+fn copy_dir_recursive(src: &std::path::Path, dst: &std::path::Path) -> anyhow::Result<()> {
+    std::fs::create_dir_all(dst)
+        .map_err(|e| anyhow::anyhow!("failed to create {}: {e}", dst.display()))?;
+    for entry in std::fs::read_dir(src)
+        .map_err(|e| anyhow::anyhow!("failed to read {}: {e}", src.display()))?
+    {
+        let entry = entry.map_err(|e| anyhow::anyhow!("dir entry error: {e}"))?;
+        let path = entry.path();
+        let name = entry.file_name();
+        let dst_child = dst.join(&name);
+        if path.is_dir() {
+            copy_dir_recursive(&path, &dst_child)?;
+        } else if path.is_file() {
+            // Redact log file contents too, in case tokens leak into logs.
+            let content = std::fs::read_to_string(&path).unwrap_or_default();
+            let redacted = redact_raw_text(&content);
+            std::fs::write(&dst_child, redacted)
+                .map_err(|e| anyhow::anyhow!("failed to write {}: {e}", dst_child.display()))?;
+        }
+    }
+    Ok(())
+}
+
+/// Build a status JSON string for the debug bundle.
+async fn build_status_json() -> String {
+    // Attempt to load config; if missing, report not_logged_in.
+    let cfg = config::CliConfig::load();
+    let status = match cfg {
+        Ok(c) => {
+            let client = ApiClient::new(&c.backend_url).with_token(c.token.clone());
+            let healthy = client.health().await.unwrap_or(false);
+            serde_json::json!({
+                "status": if healthy { "online" } else { "offline" },
+                "backend": c.backend_url,
+                "user_id": c.user_id,
+                "device_id": c.device_id,
+            })
+        }
+        Err(_) => {
+            serde_json::json!({
+                "status": "not_logged_in",
+            })
+        }
+    };
+    serde_json::to_string_pretty(&status).unwrap_or_else(|_| "{}".to_owned())
 }

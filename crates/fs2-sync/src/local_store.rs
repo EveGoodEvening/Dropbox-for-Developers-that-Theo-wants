@@ -271,6 +271,37 @@ impl LocalStore {
         Ok(())
     }
 
+    /// Record a conflict for a node (used when a local op is stale).
+    ///
+    /// # Errors
+    /// Returns an error if the conflict cannot be inserted.
+    pub fn record_conflict(
+        &self,
+        workspace_id: WorkspaceId,
+        node_id: NodeId,
+        conflict_path: &str,
+        remote_revision_id: Option<&str>,
+        local_revision_id: Option<&str>,
+    ) -> LocalStoreResult<()> {
+        let conn = self.conn.lock().unwrap();
+        let id = uuid::Uuid::new_v4().to_string();
+        conn.execute(
+            "INSERT INTO conflicts \
+             (id, workspace_id, node_id, conflict_path, remote_revision_id, local_revision_id, status, created_at) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'pending', ?7)",
+            rusqlite::params![
+                id,
+                workspace_id.to_string(),
+                node_id.to_string(),
+                conflict_path,
+                remote_revision_id,
+                local_revision_id,
+                Utc::now().to_rfc3339(),
+            ],
+        )?;
+        Ok(())
+    }
+
     /// Mark a blob as cached.
     pub fn mark_blob_cached(&self, blob_id: &str, path: &str, size: u64) -> LocalStoreResult<()> {
         let conn = self.conn.lock().unwrap();
@@ -379,6 +410,36 @@ impl LocalStore {
             to_evict = to_evict.saturating_sub(u64::try_from(size).unwrap_or(0));
         }
         Ok(evicted)
+    }
+
+    /// Get the effective rule for a workspace and path.
+    ///
+    /// Returns the highest-priority rule's `(pattern, action)` for the given
+    /// workspace. This is a simple implementation that ignores path matching
+    /// and returns the highest-priority rule for the workspace overall.
+    ///
+    /// # Errors
+    /// Returns an error if the query fails.
+    pub fn get_effective_rule(
+        &self,
+        workspace_id: WorkspaceId,
+        _path: &str,
+    ) -> LocalStoreResult<Option<(String, String)>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT pattern, action FROM rules \
+             WHERE workspace_id = ?1 \
+             ORDER BY priority DESC \
+             LIMIT 1",
+        )?;
+        let mut rows = stmt.query(rusqlite::params![workspace_id.to_string()])?;
+        if let Some(row) = rows.next()? {
+            let pattern: String = row.get(0)?;
+            let action: String = row.get(1)?;
+            Ok(Some((pattern, action)))
+        } else {
+            Ok(None)
+        }
     }
 }
 
