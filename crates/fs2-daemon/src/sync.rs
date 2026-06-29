@@ -46,6 +46,53 @@ impl Default for SyncState {
     }
 }
 
+/// Resolve the workspace-relative target path of an operation for rule
+/// checking. Returns `None` if the path cannot be determined (e.g. the
+/// node no longer exists).
+fn op_target_path(store: &LocalStore, op: &fs2_core::Operation) -> Option<String> {
+    use fs2_core::OperationKind;
+    match &op.kind {
+        OperationKind::CreateNode { parent_id, name, .. } => {
+            let parent_path = store.node_path(*parent_id).ok().flatten().unwrap_or_default();
+            Some(if parent_path.is_empty() {
+                name.clone()
+            } else {
+                format!("{parent_path}/{name}")
+            })
+        }
+        OperationKind::PutFileRevision { node_id, .. }
+        | OperationKind::MoveNode { node_id, .. }
+        | OperationKind::DeleteNode { node_id, .. }
+        | OperationKind::RestoreNode { node_id, .. } => {
+            store.node_path(*node_id).ok().flatten()
+        }
+        _ => None,
+    }
+}
+
+/// Whether an op should be suppressed (not uploaded) based on its rule action.
+fn op_suppressed(action: fs2_rules::Action) -> bool {
+    action.suppresses_upload()
+}
+
+/// Check whether a pending op should be suppressed before uploading.
+/// Returns true if the op targets a generated/ignored/local-only/dependency-cache
+/// path (design §8/§9, upload-storm suppression).
+fn should_suppress_op(store: &LocalStore, op: &fs2_core::Operation) -> bool {
+    if let Some(path) = op_target_path(store, op) {
+        let engine = fs2_rules::RuleEngine::new(
+            fs2_rules::builtin_profiles(),
+            fs2_rules::Action::Normal,
+        );
+        let rule = engine.resolve(&path);
+        if op_suppressed(rule.action) {
+            debug!("suppressing op for {path} (action={})", rule.action);
+            return true;
+        }
+    }
+    false
+}
+
 /// Outbound queue: submits pending operations to the backend.
 pub struct OutboundQueue {
     /// API client.
@@ -101,6 +148,16 @@ impl OutboundQueue {
                 kind: op_kind,
                 created_at: chrono::Utc::now(),
             };
+
+            // Rule-based suppression: skip ops targeting generated/ignored/
+            // local-only/dependency-cache paths (design §8/§9, upload-storm
+            // suppression). The op is removed from the queue without uploading.
+            if should_suppress_op(&self.store, &op) {
+                if let Err(e) = self.store.remove_pending_op(&op_data.op_id) {
+                    warn!("failed to remove suppressed op: {e}");
+                }
+                continue;
+            }
 
             // Submit to backend.
             match self.client.commit_operation(workspace_id, &op).await {
@@ -251,6 +308,15 @@ impl InboundLoop {
                 kind: op_kind,
                 created_at: chrono::Utc::now(),
             };
+
+            // Apply the same rule-based suppression as the outbound queue so
+            // generated/ignored ops are not uploaded during rebase either.
+            if should_suppress_op(&self.store, &op) {
+                if let Err(e) = self.store.remove_pending_op(&op_data.op_id) {
+                    warn!("rebase: failed to remove suppressed op: {e}");
+                }
+                continue;
+            }
 
             match self.client.commit_operation(workspace_id, &op).await {
                 Ok(_response) => {
@@ -572,5 +638,158 @@ mod tests {
             .unwrap()
             .expect("state row");
         assert_eq!(state, "conflict");
+    }
+
+    #[test]
+    fn op_suppressed_filters_generated_and_ignored() {
+        assert!(op_suppressed(fs2_rules::Action::Ignore));
+        assert!(op_suppressed(fs2_rules::Action::Generated));
+        assert!(op_suppressed(fs2_rules::Action::LocalOnly));
+        assert!(op_suppressed(fs2_rules::Action::DependencyCache));
+        assert!(!op_suppressed(fs2_rules::Action::Normal));
+        assert!(!op_suppressed(fs2_rules::Action::Lazy));
+        assert!(!op_suppressed(fs2_rules::Action::Pin));
+    }
+
+    #[test]
+    fn op_target_path_resolves_create_node() {
+        use fs2_core::{Cursor, DeviceId, NodeKind, Operation, OperationKind};
+        let store = LocalStore::open_in_memory().unwrap();
+        let ws_id = WorkspaceId::new();
+        let root_id = fs2_core::NodeId::new();
+        let device = DeviceId::new();
+        store.upsert_workspace(ws_id, "test-ws", root_id).unwrap();
+        store.insert_root_node(ws_id, root_id).unwrap();
+        // Create a node_modules directory under root.
+        let op = Operation::new(
+            ws_id,
+            device,
+            Cursor::zero(),
+            OperationKind::CreateNode {
+                parent_id: root_id,
+                name: "node_modules".to_owned(),
+                kind: NodeKind::Directory,
+                initial_revision: None,
+            },
+            chrono::Utc::now(),
+        );
+        store.apply_operation(&op, Cursor::from(1)).unwrap();
+        // The target path of a CreateNode for node_modules/pkg under the
+        // node_modules dir should resolve.
+        let nm_node = store
+            .get_node_by_path(ws_id, "node_modules")
+            .unwrap()
+            .expect("node_modules");
+        let child_op = Operation::new(
+            ws_id,
+            device,
+            Cursor::from(1),
+            OperationKind::CreateNode {
+                parent_id: nm_node.node_id,
+                name: "pkg".to_owned(),
+                kind: NodeKind::Directory,
+                initial_revision: None,
+            },
+            chrono::Utc::now(),
+        );
+        let path = op_target_path(&store, &child_op).expect("path");
+        assert_eq!(path, "node_modules/pkg");
+        // The rule engine suppresses node_modules paths.
+        let engine = fs2_rules::RuleEngine::new(
+            fs2_rules::builtin_profiles(),
+            fs2_rules::Action::Normal,
+        );
+        let rule = engine.resolve(&path);
+        assert!(op_suppressed(rule.action), "node_modules/pkg should be suppressed");
+    }
+
+    #[test]
+    fn upload_storm_suppression_skips_generated_ops() {
+        // 23.3: a pending op targeting a generated path is suppressed
+        // (removed without uploading). We verify the suppression decision
+        // by checking that op_suppressed + op_target_path correctly identify
+        // node_modules ops as suppressible.
+        use fs2_core::{Cursor, DeviceId, NodeKind, Operation, OperationKind};
+        let store = LocalStore::open_in_memory().unwrap();
+        let ws_id = WorkspaceId::new();
+        let root_id = fs2_core::NodeId::new();
+        let device = DeviceId::new();
+        store.upsert_workspace(ws_id, "test-ws", root_id).unwrap();
+        store.insert_root_node(ws_id, root_id).unwrap();
+        // Create a node_modules/pkg/index.js op (generated path).
+        let nm_op = Operation::new(
+            ws_id,
+            device,
+            Cursor::zero(),
+            OperationKind::CreateNode {
+                parent_id: root_id,
+                name: "node_modules".to_owned(),
+                kind: NodeKind::Directory,
+                initial_revision: None,
+            },
+            chrono::Utc::now(),
+        );
+        store.apply_operation(&nm_op, Cursor::from(1)).unwrap();
+        let nm_node = store
+            .get_node_by_path(ws_id, "node_modules")
+            .unwrap()
+            .expect("node_modules");
+        let pkg_op = Operation::new(
+            ws_id,
+            device,
+            Cursor::from(1),
+            OperationKind::CreateNode {
+                parent_id: nm_node.node_id,
+                name: "pkg".to_owned(),
+                kind: NodeKind::Directory,
+                initial_revision: None,
+            },
+            chrono::Utc::now(),
+        );
+        store.apply_operation(&pkg_op, Cursor::from(2)).unwrap();
+        let pkg_node = store
+            .get_node_by_path(ws_id, "node_modules/pkg")
+            .unwrap()
+            .expect("pkg");
+        let file_op = Operation::new(
+            ws_id,
+            device,
+            Cursor::from(2),
+            OperationKind::CreateNode {
+                parent_id: pkg_node.node_id,
+                name: "index.js".to_owned(),
+                kind: NodeKind::File,
+                initial_revision: None,
+            },
+            chrono::Utc::now(),
+        );
+        let path = op_target_path(&store, &file_op).expect("path");
+        assert_eq!(path, "node_modules/pkg/index.js");
+        let engine = fs2_rules::RuleEngine::new(
+            fs2_rules::builtin_profiles(),
+            fs2_rules::Action::Normal,
+        );
+        let rule = engine.resolve(&path);
+        assert!(
+            op_suppressed(rule.action),
+            "node_modules/pkg/index.js must be suppressed (action={})",
+            rule.action
+        );
+        // A normal source file is NOT suppressed.
+        let src_op = Operation::new(
+            ws_id,
+            device,
+            Cursor::from(3),
+            OperationKind::CreateNode {
+                parent_id: root_id,
+                name: "main.rs".to_owned(),
+                kind: NodeKind::File,
+                initial_revision: None,
+            },
+            chrono::Utc::now(),
+        );
+        let src_path = op_target_path(&store, &src_op).expect("src path");
+        let src_rule = engine.resolve(&src_path);
+        assert!(!op_suppressed(src_rule.action), "main.rs should not be suppressed");
     }
 }

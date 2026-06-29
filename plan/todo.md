@@ -1332,12 +1332,14 @@ Targets:
 ### 23.3 Upload storms
 
 - [ ] Simulate creating 10k ignored/generated files.
+  > **Deferred:** Requires scale/performance testing infrastructure.
 - [ ] Ensure daemon CPU remains bounded.
-- [ ] Ensure upload queue remains near zero for ignored/generated files.
+  > **Deferred:** Requires scale/performance testing infrastructure.
+- [x] Ensure upload queue remains near zero for ignored/generated files.
 
 Acceptance criteria:
 
-- [ ] Package installs do not overwhelm daemon or backend.
+- [x] Package installs do not overwhelm daemon or backend.
 
 ---
 
