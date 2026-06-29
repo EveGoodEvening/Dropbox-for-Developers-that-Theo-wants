@@ -8,6 +8,7 @@ pub mod id;
 pub mod node;
 pub mod op;
 pub mod path;
+pub mod version;
 
 pub use error::{Fs2Error, Fs2ErrorCode, Fs2ErrorResponse, Fs2Result};
 pub use id::{BlobId, Cursor, DeviceId, NodeId, OpId, RevisionId, UserId, WorkspaceId};

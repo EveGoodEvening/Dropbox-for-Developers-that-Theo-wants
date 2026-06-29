@@ -1368,37 +1368,37 @@ Acceptance criteria:
 
 ### 25.1 Install guide
 
-- [ ] macOS install steps.
-- [ ] Linux install steps.
-- [ ] FUSE prerequisites.
-- [ ] Backend configuration for self-hosting/dev.
-- [ ] First workspace walkthrough.
+- [x] macOS install steps.
+- [x] Linux install steps.
+- [x] FUSE prerequisites.
+- [x] Backend configuration for self-hosting/dev.
+- [x] First workspace walkthrough.
 
 Acceptance criteria:
 
-- [ ] New developer can install from docs on a clean machine.
+- [x] New developer can install from docs on a clean machine.
 
 ### 25.2 Developer workflow guide
 
-- [ ] Explain metadata-only files.
-- [ ] Explain hydration.
-- [ ] Explain pinning.
-- [ ] Explain generated directories.
-- [ ] Explain env sync.
-- [ ] Explain Git-aware mode.
-- [ ] Explain conflicts.
+- [x] Explain metadata-only files.
+- [x] Explain hydration.
+- [x] Explain pinning.
+- [x] Explain generated directories.
+- [x] Explain env sync.
+- [x] Explain Git-aware mode.
+- [x] Explain conflicts.
 
 Acceptance criteria:
 
-- [ ] Docs prevent the most likely misconceptions.
+- [x] Docs prevent the most likely misconceptions.
 
 ### 25.3 Safety guide
 
-- [ ] How to avoid syncing secrets incorrectly.
-- [ ] What encryption protects.
-- [ ] What metadata is visible to server in MVP.
-- [ ] What happens when a device is revoked.
-- [ ] Recovery steps for conflicts.
+- [x] How to avoid syncing secrets incorrectly.
+- [x] What encryption protects.
+- [x] What metadata is visible to server in MVP.
+- [x] What happens when a device is revoked.
+- [x] Recovery steps for conflicts.
 
 Acceptance criteria:
 
@@ -1467,15 +1467,15 @@ Acceptance criteria:
 
 ### 27.3 Versioning and migrations
 
-- [ ] Version local DB schema.
-- [ ] Version backend API.
-- [ ] Version operation payloads.
-- [ ] Add migration tests.
-- [ ] Add downgrade/unsupported-version error.
+- [x] Version local DB schema.
+- [x] Version backend API.
+- [x] Version operation payloads.
+- [x] Add migration tests.
+- [x] Add downgrade/unsupported-version error.
 
 Acceptance criteria:
 
-- [ ] Updating client/backend does not corrupt local state.
+- [x] Updating client/backend does not corrupt local state.
 
 ---
 
