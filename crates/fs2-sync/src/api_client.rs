@@ -85,6 +85,42 @@ pub struct DeviceResponse {
     pub revoked: bool,
 }
 
+/// Response from env var operations.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EnvVarApiResponse {
+    /// Env var id.
+    pub id: uuid::Uuid,
+    /// Variable name.
+    pub name: String,
+    /// Environment.
+    pub environment: String,
+    /// Project path.
+    pub project_path: Option<String>,
+    /// Redacted value display.
+    pub value_display: String,
+}
+
+/// Manifest entry from the backend.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ManifestEntry {
+    /// Node id.
+    pub node_id: String,
+    /// Parent node id.
+    pub parent_id: Option<String>,
+    /// Name.
+    pub name: String,
+    /// Kind (directory, file, symlink).
+    pub kind: String,
+    /// Size in bytes.
+    pub size: u64,
+    /// Whether deleted.
+    pub deleted: bool,
+    /// Blob ID for file content.
+    pub blob_id: Option<String>,
+    /// Symlink target.
+    pub symlink_target: Option<String>,
+}
+
 /// Error response from the backend.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ErrorResponse {
@@ -309,6 +345,99 @@ impl ApiClient {
     pub async fn health(&self) -> Result<bool> {
         let resp = self.client.get(self.url("/healthz")).send().await?;
         Ok(resp.status().is_success())
+    }
+
+    /// Set an env var on the backend.
+    ///
+    /// # Errors
+    /// Returns an error if the request fails.
+    pub async fn set_env_var(
+        &self,
+        workspace_id: WorkspaceId,
+        project_path: Option<&str>,
+        environment: &str,
+        name: &str,
+        encrypted_value: &str,
+    ) -> Result<EnvVarApiResponse> {
+        let resp = self
+            .client
+            .post(self.url(&format!("/v1/workspaces/{workspace_id}/env")))
+            .headers(self.build_headers())
+            .json(&serde_json::json!({
+                "project_path": project_path,
+                "environment": environment,
+                "name": name,
+                "encrypted_value": encrypted_value,
+            }))
+            .send()
+            .await?;
+        Self::parse_response(resp).await
+    }
+
+    /// List env vars for a workspace.
+    ///
+    /// # Errors
+    /// Returns an error if the request fails.
+    pub async fn list_env_vars(
+        &self,
+        workspace_id: WorkspaceId,
+        project_path: Option<&str>,
+        environment: Option<&str>,
+    ) -> Result<Vec<EnvVarApiResponse>> {
+        let resp = self
+            .client
+            .get(self.url(&format!("/v1/workspaces/{workspace_id}/env")))
+            .headers(self.build_headers())
+            .query(&[
+                ("project_path", project_path.unwrap_or("")),
+                ("environment", environment.unwrap_or("")),
+            ])
+            .send()
+            .await?;
+        Self::parse_response(resp).await
+    }
+
+    /// Delete an env var.
+    ///
+    /// # Errors
+    /// Returns an error if the request fails.
+    pub async fn delete_env_var(
+        &self,
+        workspace_id: WorkspaceId,
+        env_var_id: uuid::Uuid,
+    ) -> Result<()> {
+        let resp = self
+            .client
+            .delete(self.url(&format!("/v1/workspaces/{workspace_id}/env/{env_var_id}")))
+            .headers(self.build_headers())
+            .send()
+            .await?;
+        if !resp.status().is_success() {
+            let status = resp.status();
+            let body = resp.text().await.unwrap_or_default();
+            return Err(anyhow!("delete env var failed: {status} {body}"));
+        }
+        Ok(())
+    }
+
+    /// Fetch a manifest (subtree metadata).
+    ///
+    /// # Errors
+    /// Returns an error if the request fails.
+    pub async fn fetch_manifest(
+        &self,
+        workspace_id: WorkspaceId,
+        path: &str,
+        depth: usize,
+    ) -> Result<Vec<ManifestEntry>> {
+        let resp = self
+            .client
+            .get(self.url(&format!("/v1/workspaces/{workspace_id}/manifest")))
+            .headers(self.build_headers())
+            .query(&[("path", path), ("depth", &depth.to_string())])
+            .send()
+            .await?;
+        Self::parse_response(resp).await
     }
 
     async fn parse_response<T: for<'de> Deserialize<'de>>(resp: reqwest::Response) -> Result<T> {

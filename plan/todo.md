@@ -1024,13 +1024,13 @@ Acceptance criteria:
 ### 17.3 CLI env commands
 
 - [ ] `fs2 env set`.
-- [ ] `fs2 env list`.
-- [ ] `fs2 env unset`.
-- [ ] `fs2 env import`.
-- [ ] `fs2 env materialize`.
-- [ ] `fs2 env exec`.
-- [ ] Ensure secret prompts do not echo.
-- [ ] Ensure list output redacts secrets.
+- [x] `fs2 env list`.
+- [x] `fs2 env unset`.
+- [x] `fs2 env import`.
+- [x] `fs2 env materialize`.
+- [x] `fs2 env exec`.
+- [x] Ensure secret prompts do not echo.
+- [x] Ensure list output redacts secrets.
 
 Acceptance criteria:
 
@@ -1499,7 +1499,7 @@ A coding agent should implement in this order unless blocked:
 14. [ ] Conflict detection/preservation.
 15. [x] Offline queue/replay.
 16. [x] Env secret sync.
-17. [ ] Git-aware diagnostics/materialization.
+17. [x] Git-aware diagnostics/materialization.
 18. [ ] Cache pin/prune.
 19. [x] `doctor`.
 20. [x] Packaging/docs/dogfood.

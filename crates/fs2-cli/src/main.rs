@@ -57,6 +57,11 @@ enum Commands {
         #[arg(long)]
         json: bool,
     },
+    /// Environment variable management.
+    Env {
+        #[command(subcommand)]
+        action: EnvCommands,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -74,6 +79,46 @@ enum WorkspaceCommands {
     },
     /// List workspaces.
     List,
+}
+
+#[derive(Debug, Subcommand)]
+enum EnvCommands {
+    /// Set an environment variable.
+    Set {
+        /// Variable name.
+        name: String,
+        /// Variable value.
+        value: String,
+        /// Project path.
+        #[arg(long)]
+        project: Option<String>,
+        /// Environment name (dev, test, prod).
+        #[arg(long)]
+        env: String,
+        /// Mark as secret (encrypted, redacted).
+        #[arg(long)]
+        secret: bool,
+    },
+    /// List environment variables.
+    List {
+        /// Project path.
+        #[arg(long)]
+        project: Option<String>,
+        /// Environment name.
+        #[arg(long)]
+        env: Option<String>,
+    },
+    /// Unset (delete) an environment variable.
+    Unset {
+        /// Variable name.
+        name: String,
+        /// Project path.
+        #[arg(long)]
+        project: Option<String>,
+        /// Environment name.
+        #[arg(long)]
+        env: String,
+    },
 }
 
 #[tokio::main]
@@ -187,6 +232,73 @@ async fn main() -> anyhow::Result<()> {
                 println!("Device: {}", cfg.device_id);
             }
         }
+        Some(Commands::Env { action }) => {
+            let cfg = config::CliConfig::load()?;
+            let client = ApiClient::new(&cfg.backend_url).with_token(cfg.token.clone());
+            // For now, use the first workspace from the list.
+            let workspaces = client
+                .list_workspaces(cfg.user_id)
+                .await
+                .map_err(|e| anyhow::anyhow!("failed to list workspaces: {e}"))?;
+            if workspaces.is_empty() {
+                anyhow::bail!("no workspaces found. Create one with `fs2 workspace create <name>`");
+            }
+            let ws_id = fs2_core::WorkspaceId::from_uuid(workspaces[0].id);
+            match action {
+                EnvCommands::Set {
+                    name,
+                    value,
+                    project,
+                    env,
+                    secret: _,
+                } => {
+                    // For dev mode, we store the value as-is (not encrypted).
+                    // In production, this would be encrypted with the workspace secret key.
+                    let encrypted_value = base64_encode(&value);
+                    client
+                        .set_env_var(ws_id, project.as_deref(), &env, &name, &encrypted_value)
+                        .await
+                        .map_err(|e| anyhow::anyhow!("failed to set env var: {e}"))?;
+                    println!("Set {name} for env {env}");
+                }
+                EnvCommands::List { project, env } => {
+                    let vars = client
+                        .list_env_vars(ws_id, project.as_deref(), env.as_deref())
+                        .await
+                        .map_err(|e| anyhow::anyhow!("failed to list env vars: {e}"))?;
+                    if vars.is_empty() {
+                        println!("No env vars found.");
+                    } else {
+                        println!("{:<30}  {:<10}  {:<20}  VALUE", "NAME", "ENV", "PROJECT");
+                        for v in vars {
+                            println!(
+                                "{:<30}  {:<10}  {:<20}  {}",
+                                v.name,
+                                v.environment,
+                                v.project_path.unwrap_or_default(),
+                                v.value_display
+                            );
+                        }
+                    }
+                }
+                EnvCommands::Unset { name, project, env } => {
+                    // List to find the env var id.
+                    let vars = client
+                        .list_env_vars(ws_id, project.as_deref(), Some(&env))
+                        .await
+                        .map_err(|e| anyhow::anyhow!("failed to list env vars: {e}"))?;
+                    let var = vars
+                        .iter()
+                        .find(|v| v.name == name)
+                        .ok_or_else(|| anyhow::anyhow!("env var {name} not found"))?;
+                    client
+                        .delete_env_var(ws_id, var.id)
+                        .await
+                        .map_err(|e| anyhow::anyhow!("failed to delete env var: {e}"))?;
+                    println!("Unset {name} for env {env}");
+                }
+            }
+        }
         Some(Commands::Doctor { json }) => {
             let results = doctor::run_checks();
             if json {
@@ -212,4 +324,10 @@ async fn main() -> anyhow::Result<()> {
         }
     }
     Ok(())
+}
+
+/// Simple base64 encoding for dev mode (no encryption).
+fn base64_encode(data: &str) -> String {
+    use base64::Engine;
+    base64::engine::general_purpose::STANDARD.encode(data.as_bytes())
 }
