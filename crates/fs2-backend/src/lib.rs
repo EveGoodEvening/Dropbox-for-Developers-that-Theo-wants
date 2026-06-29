@@ -14,7 +14,8 @@ use axum::{
 };
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
 use bytes::Bytes;
-use fs2_core::{DeviceId, UserId};
+use chrono::Utc;
+use fs2_core::{Cursor, DeviceId, Node, NodeId, NodeKind, UserId, WorkspaceId};
 use hmac::{Hmac, Mac};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -323,6 +324,7 @@ pub struct AppState {
     devices: Arc<RwLock<HashMap<DeviceId, DeviceRecord>>>,
     blob_store: Arc<LocalFilesystemBlobStore>,
     blob_metadata: Arc<RwLock<HashMap<String, BlobMetadata>>>,
+    workspaces: Arc<RwLock<HashMap<WorkspaceId, WorkspaceRecord>>>,
 }
 
 impl AppState {
@@ -337,6 +339,7 @@ impl AppState {
             devices: Arc::new(RwLock::new(HashMap::new())),
             blob_store: Arc::new(LocalFilesystemBlobStore::new(blob_root)),
             blob_metadata: Arc::new(RwLock::new(HashMap::new())),
+            workspaces: Arc::new(RwLock::new(HashMap::new())),
         }
     }
 }
@@ -391,6 +394,28 @@ pub struct BlobMetadata {
     pub blob_id: String,
     pub size: u64,
     pub encryption_header: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorkspaceRecord {
+    pub workspace_id: WorkspaceId,
+    pub user_id: UserId,
+    pub name: String,
+    pub root_node_id: NodeId,
+    pub current_cursor: Cursor,
+    pub root_node: Node,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct CreateWorkspaceRequest {
+    pub name: String,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct CreateWorkspaceResponse {
+    pub workspace_id: WorkspaceId,
+    pub root_node_id: NodeId,
+    pub current_cursor: Cursor,
 }
 
 #[derive(Debug, Deserialize)]
@@ -509,6 +534,7 @@ pub fn app_with_state(state: AppState) -> Router {
         .route("/v1/auth/whoami", get(whoami))
         .route("/v1/devices", get(list_devices).post(enroll_device))
         .route("/v1/devices/:device_id/revoke", post(revoke_device))
+        .route("/v1/workspaces", post(create_workspace))
         .route("/v1/blobs/dev-upload", post(dev_blob_upload))
         .route("/v1/blobs/dev-download", post(dev_blob_download))
         .route("/v1/blobs/:blob_id/status", get(blob_status))
@@ -646,6 +672,48 @@ async fn revoke_device(
     Ok(StatusCode::NO_CONTENT)
 }
 
+async fn create_workspace(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(request): Json<CreateWorkspaceRequest>,
+) -> Result<Json<CreateWorkspaceResponse>, ApiError> {
+    let auth = authenticate(&headers, &state).await?;
+    validate_workspace_name(&request.name)?;
+
+    let workspace_id = WorkspaceId::new_v4();
+    let root_node_id = NodeId::new_v4();
+    let current_cursor = Cursor::new(0).map_err(|error| ApiError::Internal(error.to_string()))?;
+    let now = Utc::now();
+    let root_node = Node {
+        node_id: root_node_id,
+        workspace_id,
+        parent_id: None,
+        name: String::new(),
+        kind: NodeKind::Directory,
+        current_rev: None,
+        created_at: now,
+        updated_at: now,
+        deleted_at: None,
+        tombstone_version: None,
+    };
+    let record = WorkspaceRecord {
+        workspace_id,
+        user_id: auth.user_id,
+        name: request.name,
+        root_node_id,
+        current_cursor,
+        root_node,
+    };
+
+    state.workspaces.write().await.insert(workspace_id, record);
+
+    Ok(Json(CreateWorkspaceResponse {
+        workspace_id,
+        root_node_id,
+        current_cursor,
+    }))
+}
+
 async fn dev_blob_upload(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -772,6 +840,18 @@ fn validate_device_fields(name: &str, public_key: &str) -> Result<(), ApiError> 
     }
     if public_key.trim().is_empty() {
         return Err(ApiError::InvalidRequest("public key must not be empty"));
+    }
+    Ok(())
+}
+
+fn validate_workspace_name(name: &str) -> Result<(), ApiError> {
+    if name.trim().is_empty() {
+        return Err(ApiError::InvalidRequest("workspace name must not be empty"));
+    }
+    if name.contains('\0') || name.contains('/') || name.contains('\\') {
+        return Err(ApiError::InvalidRequest(
+            "workspace name must not contain path separators or null bytes",
+        ));
     }
     Ok(())
 }
@@ -964,6 +1044,63 @@ mod tests {
 
         assert_eq!(whoami.user_id, login.user_id);
         assert_eq!(whoami.device_id, login.device_id);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn workspace_create_makes_single_live_root_node() -> Result<(), Box<dyn std::error::Error>>
+    {
+        let state = AppState::dev(RedactedSecret::new(DEFAULT_DEV_SECRET.to_owned())?);
+        let app = app_with_state(state.clone());
+        let login = post_json::<DevLoginResponse>(
+            app.clone(),
+            "/v1/auth/dev-login",
+            serde_json::json!({
+                "device_name": "test laptop",
+                "platform": {"os": "linux"},
+                "public_key": "dev-public-key"
+            }),
+            None,
+        )
+        .await?;
+
+        let created = post_json::<CreateWorkspaceResponse>(
+            app.clone(),
+            "/v1/workspaces",
+            serde_json::json!({"name": "personal-code"}),
+            Some(&login.access_token),
+        )
+        .await?;
+
+        assert_eq!(created.current_cursor.value(), 0);
+        let workspaces = state.workspaces.read().await;
+        assert_eq!(workspaces.len(), 1);
+        let workspace = workspaces
+            .get(&created.workspace_id)
+            .ok_or("created workspace missing from state")?;
+        assert_eq!(workspace.user_id, login.user_id);
+        assert_eq!(workspace.name, "personal-code");
+        assert_eq!(workspace.root_node_id, created.root_node_id);
+        assert_eq!(workspace.root_node.node_id, created.root_node_id);
+        assert_eq!(workspace.root_node.workspace_id, created.workspace_id);
+        assert_eq!(workspace.root_node.kind, NodeKind::Directory);
+        assert_eq!(workspace.root_node.parent_id, None);
+        assert_eq!(workspace.root_node.deleted_at, None);
+        drop(workspaces);
+
+        let rejected = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/workspaces")
+                    .header("authorization", format!("Bearer {}", login.access_token))
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({"name": "bad/name"}).to_string(),
+                    ))?,
+            )
+            .await?;
+        assert_eq!(rejected.status(), StatusCode::BAD_REQUEST);
         Ok(())
     }
 

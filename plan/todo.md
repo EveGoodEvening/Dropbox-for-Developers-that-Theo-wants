@@ -379,15 +379,15 @@ Acceptance criteria:
 
 ### 6.1 Workspace creation
 
-- [ ] Implement `POST /v1/workspaces`.
-- [ ] Create root node transactionally.
-- [ ] Create initial cursor.
-- [ ] Return workspace ID and root node ID.
-- [ ] Add tests.
+- [x] Implement `POST /v1/workspaces`.
+- [x] Create root node transactionally.
+- [x] Create initial cursor.
+- [x] Return workspace ID and root node ID.
+- [x] Add tests.
 
 Acceptance criteria:
 
-- [ ] New workspace always has exactly one live root directory node.
+- [x] New workspace always has exactly one live root directory node.
 
 ### 6.2 Operation commit transaction
 
