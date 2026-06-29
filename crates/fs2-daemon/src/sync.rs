@@ -319,7 +319,24 @@ impl InboundLoop {
         mut shutdown: tokio::sync::watch::Receiver<bool>,
     ) {
         let mut health_interval = tokio::time::interval(Duration::from_secs(10));
-        let mut sync_interval = tokio::time::interval(Duration::from_secs(5));
+        let mut sync_interval = tokio::time::interval(Duration::from_secs(30));
+
+        // Spawn a WebSocket event listener that pushes live change
+        // notifications to a channel. On each event we fetch and apply remote
+        // ops immediately, instead of waiting for the next poll tick. The
+        // periodic sync_interval remains as a fallback for missed events and
+        // offline-to-online transitions.
+        let (event_tx, mut event_rx) =
+            tokio::sync::mpsc::unbounded_channel::<fs2_sync::WorkspaceEvent>();
+        let ws_shutdown = shutdown.clone();
+        let ws_client = self.client.clone();
+        let ws_handle = tokio::spawn(fs2_sync::listen_workspace_events(
+            ws_client,
+            workspace_id,
+            event_tx,
+            ws_shutdown,
+        ));
+
         loop {
             tokio::select! {
                 _ = health_interval.tick() => {
@@ -332,9 +349,18 @@ impl InboundLoop {
                         }
                     }
                 }
+                Some(_event) = event_rx.recv() => {
+                    // Live event: fetch and apply remote ops immediately.
+                    if self.state.is_online() {
+                        if let Err(e) = self.sync_remote(workspace_id).await {
+                            warn!("inbound event sync error: {e}");
+                        }
+                    }
+                }
                 result = shutdown.changed() => {
                     if result.is_ok() && *shutdown.borrow() {
                         info!("inbound loop shutting down");
+                        ws_handle.abort();
                         break;
                     }
                 }

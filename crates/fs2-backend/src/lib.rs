@@ -13,4 +13,4 @@ pub mod store;
 
 pub use config::BackendConfig;
 pub use error::{BackendError, BackendResult};
-pub use store::MemoryStore;
+pub use store::{MemoryStore, WorkspaceEvent};

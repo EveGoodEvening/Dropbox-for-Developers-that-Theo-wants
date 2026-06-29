@@ -6,5 +6,5 @@
 pub mod api_client;
 pub mod local_store;
 
-pub use api_client::ApiClient;
-pub use local_store::{LocalStore, LocalStoreError, LocalStoreResult};
+pub use api_client::{listen_workspace_events, ApiClient, WorkspaceEvent};
+pub use local_store::{LocalNode, LocalRevision, LocalStore, LocalStoreError, LocalStoreResult};

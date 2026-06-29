@@ -455,16 +455,16 @@ Acceptance criteria:
 
 ### 6.6 Implement WebSocket events
 
-- [ ] Add workspace events endpoint.
-- [ ] Authenticate WebSocket connection.
-- [ ] Subscribe connection to workspace.
-- [ ] Publish event after operation commit.
-- [ ] Include cursor range only; clients fetch ops through normal API.
-- [ ] Add reconnect test.
+- [x] Add workspace events endpoint.
+- [x] Authenticate WebSocket connection.
+- [x] Subscribe connection to workspace.
+- [x] Publish event after operation commit.
+- [x] Include cursor range only; clients fetch ops through normal API.
+- [x] Add reconnect test.
 
 Acceptance criteria:
 
-- [ ] Client B receives notification after Client A commits an operation.
+- [x] Client B receives notification after Client A commits an operation.
 
 ---
 
@@ -698,7 +698,7 @@ Acceptance criteria:
 - [x] Operation fetch.
 - [x] Manifest fetch.
 - [x] Blob upload/download.
-- [ ] WebSocket event listener.
+- [x] WebSocket event listener.
 
 Acceptance criteria:
 
@@ -737,11 +737,11 @@ Acceptance criteria:
 - [x] Simulate file creation on A by creating operation directly.
 - [x] Sync B.
 - [x] Assert metadata appears.
-- [ ] Hydrate B and assert bytes match.
+- [x] Hydrate B and assert bytes match.
 
 Acceptance criteria:
 
-- [ ] Two-client metadata and blob sync works before FUSE exists.
+- [x] Two-client metadata and blob sync works before FUSE exists.
 
 ---
 
@@ -1490,7 +1490,7 @@ A coding agent should implement in this order unless blocked:
 5. [x] Local SQLite store and operation replay.
 6. [x] Blob store abstraction with local filesystem backend.
 7. [x] API client.
-8. [ ] Two-client materialized sync test.
+8. [x] Two-client materialized sync test.
 9. [x] Basic CLI login/workspace/status.
 10. [ ] FUSE read-only mount showing metadata.
 11. [ ] Lazy hydration on read.

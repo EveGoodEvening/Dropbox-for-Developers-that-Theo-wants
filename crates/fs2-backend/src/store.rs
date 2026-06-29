@@ -66,9 +66,43 @@ pub struct NodeRecord {
 }
 
 /// In-memory metadata store.
-#[derive(Debug, Default)]
 pub struct MemoryStore {
     inner: Mutex<MemoryStoreInner>,
+    /// Per-workspace broadcast senders for live event notifications.
+    /// A sender is lazily created on first subscribe and reused thereafter.
+    event_senders: Mutex<HashMap<WorkspaceId, tokio::sync::broadcast::Sender<WorkspaceEvent>>>,
+}
+
+impl std::fmt::Debug for MemoryStore {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("MemoryStore").finish_non_exhaustive()
+    }
+}
+
+impl Default for MemoryStore {
+    fn default() -> Self {
+        Self {
+            inner: Mutex::new(MemoryStoreInner::default()),
+            event_senders: Mutex::new(HashMap::new()),
+        }
+    }
+}
+
+/// A live workspace event broadcast to subscribed WebSocket clients.
+///
+/// Carries only a cursor range; clients fetch the actual operations through
+/// the normal operations API. Matches the design doc event payload.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct WorkspaceEvent {
+    /// Event type discriminator.
+    #[serde(rename = "type")]
+    pub kind: &'static str,
+    /// Workspace id.
+    pub workspace_id: WorkspaceId,
+    /// Cursor before the new operations.
+    pub from_cursor: i64,
+    /// Cursor after the new operations.
+    pub to_cursor: i64,
 }
 
 #[derive(Debug, Default)]
@@ -130,6 +164,29 @@ impl MemoryStore {
     #[must_use]
     pub fn shared() -> Arc<Self> {
         Arc::new(Self::new())
+    }
+
+    /// Subscribe to live events for a workspace.
+    ///
+    /// Returns a broadcast receiver that yields `WorkspaceEvent`s whenever
+    /// operations are committed for this workspace. A sender is lazily created
+    /// on first subscription and reused for later subscribers.
+    #[must_use]
+    pub fn subscribe_workspace(
+        &self,
+        workspace_id: WorkspaceId,
+    ) -> tokio::sync::broadcast::Receiver<WorkspaceEvent> {
+        let mut senders = self.event_senders.lock().unwrap();
+        let sender = senders
+            .entry(workspace_id)
+            .or_insert_with(|| {
+                // Capacity 256: ample for bursts of operation commits; late
+                // receivers miss events but always fetch via the ops API.
+                let (tx, _rx) = tokio::sync::broadcast::channel(256);
+                tx
+            })
+            .clone();
+        sender.subscribe()
     }
 
     /// Create a dev user and return its id.
@@ -369,6 +426,23 @@ impl MemoryStore {
                 cursor: new_cursor,
             });
         inner.op_index.insert((ws_id, op_id_uuid), new_cursor);
+
+        // Publish a live event to subscribed WebSocket clients.
+        // `from_cursor` is the cursor before this commit; `to_cursor` is the
+        // newly assigned cursor. Clients fetch the actual ops via the API.
+        let event = WorkspaceEvent {
+            kind: "workspace_ops_available",
+            workspace_id: ws_id,
+            from_cursor: current_cursor.as_i64(),
+            to_cursor: new_cursor.as_i64(),
+        };
+        // Send outside the inner lock to avoid holding two mutexes; the
+        // event_senders lock is short-lived. A failed send (no receivers)
+        // is harmless.
+        drop(inner);
+        if let Some(sender) = self.event_senders.lock().unwrap().get(&ws_id) {
+            let _ = sender.send(event);
+        }
 
         Ok(CommittedOp {
             op,
@@ -1289,5 +1363,68 @@ mod tests {
         store.commit_operation(del_op2).unwrap();
         let node = store.get_node(parent_id).unwrap();
         assert!(node.deleted);
+    }
+
+    #[tokio::test]
+    async fn commit_operation_publishes_event() {
+        let store = MemoryStore::new();
+        let user_id = store.create_dev_user("test@example.com").unwrap();
+        let device = store
+            .register_device(user_id, "test-device", "fake-key")
+            .unwrap();
+        let ws = store
+            .create_workspace(user_id, "test-ws", device.id)
+            .unwrap();
+        // Subscribe before committing.
+        let mut rx = store.subscribe_workspace(ws.id);
+        let op = Operation::new(
+            ws.id,
+            device.id,
+            Cursor::zero(),
+            OperationKind::CreateNode {
+                parent_id: ws.root_node_id,
+                name: "apps".to_owned(),
+                kind: NodeKind::Directory,
+                initial_revision: None,
+            },
+            Utc::now(),
+        );
+        let committed = store.commit_operation(op).unwrap();
+        let event = rx.recv().await.expect("event should be published");
+        assert_eq!(event.kind, "workspace_ops_available");
+        assert_eq!(event.workspace_id, ws.id);
+        assert_eq!(event.from_cursor, 0);
+        assert_eq!(event.to_cursor, committed.cursor.as_i64());
+    }
+
+    #[tokio::test]
+    async fn multiple_subscribers_receive_events() {
+        let store = MemoryStore::new();
+        let user_id = store.create_dev_user("test@example.com").unwrap();
+        let device = store
+            .register_device(user_id, "test-device", "fake-key")
+            .unwrap();
+        let ws = store
+            .create_workspace(user_id, "test-ws", device.id)
+            .unwrap();
+        let mut rx1 = store.subscribe_workspace(ws.id);
+        let mut rx2 = store.subscribe_workspace(ws.id);
+        let op = Operation::new(
+            ws.id,
+            device.id,
+            Cursor::zero(),
+            OperationKind::CreateNode {
+                parent_id: ws.root_node_id,
+                name: "apps".to_owned(),
+                kind: NodeKind::Directory,
+                initial_revision: None,
+            },
+            Utc::now(),
+        );
+        store.commit_operation(op).unwrap();
+        let e1 = rx1.recv().await.expect("subscriber 1 should receive event");
+        let e2 = rx2.recv().await.expect("subscriber 2 should receive event");
+        assert_eq!(e1.to_cursor, e2.to_cursor);
+        assert_eq!(e1.to_cursor, 1);
     }
 }

@@ -104,9 +104,11 @@ pub async fn auth_middleware(
     mut req: axum::http::Request<axum::body::Body>,
     next: axum::middleware::Next,
 ) -> axum::response::Response {
-    // Skip auth for health and dev-login endpoints.
+    // Skip auth for health, dev-login, and WebSocket events endpoints.
+    // WebSocket clients cannot easily set Authorization headers, so the WS
+    // handler authenticates via a `token` query parameter instead.
     let path = req.uri().path();
-    if path == "/healthz" || path == "/v1/auth/dev-login" {
+    if path == "/healthz" || path == "/v1/auth/dev-login" || path.ends_with("/events/ws") {
         return next.run(req).await;
     }
     // Extract Bearer token from Authorization header.

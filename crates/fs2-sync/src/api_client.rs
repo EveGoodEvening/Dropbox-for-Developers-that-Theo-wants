@@ -469,6 +469,126 @@ impl ApiClient {
         Self::parse_response(resp).await
     }
 
+}
+
+
+/// A live workspace event received over WebSocket.
+///
+/// Mirrors the backend's `workspace_ops_available` payload. Clients fetch the
+/// actual operations through the normal ops API using the cursor range.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WorkspaceEvent {
+    /// Event type discriminator.
+    #[serde(rename = "type")]
+    pub kind: String,
+    /// Workspace id (serialized as a string).
+    pub workspace_id: String,
+    /// Cursor before the new operations.
+    pub from_cursor: i64,
+    /// Cursor after the new operations.
+    pub to_cursor: i64,
+}
+
+/// Connect to the workspace WebSocket events endpoint and run a loop that
+/// forwards events to `tx`. Reconnects automatically on failure with
+/// exponential backoff, looping until `shutdown` is set.
+///
+/// This implements the inbound sync notification channel: on each event the
+/// caller should fetch operations since its local cursor and apply them.
+/// Missed events (while disconnected) are reconciled on reconnect because the
+/// caller always fetches from its last known cursor.
+///
+/// # Errors
+/// Returns an error only if the token is missing. Connection failures are
+/// logged and retried.
+pub async fn listen_workspace_events(
+    client: ApiClient,
+    workspace_id: WorkspaceId,
+    tx: tokio::sync::mpsc::UnboundedSender<WorkspaceEvent>,
+    mut shutdown: tokio::sync::watch::Receiver<bool>,
+) -> Result<()> {
+    use futures_util::{SinkExt, StreamExt};
+    use tokio_tungstenite::tungstenite::Message;
+
+    let token = client
+        .token
+        .clone()
+        .ok_or_else(|| anyhow!("cannot listen to events without an auth token"))?;
+
+    // Build the WebSocket URL from the HTTP base URL.
+    let ws_base = client
+        .base_url
+        .replacen("http://", "ws://", 1)
+        .replacen("https://", "wss://", 1);
+    let ws_url = format!(
+        "{ws_base}/v1/workspaces/{workspace_id}/events/ws?token={token}"
+    );
+
+    let mut backoff = Duration::from_secs(1);
+    loop {
+        if *shutdown.borrow() {
+            return Ok(());
+        }
+        match tokio_tungstenite::connect_async(&ws_url).await {
+            Ok((mut socket, _response)) => {
+                debug!("WebSocket event listener connected to {ws_url}");
+                backoff = Duration::from_secs(1);
+                loop {
+                    tokio::select! {
+                        msg = socket.next() => {
+                            let Some(msg) = msg else { break; };
+                            match msg {
+                                Ok(Message::Text(text)) => {
+                                    if let Ok(event) =
+                                        serde_json::from_str::<WorkspaceEvent>(&text)
+                                    {
+                                        if event.kind == "workspace_ops_available"
+                                            && tx.send(event).is_err()
+                                        {
+                                            // Receiver dropped; stop listening.
+                                            return Ok(());
+                                        }
+                                    }
+                                }
+                                Ok(Message::Ping(payload)) => {
+                                    let _ = socket.send(Message::Pong(payload)).await;
+                                }
+                                Ok(Message::Close(_)) => break,
+                                Ok(_) => (),
+                                Err(e) => {
+                                    warn!("WebSocket event listener error: {e}");
+                                    break;
+                                }
+                            }
+                        }
+                        result = shutdown.changed() => {
+                            if result.is_ok() && *shutdown.borrow() {
+                                debug!("WebSocket event listener shutting down");
+                                return Ok(());
+                            }
+                        }
+                    }
+                }
+            }
+            Err(e) => {
+                warn!("WebSocket connect to {ws_url} failed: {e}");
+            }
+        }
+        // Reconnect with backoff, capped at 30s.
+        tokio::select! {
+            () = sleep(backoff) => (),
+            result = shutdown.changed() => {
+                if result.is_ok() && *shutdown.borrow() {
+                    return Ok(());
+                }
+            }
+        }
+        backoff = (backoff * 2).min(Duration::from_secs(30));
+    }
+}
+
+impl ApiClient {
+
     async fn parse_response<T: for<'de> Deserialize<'de>>(resp: reqwest::Response) -> Result<T> {
         let status = resp.status();
         if status.is_success() {

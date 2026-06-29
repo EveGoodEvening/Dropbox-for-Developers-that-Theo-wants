@@ -60,6 +60,11 @@ pub fn app(state: AppState) -> Router {
             "/v1/workspaces/:workspace_id/manifest",
             get(fetch_manifest),
         )
+        // WebSocket live events
+        .route(
+            "/v1/workspaces/:workspace_id/events/ws",
+            get(workspace_events_ws),
+        )
         // Blobs (dev direct upload/download)
         .route("/v1/blobs/upload", post(upload_blob).layer(axum::extract::DefaultBodyLimit::disable()))
         .route("/v1/blobs/download", get(download_blob))
@@ -370,6 +375,95 @@ async fn fetch_manifest(
         .store
         .fetch_manifest(WorkspaceId::from_uuid(workspace_id), &path, depth)?;
     Ok(Json(entries))
+}
+
+/// Query parameters for the WebSocket events endpoint.
+///
+/// The `token` parameter carries the JWT, since WebSocket clients cannot
+/// reliably set the Authorization header during the handshake.
+#[derive(Debug, Deserialize)]
+pub struct WsEventsQuery {
+    /// Bearer JWT for the subscribing device.
+    pub token: String,
+}
+
+/// GET `/v1/workspaces/:workspace_id/events/ws` — WebSocket live events.
+///
+/// Authenticates via the `token` query parameter, then subscribes to the
+/// workspace's broadcast channel. On each committed operation the server
+/// pushes a `workspace_ops_available` event carrying the cursor range;
+/// clients fetch the actual operations through the normal ops API.
+///
+/// The connection stays open until the client disconnects or the server
+/// shuts down. Missed events (while a client was slow or disconnected) are
+/// not replayed over the socket — clients always reconcile via the ops API
+/// using their last known cursor.
+async fn workspace_events_ws(
+    State(state): State<AppState>,
+    Path(workspace_id): Path<Uuid>,
+    Query(q): Query<WsEventsQuery>,
+    ws: axum::extract::ws::WebSocketUpgrade,
+) -> axum::response::Response {
+    // Authenticate via the query-parameter token.
+    match state.auth.verify_token(&q.token) {
+        Ok(_claims) => {}
+        Err(e) => {
+            return axum::response::Response::builder()
+                .status(StatusCode::UNAUTHORIZED)
+                .body(axum::body::Body::from(
+                    serde_json::json!({
+                        "error": {
+                            "code": "unauthorized",
+                            "message": e.to_string()
+                        }
+                    })
+                    .to_string(),
+                ))
+                .unwrap();
+        }
+    }
+    let workspace_id = WorkspaceId::from_uuid(workspace_id);
+    // Verify the workspace exists.
+    if state.store.get_workspace(workspace_id).is_err() {
+        return axum::response::Response::builder()
+            .status(StatusCode::NOT_FOUND)
+            .body(axum::body::Body::from(
+                serde_json::json!({
+                    "error": {
+                        "code": "workspace_not_found",
+                        "message": "workspace not found"
+                    }
+                })
+                .to_string(),
+            ))
+            .unwrap();
+    }
+    let mut rx = state.store.subscribe_workspace(workspace_id);
+    ws.on_upgrade(move |mut socket| async move {
+        use axum::extract::ws::Message;
+        // Send an initial hello so the client knows the subscription is live.
+        let hello = serde_json::json!({
+            "type": "subscribed",
+            "workspace_id": workspace_id,
+        });
+        if socket.send(Message::Text(hello.to_string())).await.is_err() {
+            return;
+        }
+        loop {
+            match rx.recv().await {
+                Ok(event) => {
+                    let payload = serde_json::to_string(&event).unwrap_or_default();
+                    if socket.send(Message::Text(payload)).await.is_err() {
+                        break;
+                    }
+                }
+                Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
+                    // Client fell behind; it will reconcile via the ops API.
+                }
+                Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+            }
+        }
+    })
 }
 
 /// POST /v1/blobs/upload — direct blob upload (dev mode).
@@ -787,5 +881,165 @@ mod tests {
         // Download should fail hash verification.
         let data = state.blob_store.get(&blob_id).await.unwrap();
         assert!(!fs2_crypto::verify_blob_id(&data, &blob_id));
+    }
+
+    /// Helper: start the backend on a random port and return its base URL plus
+    /// a handle to the server task. The server uses a fresh shared store.
+    async fn start_test_server() -> (String, Arc<MemoryStore>, Arc<AuthState>, tokio::task::JoinHandle<()>) {
+        let store = MemoryStore::shared();
+        let auth = Arc::new(AuthState::new("test-secret", true).unwrap());
+        let config = Arc::new(BackendConfig::default());
+        let tmp = tempfile::TempDir::new().unwrap();
+        let blob_store: Arc<dyn crate::blob_store::BlobStore> =
+            Arc::new(crate::blob_store::LocalBlobStore::new(tmp.path()));
+        std::mem::forget(tmp);
+        let state = AppState {
+            store: store.clone(),
+            auth: auth.clone(),
+            config,
+            blob_store,
+        };
+        let app = app(state);
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let handle = tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+        (format!("http://{addr}"), store, auth, handle)
+    }
+
+    #[tokio::test]
+    async fn ws_events_deliver_after_commit() {
+        use futures_util::StreamExt;
+        use tokio_tungstenite::tungstenite::Message;
+
+        let (base_url, store, auth, _handle) = start_test_server().await;
+        // Set up a user, device, and workspace.
+        let user_id = store.create_dev_user("test@example.com").unwrap();
+        let device = store
+            .register_device(user_id, "laptop", "fake-key")
+            .unwrap();
+        let ws = store
+            .create_workspace(user_id, "test-ws", device.id)
+            .unwrap();
+        let token = auth.issue_token(user_id, device.id.as_uuid()).unwrap();
+
+        // Connect a WebSocket client.
+        let ws_url = base_url
+            .replacen("http://", "ws://", 1)
+            + &format!("/v1/workspaces/{}/events/ws?token={token}", ws.id);
+        let (mut socket, _resp) = tokio_tungstenite::connect_async(&ws_url)
+            .await
+            .expect("ws connect");
+
+        // Read the initial "subscribed" hello.
+        let hello = socket.next().await.unwrap().unwrap();
+        let hello_text = match hello {
+            Message::Text(t) => t,
+            _ => panic!("expected text hello"),
+        };
+        assert!(hello_text.contains("subscribed"));
+
+        // Commit an operation from another device.
+        let op = fs2_core::Operation::new(
+            ws.id,
+            device.id,
+            fs2_core::Cursor::zero(),
+            fs2_core::OperationKind::CreateNode {
+                parent_id: ws.root_node_id,
+                name: "apps".to_owned(),
+                kind: fs2_core::NodeKind::Directory,
+                initial_revision: None,
+            },
+            chrono::Utc::now(),
+        );
+        store.commit_operation(op).unwrap();
+
+        // The WebSocket client should receive the event.
+        let event = socket.next().await.unwrap().unwrap();
+        let event_text = match event {
+            Message::Text(t) => t,
+            _ => panic!("expected text event"),
+        };
+        assert!(event_text.contains("workspace_ops_available"));
+        assert!(event_text.contains("\"to_cursor\":1"));
+    }
+
+    #[tokio::test]
+    async fn ws_events_reconnect_after_drop() {
+        use futures_util::StreamExt;
+        use tokio_tungstenite::tungstenite::Message;
+
+        let (base_url, store, auth, _handle) = start_test_server().await;
+        let user_id = store.create_dev_user("test@example.com").unwrap();
+        let device = store
+            .register_device(user_id, "laptop", "fake-key")
+            .unwrap();
+        let ws = store
+            .create_workspace(user_id, "test-ws", device.id)
+            .unwrap();
+        let token = auth.issue_token(user_id, device.id.as_uuid()).unwrap();
+        let ws_url = base_url
+            .replacen("http://", "ws://", 1)
+            + &format!("/v1/workspaces/{}/events/ws?token={token}", ws.id);
+
+        // First connection: subscribe and read hello, then drop.
+        {
+            let (mut socket, _resp) = tokio_tungstenite::connect_async(&ws_url)
+                .await
+                .expect("ws connect");
+            let _hello = socket.next().await.unwrap().unwrap();
+            drop(socket);
+        }
+
+        // Commit an op while no client is connected; the event is missed.
+        let op = fs2_core::Operation::new(
+            ws.id,
+            device.id,
+            fs2_core::Cursor::zero(),
+            fs2_core::OperationKind::CreateNode {
+                parent_id: ws.root_node_id,
+                name: "apps".to_owned(),
+                kind: fs2_core::NodeKind::Directory,
+                initial_revision: None,
+            },
+            chrono::Utc::now(),
+        );
+        store.commit_operation(op).unwrap();
+
+        // Reconnect: a new client subscribes and reads hello. The missed event
+        // is not replayed over the socket, but the client can fetch ops via
+        // the API from its cursor — which is the documented reconciliation path.
+        let (mut socket, _resp) = tokio_tungstenite::connect_async(&ws_url)
+            .await
+            .expect("ws reconnect");
+        let hello = socket.next().await.unwrap().unwrap();
+        let hello_text = match hello {
+            Message::Text(t) => t,
+            _ => panic!("expected text hello"),
+        };
+        assert!(hello_text.contains("subscribed"));
+
+        // A subsequent commit is delivered to the reconnected client.
+        let op2 = fs2_core::Operation::new(
+            ws.id,
+            device.id,
+            fs2_core::Cursor::from(1),
+            fs2_core::OperationKind::CreateNode {
+                parent_id: ws.root_node_id,
+                name: "docs".to_owned(),
+                kind: fs2_core::NodeKind::Directory,
+                initial_revision: None,
+            },
+            chrono::Utc::now(),
+        );
+        store.commit_operation(op2).unwrap();
+        let event = socket.next().await.unwrap().unwrap();
+        let event_text = match event {
+            Message::Text(t) => t,
+            _ => panic!("expected text event"),
+        };
+        assert!(event_text.contains("workspace_ops_available"));
+        assert!(event_text.contains("\"to_cursor\":2"));
     }
 }

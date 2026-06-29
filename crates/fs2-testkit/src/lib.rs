@@ -8,6 +8,7 @@
 use std::sync::Arc;
 
 use anyhow::Result;
+use fs2_backend::blob_store::BlobStore;
 use fs2_backend::MemoryStore;
 use fs2_core::{
     Cursor, DeviceId, NodeKind, NodeRevision, Operation, OperationKind, RevisionContent,
@@ -22,6 +23,8 @@ pub struct TestHarness {
     _tmp: TempDir,
     /// Shared in-memory metadata store.
     pub store: Arc<MemoryStore>,
+    /// Shared local blob store (stands in for the object store).
+    pub blob_store: Arc<fs2_backend::blob_store::LocalBlobStore>,
     /// Workspace ID for the test.
     pub workspace_id: WorkspaceId,
     /// Root node ID.
@@ -46,6 +49,9 @@ impl TestHarness {
     pub fn new() -> Result<Self> {
         let tmp = TempDir::new()?;
         let store = MemoryStore::shared();
+        let blob_store = Arc::new(fs2_backend::blob_store::LocalBlobStore::new(
+            tmp.path().join("blobs"),
+        ));
 
         // Create a user and two devices.
         let user_id = store.create_dev_user("test@example.com")?;
@@ -70,6 +76,7 @@ impl TestHarness {
         Ok(Self {
             _tmp: tmp,
             store,
+            blob_store,
             workspace_id: ws.id,
             root_node_id: ws.root_node_id,
             device_a: device_a.id,
@@ -158,6 +165,50 @@ impl TestHarness {
             }
         }
         Ok(())
+    }
+
+    /// Hydrate a file node on a client: download its blob from the shared
+    /// blob store, cache it locally, mark the node hydrated, and return the
+    /// bytes. Mirrors what the FUSE read path / `fs2 hydrate` does.
+    ///
+    /// `node_path` is the workspace-relative path of the file.
+    pub async fn hydrate_file(&self, local: &LocalStore, node_path: &str) -> Result<Vec<u8>> {
+        let node = local
+            .get_node_by_path(self.workspace_id, node_path)?
+            .ok_or_else(|| anyhow::anyhow!("node not found: {node_path}"))?;
+        let rev_id = node
+            .current_revision_id
+            .ok_or_else(|| anyhow::anyhow!("node has no revision: {node_path}"))?;
+        let rev = local
+            .get_revision(rev_id)?
+            .ok_or_else(|| anyhow::anyhow!("revision not found: {node_path}"))?;
+        let blob_id = rev
+            .blob_id
+            .ok_or_else(|| anyhow::anyhow!("file revision has no blob id: {node_path}"))?;
+        // Download from the shared blob store.
+        let bytes = self.blob_store.get(&blob_id).await?;
+        // Cache locally under a per-node path and mark hydrated.
+        let cache_path = format!(
+            "{}/blobs/{}",
+            Self::cache_root(),
+            blob_id.replace(':', "/")
+        );
+        if let Some(parent) = std::path::Path::new(&cache_path).parent() {
+            std::fs::create_dir_all(parent).ok();
+        }
+        std::fs::write(&cache_path, &bytes)?;
+        local.mark_blob_cached(&blob_id, &cache_path, bytes.len() as u64)?;
+        local.set_hydration_state(node.node_id, "hydrated")?;
+        Ok(bytes.to_vec())
+    }
+
+    /// Best-effort cache root for a local store. The local store path is not
+    /// directly accessible, so we use a temp dir under the harness. For tests
+    /// this is sufficient since blob bytes are validated by hash.
+    fn cache_root() -> String {
+        // The harness tmp dir is private; use a fixed sub-dir. The actual
+        // cache path is only used to record where bytes live locally.
+        "/tmp/fs2-testkit-cache".to_owned()
     }
 }
 
@@ -274,5 +325,52 @@ mod tests {
             .unwrap();
         assert_eq!(children_a.len(), 2);
         assert_eq!(children_b.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn two_clients_blob_sync_roundtrip() {
+        let harness = TestHarness::new().unwrap();
+        // Device A creates a file with content and uploads the blob.
+        let content = b"hello from device A";
+        let blob_id = fs2_crypto::compute_blob_id(content);
+        harness
+            .blob_store
+            .put(&blob_id, bytes::Bytes::from(content.to_vec()))
+            .await
+            .unwrap();
+        let op = harness.create_file_op(
+            harness.root_node_id,
+            "notes.txt",
+            &blob_id,
+            std::str::from_utf8(content).unwrap(),
+        );
+        let _committed = harness.store.commit_operation(op).unwrap();
+
+        // Sync metadata to client B.
+        harness.sync_to(&harness.local_b).unwrap();
+
+        // B sees the file metadata.
+        let node = harness
+            .local_b
+            .get_node_by_path(harness.workspace_id, "notes.txt")
+            .unwrap()
+            .expect("file should appear on B");
+        assert_eq!(node.name, "notes.txt");
+
+        // B hydrates the file: downloads the blob and caches it.
+        let bytes = harness.hydrate_file(&harness.local_b, "notes.txt").await.unwrap();
+        assert_eq!(bytes, content);
+
+        // Hydration state is now hydrated.
+        let state = harness
+            .local_b
+            .get_hydration_state(node.node_id)
+            .unwrap()
+            .expect("state should be set");
+        assert_eq!(state, "hydrated");
+
+        // A second hydration reads from the shared store and still matches.
+        let bytes2 = harness.hydrate_file(&harness.local_b, "notes.txt").await.unwrap();
+        assert_eq!(bytes2, content);
     }
 }

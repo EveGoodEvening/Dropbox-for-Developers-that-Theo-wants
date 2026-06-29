@@ -174,6 +174,37 @@ impl LocalStore {
         Ok(result)
     }
 
+    /// Get a revision by id, including its blob id and content metadata.
+    ///
+    /// Used by the hydration path to find the blob to download for a file node.
+    pub fn get_revision(&self, revision_id: RevisionId) -> LocalStoreResult<Option<LocalRevision>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT revision_id, node_id, blob_id, chunk_ids, symlink_target, size, content_hash, \
+             encryption_header, posix_mode, mtime, created_at \
+             FROM local_revisions WHERE revision_id = ?1",
+        )?;
+        let result = stmt
+            .query_row(rusqlite::params![revision_id.to_string()], |row| {
+                Ok(LocalRevision {
+                    revision_id: parse_revision_id(row.get(0)?),
+                    node_id: parse_node_id(row.get(1)?),
+                    blob_id: row.get(2)?,
+                    chunk_ids: row.get(3)?,
+                    symlink_target: row.get(4)?,
+                    size: u64::try_from(row.get::<_, i64>(5)?).unwrap_or(0),
+                    content_hash: row.get(6)?,
+                    encryption_header: row.get(7)?,
+                    posix_mode: u32::try_from(row.get::<_, i64>(8)?).unwrap_or(0),
+                    mtime: row.get(9)?,
+                    created_at: row.get(10)?,
+                })
+            })
+            .ok();
+        Ok(result)
+    }
+
+
     /// List live children of a directory node.
     pub fn list_children(
         &self,
@@ -462,6 +493,33 @@ pub struct LocalNode {
     pub deleted: bool,
 }
 
+/// A local revision record, including blob id for file content.
+#[derive(Debug, Clone)]
+pub struct LocalRevision {
+    /// Revision id.
+    pub revision_id: RevisionId,
+    /// Node id.
+    pub node_id: NodeId,
+    /// Blob id for file content (`None` for directories).
+    pub blob_id: Option<String>,
+    /// Chunk ids (JSON-encoded).
+    pub chunk_ids: Option<String>,
+    /// Symlink target (`Some` for symlinks).
+    pub symlink_target: Option<String>,
+    /// Content size in bytes.
+    pub size: u64,
+    /// Plaintext content hash.
+    pub content_hash: Option<String>,
+    /// Encryption header for the blob.
+    pub encryption_header: Option<String>,
+    /// POSIX mode bits.
+    pub posix_mode: u32,
+    /// Modification time.
+    pub mtime: String,
+    /// Creation time.
+    pub created_at: String,
+}
+
 /// A pending operation in the local queue.
 #[derive(Debug, Clone)]
 pub struct PendingOp {
@@ -734,6 +792,10 @@ fn parse_optional_node_id(s: Option<String>) -> Option<NodeId> {
 
 fn parse_optional_revision_id(s: Option<String>) -> Option<RevisionId> {
     s.map(|v| RevisionId::from_uuid(v.parse().unwrap_or_else(|_| uuid::Uuid::nil())))
+}
+
+fn parse_revision_id(s: String) -> RevisionId {
+    RevisionId::from_uuid(s.parse().unwrap_or_else(|_| uuid::Uuid::nil()))
 }
 
 fn parse_node_kind(s: String) -> NodeKind {
