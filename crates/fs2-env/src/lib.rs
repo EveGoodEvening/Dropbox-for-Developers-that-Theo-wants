@@ -5,7 +5,15 @@ use fs2_core::{
     DeviceId, EnvScope as CoreEnvScope, EnvVarId, SecretKind, WorkspaceId, WorkspacePath,
 };
 use serde::{Deserialize, Serialize};
-use std::{cmp::Ordering, fmt, str::FromStr};
+use std::{
+    cmp::Ordering,
+    collections::BTreeMap,
+    fmt, fs,
+    io::{self, Write},
+    path::{Path, PathBuf},
+    process::Command,
+    str::FromStr,
+};
 
 /// Returns the crate name for smoke tests and early workspace validation.
 #[must_use]
@@ -411,12 +419,293 @@ pub fn resolve_env_var<'a>(
     Ok(selected)
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DotenvError {
+    line: usize,
+    message: String,
+}
+
+impl DotenvError {
+    fn new(line: usize, message: impl Into<String>) -> Self {
+        Self {
+            line,
+            message: message.into(),
+        }
+    }
+
+    #[must_use]
+    pub const fn line(&self) -> usize {
+        self.line
+    }
+
+    #[must_use]
+    pub fn message(&self) -> &str {
+        &self.message
+    }
+}
+
+impl fmt::Display for DotenvError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(formatter, "dotenv line {}: {}", self.line, self.message)
+    }
+}
+
+impl std::error::Error for DotenvError {}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DotenvEntry {
+    pub name: EnvVarName,
+    pub value: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum EnvFileRuleAction {
+    LocalOnly,
+    Secret,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EnvFileRule {
+    pub path: PathBuf,
+    pub action: EnvFileRuleAction,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EnvFileSafetyPlan {
+    pub rules: Vec<EnvFileRule>,
+    pub warnings: Vec<String>,
+}
+
+pub fn parse_dotenv(input: &str) -> Result<Vec<DotenvEntry>, DotenvError> {
+    let mut entries = Vec::new();
+    let mut lines = input.lines().enumerate().peekable();
+    while let Some((index, raw_line)) = lines.next() {
+        let line_number = index + 1;
+        let line = raw_line.trim_start();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        let line = line.strip_prefix("export ").unwrap_or(line).trim_start();
+        let (name, raw_value) = line
+            .split_once('=')
+            .ok_or_else(|| DotenvError::new(line_number, "expected NAME=value"))?;
+        let name = EnvVarName::parse(name.trim()).map_err(|error| {
+            DotenvError::new(line_number, format!("invalid variable name: {error}"))
+        })?;
+        let value = parse_dotenv_value(raw_value.trim_start(), line_number, &mut lines)?;
+        entries.push(DotenvEntry { name, value });
+    }
+    Ok(entries)
+}
+
+pub fn materialize_dotenv(
+    path: impl AsRef<Path>,
+    values: &[(EnvVarName, String)],
+) -> Result<EnvFileSafetyPlan, io::Error> {
+    let path = path.as_ref();
+    let mut sorted = BTreeMap::new();
+    for (name, value) in values {
+        sorted.insert(name.as_str().to_owned(), value.clone());
+    }
+    let mut out = String::new();
+    for (name, value) in sorted {
+        out.push_str(&name);
+        out.push('=');
+        out.push_str(&quote_dotenv_value(&value));
+        out.push('\n');
+    }
+    write_secret_file(path, out.as_bytes())?;
+    Ok(EnvFileSafetyPlan {
+        rules: vec![EnvFileRule {
+            path: path.to_path_buf(),
+            action: EnvFileRuleAction::Secret,
+        }],
+        warnings: git_tracked_warning(path)?.into_iter().collect(),
+    })
+}
+
+pub fn import_dotenv_safety_plan(path: impl AsRef<Path>) -> Result<EnvFileSafetyPlan, io::Error> {
+    let path = path.as_ref();
+    Ok(EnvFileSafetyPlan {
+        rules: vec![EnvFileRule {
+            path: path.to_path_buf(),
+            action: EnvFileRuleAction::Secret,
+        }],
+        warnings: git_tracked_warning(path)?.into_iter().collect(),
+    })
+}
+
+fn parse_dotenv_value<'a>(
+    raw_value: &'a str,
+    line_number: usize,
+    lines: &mut std::iter::Peekable<impl Iterator<Item = (usize, &'a str)>>,
+) -> Result<String, DotenvError> {
+    match raw_value.chars().next() {
+        Some('\'') => parse_quoted_value(raw_value, '\'', line_number, lines),
+        Some('"') => parse_quoted_value(raw_value, '"', line_number, lines),
+        _ => Ok(parse_unquoted_value(raw_value)),
+    }
+}
+
+fn parse_quoted_value<'a>(
+    first: &'a str,
+    quote: char,
+    line_number: usize,
+    lines: &mut std::iter::Peekable<impl Iterator<Item = (usize, &'a str)>>,
+) -> Result<String, DotenvError> {
+    let mut value = String::new();
+    let mut current = first[quote.len_utf8()..].to_owned();
+    loop {
+        let mut escaped = false;
+        for (offset, ch) in current.char_indices() {
+            if escaped {
+                match (quote, ch) {
+                    ('"', 'n') => value.push('\n'),
+                    ('"', 'r') => value.push('\r'),
+                    ('"', 't') => value.push('\t'),
+                    ('"', '"' | '\\') => value.push(ch),
+                    ('"', other) => {
+                        value.push('\\');
+                        value.push(other);
+                    }
+                    (_, other) => value.push(other),
+                }
+                escaped = false;
+                continue;
+            }
+            if quote == '"' && ch == '\\' {
+                escaped = true;
+                continue;
+            }
+            if ch == quote {
+                let trailing = current[offset + quote.len_utf8()..].trim();
+                if !trailing.is_empty() && !trailing.starts_with('#') {
+                    return Err(DotenvError::new(
+                        line_number,
+                        "unexpected content after quoted value",
+                    ));
+                }
+                return Ok(value);
+            }
+            value.push(ch);
+        }
+        if escaped {
+            value.push('\\');
+        }
+        value.push('\n');
+        let Some((_, next_line)) = lines.next() else {
+            return Err(DotenvError::new(line_number, "unterminated quoted value"));
+        };
+        next_line.clone_into(&mut current);
+    }
+}
+
+fn parse_unquoted_value(raw_value: &str) -> String {
+    let mut value = String::new();
+    for ch in raw_value.chars() {
+        if ch == '#' && (value.is_empty() || value.ends_with(char::is_whitespace)) {
+            break;
+        }
+        value.push(ch);
+    }
+    value.trim_end().to_owned()
+}
+
+fn quote_dotenv_value(value: &str) -> String {
+    if value
+        .chars()
+        .all(|ch| ch == '_' || ch == '-' || ch == '.' || ch.is_ascii_alphanumeric())
+    {
+        return value.to_owned();
+    }
+    let escaped = value
+        .replace('\\', "\\\\")
+        .replace('\n', "\\n")
+        .replace('\r', "\\r")
+        .replace('\t', "\\t")
+        .replace('"', "\\\"");
+    format!("\"{escaped}\"")
+}
+
+#[cfg(unix)]
+fn write_secret_file(path: &Path, bytes: &[u8]) -> Result<(), io::Error> {
+    use std::os::unix::fs::OpenOptionsExt;
+    match fs::metadata(path) {
+        Ok(metadata) if metadata.file_type().is_file() => set_secret_file_permissions(path)?,
+        Ok(_) => {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "secret materialization target must be a regular file",
+            ));
+        }
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error),
+    }
+    let mut file = fs::OpenOptions::new()
+        .create(true)
+        .truncate(true)
+        .write(true)
+        .mode(0o600)
+        .open(path)?;
+    file.write_all(bytes)?;
+    set_secret_file_permissions(path)
+}
+
+#[cfg(not(unix))]
+fn write_secret_file(path: &Path, bytes: &[u8]) -> Result<(), io::Error> {
+    fs::write(path, bytes)?;
+    set_secret_file_permissions(path)
+}
+
+#[cfg(unix)]
+fn set_secret_file_permissions(path: &Path) -> Result<(), io::Error> {
+    use std::os::unix::fs::PermissionsExt;
+    let mut permissions = fs::metadata(path)?.permissions();
+    permissions.set_mode(0o600);
+    fs::set_permissions(path, permissions)
+}
+
+#[cfg(not(unix))]
+fn set_secret_file_permissions(_path: &Path) -> Result<(), io::Error> {
+    Ok(())
+}
+
+fn git_tracked_warning(path: &Path) -> Result<Option<String>, io::Error> {
+    let Some(parent) = path.parent() else {
+        return Ok(None);
+    };
+    let Some(file_name) = path.file_name() else {
+        return Ok(None);
+    };
+    let parent = if parent.as_os_str().is_empty() {
+        Path::new(".")
+    } else {
+        parent
+    };
+    let output = Command::new("git")
+        .arg("ls-files")
+        .arg("--error-unmatch")
+        .arg(file_name)
+        .current_dir(parent)
+        .output();
+    match output {
+        Ok(output) if output.status.success() => Ok(Some(format!(
+            "{} is tracked by Git; remove it from Git before importing secrets",
+            path.display()
+        ))),
+        Ok(_) => Ok(None),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(error),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     #![allow(clippy::expect_used, clippy::panic)]
     use super::*;
     use fs2_core::{DeviceId, EnvVarId, WorkspaceId};
     use std::str::FromStr;
+    use tempfile::TempDir;
     use uuid::Uuid;
 
     fn uuid_from(byte: u8) -> Uuid {
@@ -624,5 +913,110 @@ mod tests {
         };
 
         assert!(resolve_env_var(&records, &context).is_err());
+    }
+
+    #[test]
+    fn parses_common_dotenv_syntax_and_multiline_values() -> Result<(), Box<dyn std::error::Error>>
+    {
+        let entries = parse_dotenv(
+            "# comment\nexport API_URL=https://example.invalid # public\nEMPTY= # intentionally blank\nSECRET='literal # hash'\nMULTI=\"line one\nline two\"\nSPACE_MULTI=\"abc  \ndef\"\nTRAILING_BACKSLASH=\"abc\\\ndef\"\nESCAPED=\"a\\nb\"\nREGEX=^\\d+$\nDQ_REGEX=\"^\\d+$\"\nUNC=\\\\server\\share\n",
+        )?;
+
+        assert_eq!(entries[0].value, "https://example.invalid");
+        assert_eq!(entries[1].name.as_str(), "EMPTY");
+        assert_eq!(entries[1].value, "");
+        assert_eq!(entries[2].value, "literal # hash");
+        assert_eq!(entries[3].value, "line one\nline two");
+        assert_eq!(entries[4].value, "abc  \ndef");
+        assert_eq!(entries[5].value, "abc\\\ndef");
+        assert_eq!(entries[6].value, "a\nb");
+        assert_eq!(entries[7].value, "^\\d+$");
+        assert_eq!(entries[8].value, "^\\d+$");
+        assert_eq!(entries[9].value, "\\\\server\\share");
+        Ok(())
+    }
+
+    #[test]
+    fn materializes_dotenv_with_secret_permissions_and_rule(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let dir = TempDir::new()?;
+        let path = dir.path().join(".env.fs2");
+        let plan = materialize_dotenv(
+            &path,
+            &[
+                (
+                    EnvVarName::parse("SECRET_KEY")?,
+                    "line one\nline two".to_owned(),
+                ),
+                (
+                    EnvVarName::parse("API_URL")?,
+                    "https://example.invalid".to_owned(),
+                ),
+            ],
+        )?;
+
+        let content = fs::read_to_string(&path)?;
+        assert!(content.contains("API_URL=\"https://example.invalid\""));
+        assert!(content.contains("SECRET_KEY=\"line one\\nline two\""));
+        assert_eq!(plan.rules.len(), 1);
+        assert_eq!(plan.rules[0].path, path);
+        assert_eq!(plan.rules[0].action, EnvFileRuleAction::Secret);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(
+                fs::metadata(&plan.rules[0].path)?.permissions().mode() & 0o777,
+                0o600
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn materialize_rejects_directory_target() -> Result<(), Box<dyn std::error::Error>> {
+        let dir = TempDir::new()?;
+        let target_dir = dir.path().join("target-dir");
+        fs::create_dir(&target_dir)?;
+
+        let result = materialize_dotenv(
+            &target_dir,
+            &[(EnvVarName::parse("SECRET_KEY")?, "value".to_owned())],
+        );
+
+        assert!(result.is_err());
+        assert!(fs::metadata(&target_dir)?.file_type().is_dir());
+        Ok(())
+    }
+
+    #[test]
+    fn import_plan_warns_for_git_tracked_dotenv() -> Result<(), Box<dyn std::error::Error>> {
+        let dir = TempDir::new()?;
+        let git_available = std::process::Command::new("git")
+            .arg("--version")
+            .output()
+            .is_ok_and(|output| output.status.success());
+        if !git_available {
+            return Ok(());
+        }
+        std::process::Command::new("git")
+            .arg("init")
+            .current_dir(dir.path())
+            .output()?;
+        let env_path = dir.path().join(".env");
+        fs::write(&env_path, "SECRET=value\n")?;
+        std::process::Command::new("git")
+            .arg("add")
+            .arg(".env")
+            .current_dir(dir.path())
+            .output()?;
+
+        let plan = import_dotenv_safety_plan(&env_path)?;
+
+        assert_eq!(plan.rules[0].action, EnvFileRuleAction::Secret);
+        assert!(plan
+            .warnings
+            .iter()
+            .any(|warning| warning.contains("tracked by Git")));
+        Ok(())
     }
 }

@@ -1040,11 +1040,11 @@ Acceptance criteria:
 
 ### 17.4 Dotenv parser and materializer
 
-- [ ] Parse common dotenv syntax.
-- [ ] Preserve multiline values if supported.
-- [ ] Write materialized file with `0600` permissions.
-- [ ] Add `.env`/materialized file to local-only/secret rule automatically.
-- [ ] Warn if `.env` is Git-tracked.
+- [x] Parse common dotenv syntax.
+- [x] Preserve multiline values if supported.
+- [x] Write materialized file with `0600` permissions.
+- [x] Add `.env`/materialized file to local-only/secret rule automatically.
+- [x] Warn if `.env` is Git-tracked.
 
 Acceptance criteria:
 

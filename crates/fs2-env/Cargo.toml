@@ -11,6 +11,7 @@ serde = { version = "1", features = ["derive"] }
 
 [dev-dependencies]
 uuid = "1"
+tempfile = "3"
 
 [lints]
 workspace = true
