@@ -1,13 +1,15 @@
 //! FS2 backend service entry point.
 
-fn main() {
-    println!("fs2-backend placeholder");
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    fs2_backend::init_tracing();
+    let config = fs2_backend::BackendConfig::from_env()?;
+    fs2_backend::serve(config, shutdown_signal()).await?;
+    Ok(())
 }
 
-#[cfg(test)]
-mod tests {
-    #[test]
-    fn placeholder_binary_test_runs() {
-        assert_eq!("ok".len(), 2);
+async fn shutdown_signal() {
+    if let Err(error) = tokio::signal::ctrl_c().await {
+        tracing::warn!(%error, "failed to listen for shutdown signal");
     }
 }

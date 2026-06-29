@@ -310,24 +310,24 @@ Acceptance criteria:
 
 ### 5.1 Create `fs2-backend` service
 
-- [ ] Add Axum server.
-- [ ] Add config loader:
-  - [ ] bind address
-  - [ ] database URL
-  - [ ] object store config
-  - [ ] JWT/session secrets
-- [ ] Add health endpoint:
+- [x] Add Axum server.
+- [x] Add config loader:
+  - [x] bind address
+  - [x] database URL
+  - [x] object store config
+  - [x] JWT/session secrets
+- [x] Add health endpoint:
 
 ```http
 GET /healthz
 ```
 
-- [ ] Add structured logging.
-- [ ] Add graceful shutdown.
+- [x] Add structured logging.
+- [x] Add graceful shutdown.
 
 Acceptance criteria:
 
-- [ ] `just dev-backend` starts a backend and `GET /healthz` returns OK.
+- [x] `just dev-backend` starts a backend and `GET /healthz` returns OK.
 
 ### 5.2 Add Postgres migrations
 
