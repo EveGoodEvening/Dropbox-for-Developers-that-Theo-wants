@@ -15,3 +15,12 @@ workspace = true
 tokio = { version = "1", features = ["full"] }
 anyhow = "1"
 fs2-core = { path = "../fs2-core" }
+fs2-sync = { path = "../fs2-sync" }
+fuser = { version = "0.14", default-features = false }
+libc = "0.2"
+parking_lot = "0.12"
+tracing = "0.1"
+thiserror = "1"
+
+[dev-dependencies]
+chrono = "0.4"

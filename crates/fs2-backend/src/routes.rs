@@ -934,9 +934,8 @@ mod tests {
 
         // Read the initial "subscribed" hello.
         let hello = socket.next().await.unwrap().unwrap();
-        let hello_text = match hello {
-            Message::Text(t) => t,
-            _ => panic!("expected text hello"),
+        let Message::Text(hello_text) = hello else {
+            panic!("expected text hello");
         };
         assert!(hello_text.contains("subscribed"));
 
@@ -957,9 +956,8 @@ mod tests {
 
         // The WebSocket client should receive the event.
         let event = socket.next().await.unwrap().unwrap();
-        let event_text = match event {
-            Message::Text(t) => t,
-            _ => panic!("expected text event"),
+        let Message::Text(event_text) = event else {
+            panic!("expected text event");
         };
         assert!(event_text.contains("workspace_ops_available"));
         assert!(event_text.contains("\"to_cursor\":1"));
@@ -1014,9 +1012,8 @@ mod tests {
             .await
             .expect("ws reconnect");
         let hello = socket.next().await.unwrap().unwrap();
-        let hello_text = match hello {
-            Message::Text(t) => t,
-            _ => panic!("expected text hello"),
+        let Message::Text(hello_text) = hello else {
+            panic!("expected text hello");
         };
         assert!(hello_text.contains("subscribed"));
 
@@ -1035,9 +1032,8 @@ mod tests {
         );
         store.commit_operation(op2).unwrap();
         let event = socket.next().await.unwrap().unwrap();
-        let event_text = match event {
-            Message::Text(t) => t,
-            _ => panic!("expected text event"),
+        let Message::Text(event_text) = event else {
+            panic!("expected text event");
         };
         assert!(event_text.contains("workspace_ops_available"));
         assert!(event_text.contains("\"to_cursor\":2"));

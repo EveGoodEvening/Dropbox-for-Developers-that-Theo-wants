@@ -101,6 +101,27 @@ impl LocalStore {
         Ok(())
     }
 
+    /// Insert the workspace root directory node.
+    ///
+    /// The root node has no parent, an empty name/path, and no revision.
+    /// This is called once after [`upsert_workspace`] to make the root
+    /// browsable. `apply_operation` cannot create the root because `CreateNode`
+    /// requires a parent.
+    pub fn insert_root_node(&self, workspace_id: WorkspaceId, root_node_id: NodeId) -> LocalStoreResult<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "INSERT OR REPLACE INTO local_nodes \
+             (node_id, workspace_id, parent_id, name, normalized_name, path, kind, current_revision_id, deleted, updated_at) \
+             VALUES (?1, ?2, NULL, '', '', '', 'directory', NULL, 0, ?3)",
+            rusqlite::params![
+                root_node_id.to_string(),
+                workspace_id.to_string(),
+                Utc::now().to_rfc3339(),
+            ],
+        )?;
+        Ok(())
+    }
+
     /// Get the last sync cursor for a workspace.
     pub fn get_cursor(&self, workspace_id: WorkspaceId) -> LocalStoreResult<Cursor> {
         let conn = self.conn.lock().unwrap();
@@ -200,6 +221,22 @@ impl LocalStore {
                     created_at: row.get(10)?,
                 })
             })
+            .ok();
+        Ok(result)
+    }
+
+    /// Get the workspace-relative path of a node by id.
+    ///
+    /// Returns `None` if the node does not exist. The root node has an empty
+    /// path. Used by the FUSE adapter to resolve child paths for lookup.
+    pub fn node_path(&self, node_id: NodeId) -> LocalStoreResult<Option<String>> {
+        let conn = self.conn.lock().unwrap();
+        let result: Option<String> = conn
+            .query_row(
+                "SELECT path FROM local_nodes WHERE node_id = ?1",
+                rusqlite::params![node_id.to_string()],
+                |row| row.get(0),
+            )
             .ok();
         Ok(result)
     }
@@ -352,6 +389,21 @@ impl LocalStore {
              VALUES (?1, ?2, NULL, NULL, ?3, 0, NULL, NULL) \
              ON CONFLICT(node_id) DO UPDATE SET hydration_state = excluded.hydration_state, last_accessed_at = excluded.last_accessed_at",
             rusqlite::params![node_id.to_string(), state, Utc::now().to_rfc3339()],
+        )?;
+        Ok(())
+    }
+
+    /// Update the last-accessed timestamp for a node (used by the read path).
+    ///
+    /// Stores access timestamps in `SQLite` rather than relying on filesystem
+    /// `atime`, per `design.md` §7.3.
+    pub fn touch_access(&self, node_id: NodeId) -> LocalStoreResult<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO local_state (node_id, hydration_state, local_blob_path, dirty_base_revision_id, last_accessed_at, pinned, error_code, error_message) \
+             VALUES (?1, 'hydrated', NULL, NULL, ?2, 0, NULL, NULL) \
+             ON CONFLICT(node_id) DO UPDATE SET last_accessed_at = excluded.last_accessed_at",
+            rusqlite::params![node_id.to_string(), Utc::now().to_rfc3339()],
         )?;
         Ok(())
     }

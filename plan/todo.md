@@ -749,25 +749,26 @@ Acceptance criteria:
 
 ### 12.1 Mount skeleton
 
-- [ ] Implement `fs2-fuse` crate.
-- [ ] Mount empty workspace root.
-- [ ] Implement `getattr` for root.
-- [ ] Implement `readdir` for root.
-- [ ] Implement clean unmount.
-- [ ] Add manual test instructions for macOS and Linux.
+- [x] Implement `fs2-fuse` crate.
+- [x] Mount empty workspace root.
+- [x] Implement `getattr` for root.
+- [x] Implement `readdir` for root.
+- [x] Implement clean unmount.
+- [x] Add manual test instructions for macOS and Linux.
 
 Acceptance criteria:
 
 - [ ] `ls ~/code` works on mounted empty workspace.
+> **Blocked (sandbox):** Live FUSE mounts register but kernel requests are not delivered (ops hang/ECONNABORTED). Verify on a mount-capable macOS/Linux host or VM. Read-only adapter logic is unit-tested via `cargo test -p fs2-fuse`.
 
 ### 12.2 Metadata-backed directory listing
 
-- [ ] Resolve path to node.
-- [ ] Implement inode mapping for `NodeId`.
-- [ ] Implement `lookup`.
-- [ ] Implement `getattr` for files/directories/symlinks.
-- [ ] Implement `readdir` from local SQLite children.
-- [ ] Do not hydrate file content during listing.
+- [x] Resolve path to node.
+- [x] Implement inode mapping for `NodeId`.
+- [x] Implement `lookup`.
+- [x] Implement `getattr` for files/directories/symlinks.
+- [x] Implement `readdir` from local SQLite children.
+- [x] Do not hydrate file content during listing.
 
 Acceptance criteria:
 
@@ -775,13 +776,13 @@ Acceptance criteria:
 
 ### 12.3 Read path with lazy hydration
 
-- [ ] Implement `open` for files.
-- [ ] Implement `read` for files.
-- [ ] If blob absent locally, call daemon hydration.
-- [ ] Verify blob hash.
-- [ ] Serve bytes.
-- [ ] Return useful error when offline and not hydrated.
-- [ ] Update local access timestamp.
+- [x] Implement `open` for files.
+- [x] Implement `read` for files.
+- [x] If blob absent locally, call daemon hydration.
+- [x] Verify blob hash.
+- [x] Serve bytes.
+- [x] Return useful error when offline and not hydrated.
+- [x] Update local access timestamp.
 
 Acceptance criteria:
 
@@ -789,9 +790,9 @@ Acceptance criteria:
 
 ### 12.4 Symlink read support
 
-- [ ] Implement symlink node metadata.
-- [ ] Implement `readlink`.
-- [ ] Add tests/manual checks for relative symlink.
+- [x] Implement symlink node metadata.
+- [x] Implement `readlink`.
+- [x] Add tests/manual checks for relative symlink.
 
 Acceptance criteria:
 

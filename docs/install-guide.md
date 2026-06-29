@@ -89,6 +89,49 @@ sudo apt install libfuse3-dev
 sudo dnf install fuse3-devel
 ```
 
+## Manual FUSE test
+
+After installing the FUSE prerequisites and building, verify the mount works
+on a real macOS or Linux host (the read-only adapter is also unit-tested via
+`cargo test -p fs2-fuse`, but a live mount confirms the kernel path).
+
+### Linux
+
+```bash
+# Start the backend in one terminal.
+./target/release/fs2-backend
+
+# In another terminal, log in and create a workspace.
+fs2 login --backend http://localhost:8787
+fs2 workspace create test-ws
+
+# Create a mount point and mount.
+mkdir ~/fs2-mnt
+fs2 mount test-ws ~/fs2-mnt
+
+# Verify the mount.
+ls -la ~/fs2-mnt          # should show the (empty) workspace root
+stat ~/fs2-mnt            # should report a directory
+
+# Unmount when done.
+fusermount3 -u ~/fs2-mnt
+```
+
+### macOS
+
+```bash
+# Same backend/login steps as above.
+mkdir ~/fs2-mnt
+fs2 mount test-ws ~/fs2-mnt
+ls -la ~/fs2-mnt
+# Unmount:
+umount ~/fs2-mnt
+```
+
+If `ls` hangs or reports "Transport endpoint is not connected", the FUSE
+daemon is not receiving kernel requests — check that macFUSE/FUSE3 is
+installed and that the user has mount permission.
+
 ## Troubleshooting
 
 - **`fs2 login` fails:** Ensure the backend is running (`fs2-backend`) and
