@@ -81,12 +81,33 @@ struct MemoryStoreInner {
     operations: HashMap<WorkspaceId, Vec<CommittedOp>>,
     /// Idempotency index: (`workspace_id`, `op_id`) -> cursor.
     op_index: HashMap<(WorkspaceId, Uuid), Cursor>,
+    /// Environment variables.
+    env_vars: HashMap<Uuid, StoredEnvVar>,
 }
 
 #[derive(Debug)]
 struct UserEntry {
     #[allow(dead_code)]
     email: String,
+}
+
+/// A stored env var in the backend.
+#[derive(Debug, Clone)]
+pub struct StoredEnvVar {
+    /// Env var id.
+    pub id: Uuid,
+    /// Workspace id.
+    pub workspace_id: WorkspaceId,
+    /// Project path.
+    pub project_path: Option<String>,
+    /// Environment name.
+    pub environment: String,
+    /// Variable name.
+    pub name: String,
+    /// Encrypted value (base64).
+    pub encrypted_value: String,
+    /// Whether deleted.
+    pub deleted: bool,
 }
 
 /// A committed operation with its assigned cursor.
@@ -773,6 +794,82 @@ impl MemoryStore {
         }
 
         Ok(entries)
+    }
+
+    /// Set an env var (upsert).
+    pub fn set_env_var(
+        &self,
+        workspace_id: WorkspaceId,
+        project_path: Option<&str>,
+        environment: &str,
+        name: &str,
+        encrypted_value: &str,
+    ) -> BackendResult<StoredEnvVar> {
+        let mut inner = self.inner.lock().unwrap();
+        if !inner.workspaces.contains_key(&workspace_id) {
+            return Err(BackendError::Domain(fs2_core::Fs2Error::new(
+                fs2_core::Fs2ErrorCode::WorkspaceNotFound,
+                "workspace not found",
+            )));
+        }
+        // Check if an env var with the same name+environment+project already exists.
+        let existing_id = inner
+            .env_vars
+            .values()
+            .find(|v| {
+                v.workspace_id == workspace_id
+                    && v.name == name
+                    && v.environment == environment
+                    && v.project_path.as_deref() == project_path
+                    && !v.deleted
+            })
+            .map(|v| v.id);
+        let id = existing_id.unwrap_or_else(Uuid::new_v4);
+        let record = StoredEnvVar {
+            id,
+            workspace_id,
+            project_path: project_path.map(std::string::ToString::to_string),
+            environment: environment.to_owned(),
+            name: name.to_owned(),
+            encrypted_value: encrypted_value.to_owned(),
+            deleted: false,
+        };
+        inner.env_vars.insert(id, record.clone());
+        Ok(record)
+    }
+
+    /// List env vars for a workspace, optionally filtered by project and environment.
+    pub fn list_env_vars(
+        &self,
+        workspace_id: WorkspaceId,
+        project_path: Option<&str>,
+        environment: Option<&str>,
+    ) -> BackendResult<Vec<StoredEnvVar>> {
+        let inner = self.inner.lock().unwrap();
+        Ok(inner
+            .env_vars
+            .values()
+            .filter(|v| {
+                v.workspace_id == workspace_id
+                    && !v.deleted
+                    && project_path.map_or(true, |p| v.project_path.as_deref() == Some(p))
+                    && environment.map_or(true, |e| v.environment == e)
+            })
+            .cloned()
+            .collect())
+    }
+
+    /// Delete an env var by id.
+    pub fn delete_env_var(&self, env_var_id: Uuid) -> BackendResult<()> {
+        let mut inner = self.inner.lock().unwrap();
+        let var = inner.env_vars.get_mut(&env_var_id).ok_or_else(|| {
+            BackendError::Domain(fs2_core::Fs2Error::new(
+                fs2_core::Fs2ErrorCode::NodeNotFound,
+                "env var not found",
+            ))
+        })?;
+        var.deleted = true;
+        Ok(())
     }
 }
 

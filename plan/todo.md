@@ -912,13 +912,13 @@ Acceptance criteria:
 
 ### 15.1 Backend conflict detection
 
-- [ ] Enforce base revision on `PutFileRevision`.
-- [ ] Return `revision_conflict` with current revision.
-- [ ] Add tests for concurrent writes.
+- [x] Enforce base revision on `PutFileRevision`.
+- [x] Return `revision_conflict` with current revision.
+- [x] Add tests for concurrent writes.
 
 Acceptance criteria:
 
-- [ ] Backend rejects stale file update instead of overwriting current content.
+- [x] Backend rejects stale file update instead of overwriting current content.
 
 ### 15.2 Client conflict preservation
 
@@ -1011,15 +1011,15 @@ Acceptance criteria:
 
 ### 17.2 Backend env endpoints
 
-- [ ] Add env list endpoint.
-- [ ] Add env set endpoint.
-- [ ] Add env delete endpoint.
-- [ ] Store encrypted payload only.
-- [ ] Add tests that backend never receives plaintext in request logs.
+- [x] Add env list endpoint.
+- [x] Add env set endpoint.
+- [x] Add env delete endpoint.
+- [x] Store encrypted payload only.
+- [x] Add tests that backend never receives plaintext in request logs.
 
 Acceptance criteria:
 
-- [ ] Env records sync through operation log or env endpoint consistently.
+- [x] Env records sync through operation log or env endpoint consistently.
 
 ### 17.3 CLI env commands
 
@@ -1497,7 +1497,7 @@ A coding agent should implement in this order unless blocked:
 12. [ ] FUSE file creation/write/upload.
 13. [x] Rule engine default suppressing `node_modules`.
 14. [ ] Conflict detection/preservation.
-15. [ ] Offline queue/replay.
+15. [x] Offline queue/replay.
 16. [x] Env secret sync.
 17. [ ] Git-aware diagnostics/materialization.
 18. [ ] Cache pin/prune.

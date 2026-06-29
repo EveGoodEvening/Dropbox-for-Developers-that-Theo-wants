@@ -64,6 +64,12 @@ pub fn app(state: AppState) -> Router {
         .route("/v1/blobs/upload", post(upload_blob).layer(axum::extract::DefaultBodyLimit::disable()))
         .route("/v1/blobs/download", get(download_blob))
         .route("/v1/blobs/:blob_id/status", get(blob_status))
+        // Env vars
+        .route(
+            "/v1/workspaces/:workspace_id/env",
+            get(list_env_vars).post(set_env_var),
+        )
+        .route("/v1/workspaces/:workspace_id/env/:env_var_id", axum::routing::delete(delete_env_var))
         .with_state(state)
 }
 
@@ -438,6 +444,102 @@ async fn blob_status(
         .await
         .map_err(|e| BackendError::internal(format!("blob status failed: {e}")))?;
     Ok(Json(serde_json::json!({ "exists": exists })))
+}
+
+/// Env var response (value redacted).
+#[derive(Debug, Serialize)]
+pub struct EnvVarResponse {
+    /// Env var id.
+    pub id: Uuid,
+    /// Variable name.
+    pub name: String,
+    /// Environment.
+    pub environment: String,
+    /// Project path.
+    pub project_path: Option<String>,
+    /// Redacted value.
+    pub value_display: String,
+}
+
+/// Query params for listing env vars.
+#[derive(Debug, Deserialize)]
+pub struct ListEnvVarsQuery {
+    /// Filter by project path.
+    pub project_path: Option<String>,
+    /// Filter by environment.
+    pub environment: Option<String>,
+}
+
+/// GET `/v1/workspaces/:workspace_id/env` — list env vars.
+async fn list_env_vars(
+    State(state): State<AppState>,
+    Path(workspace_id): Path<Uuid>,
+    Query(q): Query<ListEnvVarsQuery>,
+) -> BackendResult<Json<Vec<EnvVarResponse>>> {
+    let vars = state.store.list_env_vars(
+        WorkspaceId::from_uuid(workspace_id),
+        q.project_path.as_deref(),
+        q.environment.as_deref(),
+    )?;
+    Ok(Json(
+        vars.into_iter()
+            .map(|v| EnvVarResponse {
+                id: v.id,
+                name: v.name,
+                environment: v.environment,
+                project_path: v.project_path,
+                value_display: "********".to_owned(),
+            })
+            .collect(),
+    ))
+}
+
+/// Set env var request.
+#[derive(Debug, Deserialize)]
+pub struct SetEnvVarRequest {
+    /// Project path (optional).
+    pub project_path: Option<String>,
+    /// Environment name.
+    pub environment: String,
+    /// Variable name.
+    pub name: String,
+    /// Encrypted value (base64).
+    pub encrypted_value: String,
+}
+
+/// POST `/v1/workspaces/:workspace_id/env` — set an env var.
+async fn set_env_var(
+    State(state): State<AppState>,
+    Path(workspace_id): Path<Uuid>,
+    Json(req): Json<SetEnvVarRequest>,
+) -> BackendResult<(StatusCode, Json<EnvVarResponse>)> {
+    let var = state.store.set_env_var(
+        WorkspaceId::from_uuid(workspace_id),
+        req.project_path.as_deref(),
+        &req.environment,
+        &req.name,
+        &req.encrypted_value,
+    )?;
+    Ok((
+        StatusCode::CREATED,
+        Json(EnvVarResponse {
+            id: var.id,
+            name: var.name,
+            environment: var.environment,
+            project_path: var.project_path,
+            value_display: "********".to_owned(),
+        }),
+    ))
+}
+
+/// DELETE `/v1/workspaces/:workspace_id/env/:env_var_id` — delete an env var.
+async fn delete_env_var(
+    State(state): State<AppState>,
+    Path((workspace_id, env_var_id)): Path<(Uuid, Uuid)>,
+) -> BackendResult<StatusCode> {
+    let _ = workspace_id; // workspace_id is in the path for REST consistency
+    state.store.delete_env_var(env_var_id)?;
+    Ok(StatusCode::NO_CONTENT)
 }
 
 /// Run the backend server.
