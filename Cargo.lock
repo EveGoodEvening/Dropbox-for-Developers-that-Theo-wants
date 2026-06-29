@@ -399,6 +399,7 @@ dependencies = [
  "clap",
  "fs2-core",
  "fs2-env",
+ "fs2-git",
  "fs2-sync",
  "hostname",
  "serde",

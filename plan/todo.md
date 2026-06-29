@@ -1078,16 +1078,16 @@ Acceptance criteria:
 
 ### 18.3 Git materialization command
 
-- [ ] Implement `fs2 git materialize <path>`.
-- [ ] If remote metadata is known, run safe clone/fetch into temp dir.
-- [ ] Move `.git` into place.
-- [ ] Overlay synced worktree.
-- [ ] Run `git status` and report result.
-- [ ] Never auto-merge.
+- [x] Implement `fs2 git materialize <path>`.
+- [x] If remote metadata is known, run safe clone/fetch into temp dir.
+- [x] Move `.git` into place.
+- [x] Overlay synced worktree.
+- [x] Run `git status` and report result.
+- [x] Never auto-merge.
 
 Acceptance criteria:
 
-- [ ] New machine can turn a synced worktree folder into a functional Git repo.
+- [x] New machine can turn a synced worktree folder into a functional Git repo.
 
 ### 18.4 Submodule handling
 
@@ -1136,7 +1136,7 @@ Acceptance criteria:
 
 Acceptance criteria:
 
-- [ ] User can see dependency state after syncing a project to a new machine.
+- [x] User can see dependency state after syncing a project to a new machine.
 
 MVP relaxation:
 
@@ -1500,7 +1500,7 @@ A coding agent should implement in this order unless blocked:
 15. [x] Offline queue/replay.
 16. [x] Env secret sync.
 17. [x] Git-aware diagnostics/materialization.
-18. [ ] Cache pin/prune.
+18. [x] Cache pin/prune.
 19. [x] `doctor`.
 20. [x] Packaging/docs/dogfood.
 

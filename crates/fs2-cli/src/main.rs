@@ -62,6 +62,16 @@ enum Commands {
         #[command(subcommand)]
         action: EnvCommands,
     },
+    /// Git-aware operations.
+    Git {
+        #[command(subcommand)]
+        action: GitCommands,
+    },
+    /// Dependency management.
+    Deps {
+        #[command(subcommand)]
+        action: DepsCommands,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -156,6 +166,42 @@ enum EnvCommands {
         /// Command and arguments after --.
         #[arg(trailing_var_arg = true)]
         command: Vec<String>,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum GitCommands {
+    /// Show Git status for a project.
+    Status {
+        /// Project path.
+        path: String,
+    },
+    /// Materialize a Git repo from remote metadata.
+    Materialize {
+        /// Project path.
+        path: String,
+    },
+    /// Show submodule status.
+    Submodules {
+        /// Project path.
+        path: String,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum DepsCommands {
+    /// Show dependency status for a project.
+    Status {
+        /// Project path.
+        path: String,
+    },
+    /// Install dependencies for a project.
+    Install {
+        /// Project path.
+        path: String,
+        /// Skip confirmation prompt.
+        #[arg(long)]
+        yes: bool,
     },
 }
 
@@ -442,6 +488,106 @@ async fn main() -> anyhow::Result<()> {
                 }
             }
         }
+        Some(Commands::Git { action }) => match action {
+            GitCommands::Status { path } => {
+                let meta = fs2_git::detect_git(std::path::Path::new(&path))
+                    .map_err(|e| anyhow::anyhow!("failed to detect git: {e}"))?;
+                if meta.is_repo {
+                    println!("{path}: git repository");
+                    if let Some(ref remote) = meta.remote_url {
+                        println!("  remote: {remote}");
+                    }
+                    if let Some(ref branch) = meta.branch {
+                        println!("  branch: {branch}");
+                    }
+                    if let Some(ref head) = meta.head_commit {
+                        println!("  HEAD: {head}");
+                    }
+                    println!("  dirty: {}", if meta.dirty { "yes" } else { "no" });
+                    if !meta.submodules.is_empty() {
+                        println!("  submodules:");
+                        for sub in &meta.submodules {
+                            println!("    {} ({})", sub.path, sub.url);
+                        }
+                    }
+                } else {
+                    println!("{path}: not a git repository");
+                }
+            }
+            GitCommands::Materialize { path } => {
+                let meta = fs2_git::detect_git(std::path::Path::new(&path))
+                    .map_err(|e| anyhow::anyhow!("failed to detect git: {e}"))?;
+                if meta.is_repo {
+                    println!("{path}: already a git repository");
+                    return Ok(());
+                }
+                // In a real implementation, this would read remote metadata
+                // from the sync state and run git clone. For now, we report
+                // that materialization requires a known remote URL.
+                println!("{path}: git materialization requires a known remote URL.");
+                println!("  Use `git clone <remote> {path}` to set up the repository.");
+            }
+            GitCommands::Submodules { path } => {
+                let subs = fs2_git::detect_gitmodules(std::path::Path::new(&path))
+                    .map_err(|e| anyhow::anyhow!("failed to detect submodules: {e}"))?;
+                if subs.is_empty() {
+                    println!("{path}: no submodules");
+                } else {
+                    println!("{path}: {} submodule(s)", subs.len());
+                    for sub in &subs {
+                        println!("  {} ({})", sub.path, sub.url);
+                    }
+                }
+            }
+        },
+        Some(Commands::Deps { action }) => match action {
+            DepsCommands::Status { path } => {
+                let pm = fs2_git::detect_package_manager(std::path::Path::new(&path));
+                if pm == fs2_git::PackageManager::None {
+                    println!("{path}: no package manager detected");
+                } else {
+                    println!("{path}: package manager = {}", pm.display_name());
+                    let cmd = pm.install_command();
+                    if !cmd.is_empty() {
+                        println!("  install: {}", cmd.join(" "));
+                    }
+                }
+            }
+            DepsCommands::Install { path, yes } => {
+                let pm = fs2_git::detect_package_manager(std::path::Path::new(&path));
+                if pm == fs2_git::PackageManager::None {
+                    anyhow::bail!("{path}: no package manager detected");
+                }
+                let cmd = pm.install_command();
+                if cmd.is_empty() {
+                    anyhow::bail!("no install command for {}", pm.display_name());
+                }
+                if !yes {
+                    println!("About to run: {} in {path}", cmd.join(" "));
+                    print!("Proceed? [y/N] ");
+                    {
+                        use std::io::Write;
+                        std::io::stdout().flush()?;
+                    }
+                    let mut input = String::new();
+                    std::io::stdin().read_line(&mut input)?;
+                    if !input.trim().eq_ignore_ascii_case("y") {
+                        println!("Aborted.");
+                        return Ok(());
+                    }
+                }
+                let status = std::process::Command::new(cmd[0])
+                    .args(&cmd[1..])
+                    .current_dir(&path)
+                    .status()
+                    .map_err(|e| anyhow::anyhow!("failed to run install: {e}"))?;
+                if status.success() {
+                    println!("Dependencies installed successfully.");
+                } else {
+                    anyhow::bail!("install failed with exit code: {:?}", status.code());
+                }
+            }
+        },
         None => {
             println!("fs2: see `fs2 --help`");
         }
