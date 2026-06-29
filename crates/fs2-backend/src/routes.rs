@@ -25,6 +25,8 @@ pub struct AppState {
     pub auth: Arc<AuthState>,
     /// Backend config.
     pub config: Arc<BackendConfig>,
+    /// Blob store.
+    pub blob_store: Arc<dyn crate::blob_store::BlobStore>,
 }
 
 /// Health response.
@@ -53,6 +55,10 @@ pub fn app(state: AppState) -> Router {
             "/v1/workspaces/:workspace_id/ops",
             get(fetch_operations).post(commit_operation),
         )
+        // Blobs (dev direct upload/download)
+        .route("/v1/blobs/upload", post(upload_blob).layer(axum::extract::DefaultBodyLimit::disable()))
+        .route("/v1/blobs/download", get(download_blob))
+        .route("/v1/blobs/:blob_id/status", get(blob_status))
         .with_state(state)
 }
 
@@ -331,6 +337,74 @@ async fn fetch_operations(
     }))
 }
 
+/// POST /v1/blobs/upload — direct blob upload (dev mode).
+async fn upload_blob(
+    State(state): State<AppState>,
+    headers: axum::http::HeaderMap,
+    body: axum::body::Bytes,
+) -> BackendResult<StatusCode> {
+    let blob_id = headers
+        .get("x-blob-id")
+        .and_then(|v| v.to_str().ok())
+        .ok_or_else(|| {
+            BackendError::Domain(fs2_core::Fs2Error::new(
+                fs2_core::Fs2ErrorCode::InvalidOperation,
+                "missing x-blob-id header",
+            ))
+        })?;
+    state
+        .blob_store
+        .put(blob_id, body)
+        .await
+        .map_err(|e| BackendError::internal(format!("blob upload failed: {e}")))?;
+    Ok(StatusCode::CREATED)
+}
+
+/// GET /v1/blobs/download — direct blob download (dev mode).
+async fn download_blob(
+    State(state): State<AppState>,
+    Query(q): Query<DownloadBlobQuery>,
+) -> BackendResult<axum::body::Body> {
+    // Check if blob exists first to return proper error code.
+    let exists = state
+        .blob_store
+        .exists(&q.blob_id)
+        .await
+        .map_err(|e| BackendError::internal(format!("blob status check failed: {e}")))?;
+    if !exists {
+        return Err(BackendError::Domain(fs2_core::Fs2Error::new(
+            fs2_core::Fs2ErrorCode::BlobMissing,
+            "blob not found in store",
+        )));
+    }
+    let data = state
+        .blob_store
+        .get(&q.blob_id)
+        .await
+        .map_err(|e| BackendError::internal(format!("blob download failed: {e}")))?;
+    Ok(axum::body::Body::from(data))
+}
+
+/// Query params for blob download.
+#[derive(Debug, Deserialize)]
+pub struct DownloadBlobQuery {
+    /// Blob ID to download.
+    pub blob_id: String,
+}
+
+/// GET `/v1/blobs/:blob_id/status` — check if a blob exists.
+async fn blob_status(
+    State(state): State<AppState>,
+    Path(blob_id): Path<String>,
+) -> BackendResult<Json<serde_json::Value>> {
+    let exists = state
+        .blob_store
+        .exists(&blob_id)
+        .await
+        .map_err(|e| BackendError::internal(format!("blob status failed: {e}")))?;
+    Ok(Json(serde_json::json!({ "exists": exists })))
+}
+
 /// Run the backend server.
 ///
 /// # Errors
@@ -346,10 +420,20 @@ pub async fn run_server(config: BackendConfig) -> anyhow::Result<()> {
     let bind = config.bind.clone();
     let store = MemoryStore::shared();
     let auth = Arc::new(AuthState::new(&config.jwt_secret, config.dev_auth)?);
+    let blob_store: Arc<dyn crate::blob_store::BlobStore> = match &config.object_store {
+        crate::config::ObjectStoreConfig::Local { path } => {
+            std::fs::create_dir_all(path).ok();
+            Arc::new(crate::blob_store::LocalBlobStore::new(path))
+        }
+        crate::config::ObjectStoreConfig::S3 { .. } => {
+            return Err(anyhow::anyhow!("S3 blob store not yet implemented"));
+        }
+    };
     let state = AppState {
         store,
         auth,
         config: Arc::new(config),
+        blob_store,
     };
 
     let app = app(state);
@@ -403,10 +487,16 @@ mod tests {
         let store = MemoryStore::shared();
         let auth = Arc::new(AuthState::new("test-secret", true).unwrap());
         let config = Arc::new(BackendConfig::default());
+        let tmp = tempfile::TempDir::new().unwrap();
+        let blob_store: Arc<dyn crate::blob_store::BlobStore> =
+            Arc::new(crate::blob_store::LocalBlobStore::new(tmp.path()));
+        // Leak the temp dir so it persists for the test. (The test is short-lived.)
+        std::mem::forget(tmp);
         AppState {
             store,
             auth,
             config,
+            blob_store,
         }
     }
 

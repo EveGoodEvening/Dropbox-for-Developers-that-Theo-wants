@@ -19,3 +19,5 @@ tempfile = "3"
 fs2-core = { path = "../fs2-core" }
 fs2-sync = { path = "../fs2-sync" }
 fs2-backend = { path = "../fs2-backend" }
+chrono = { version = "0.4", features = ["serde"] }
+uuid = { version = "1", features = ["v4"] }

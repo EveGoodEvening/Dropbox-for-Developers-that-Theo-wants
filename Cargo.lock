@@ -370,13 +370,16 @@ name = "fs2-backend"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "async-trait",
  "axum",
+ "bytes",
  "chrono",
  "fs2-core",
  "http-body-util",
  "jsonwebtoken",
  "serde",
  "serde_json",
+ "tempfile",
  "thiserror 1.0.69",
  "tokio",
  "tower",
@@ -503,12 +506,14 @@ name = "fs2-testkit"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "chrono",
  "fs2-backend",
  "fs2-core",
  "fs2-sync",
  "serde_json",
  "tempfile",
  "tokio",
+ "uuid",
 ]
 
 [[package]]

@@ -472,7 +472,7 @@ Acceptance criteria:
 
 ### 7.1 Object store abstraction
 
-- [ ] Define trait:
+- [x] Define trait:
 
 ```rust
 trait BlobStore {
@@ -482,31 +482,31 @@ trait BlobStore {
 }
 ```
 
-- [ ] Implement local filesystem blob store for tests.
+- [x] Implement local filesystem blob store for tests.
 - [ ] Implement S3-compatible blob store.
 - [ ] Add MinIO or localstack test option.
 
 Acceptance criteria:
 
-- [ ] Backend can run entirely locally without cloud credentials.
+- [x] Backend can run entirely locally without cloud credentials.
 
 ### 7.2 Blob registration endpoints
 
-- [ ] Implement `POST /v1/blobs/presign-upload` or direct dev upload endpoint.
-- [ ] Implement `POST /v1/blobs/presign-download` or direct dev download endpoint.
-- [ ] Implement `GET /v1/blobs/{id}/status`.
+- [x] Implement `POST /v1/blobs/presign-upload` or direct dev upload endpoint.
+- [x] Implement `POST /v1/blobs/presign-download` or direct dev download endpoint.
+- [x] Implement `GET /v1/blobs/{id}/status`.
 - [ ] Store blob metadata in Postgres.
 - [ ] Validate declared size and hash where possible.
 
 Acceptance criteria:
 
-- [ ] Client can upload and download a blob by ID.
+- [x] Client can upload and download a blob by ID.
 
 ### 7.3 Content addressing
 
-- [ ] Implement hash computation.
-- [ ] Decide initial `BlobId` format:
-  - [ ] `sha256:<ciphertext_hash>` preferred
+- [x] Implement hash computation.
+- [x] Decide initial `BlobId` format:
+  - [x] `sha256:<ciphertext_hash>` preferred
 - [ ] Verify downloaded blob hash before use.
 - [ ] Add corrupt blob test.
 
@@ -528,7 +528,7 @@ Acceptance criteria:
 
 MVP note:
 
-- [ ] Whole-file blobs are acceptable for the first vertical slice.
+- [x] Whole-file blobs are acceptable for the first vertical slice.
 
 ---
 
@@ -691,13 +691,13 @@ Acceptance criteria:
 
 ### 11.1 Implement API client
 
-- [ ] Authenticated request middleware.
+- [x] Authenticated request middleware.
 - [ ] Retry with exponential backoff.
-- [ ] Structured error parsing.
-- [ ] Operation submit.
-- [ ] Operation fetch.
+- [x] Structured error parsing.
+- [x] Operation submit.
+- [x] Operation fetch.
 - [ ] Manifest fetch.
-- [ ] Blob upload/download.
+- [x] Blob upload/download.
 - [ ] WebSocket event listener.
 
 Acceptance criteria:
@@ -732,11 +732,11 @@ Acceptance criteria:
 
 ### 11.4 Two-client materialized test harness
 
-- [ ] Build `fs2-testkit` with fake/local backend.
-- [ ] Create two local client state dirs.
-- [ ] Simulate file creation on A by creating operation directly.
-- [ ] Sync B.
-- [ ] Assert metadata appears.
+- [x] Build `fs2-testkit` with fake/local backend.
+- [x] Create two local client state dirs.
+- [x] Simulate file creation on A by creating operation directly.
+- [x] Sync B.
+- [x] Assert metadata appears.
 - [ ] Hydrate B and assert bytes match.
 
 Acceptance criteria:
@@ -1488,8 +1488,8 @@ A coding agent should implement in this order unless blocked:
 3. [x] Backend migrations and workspace creation.
 4. [x] Backend operation commit/fetch.
 5. [x] Local SQLite store and operation replay.
-6. [ ] Blob store abstraction with local filesystem backend.
-7. [ ] API client.
+6. [x] Blob store abstraction with local filesystem backend.
+7. [x] API client.
 8. [ ] Two-client materialized sync test.
 9. [ ] Basic CLI login/workspace/status.
 10. [ ] FUSE read-only mount showing metadata.

@@ -25,8 +25,11 @@ uuid = { version = "1", features = ["v4", "serde"] }
 chrono = { version = "0.4", features = ["serde"] }
 jsonwebtoken = "9"
 thiserror = "1"
+async-trait = "0.1"
+bytes = "1"
 fs2-core = { path = "../fs2-core" }
 
 [dev-dependencies]
 http-body-util = "0.1"
 tower = { version = "0.5", features = ["util"] }
+tempfile = "3"

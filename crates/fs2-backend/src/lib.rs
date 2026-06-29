@@ -5,6 +5,7 @@
 //! `migrations/postgres/` can be applied and the store swapped.
 
 pub mod auth;
+pub mod blob_store;
 pub mod config;
 pub mod error;
 pub mod routes;
