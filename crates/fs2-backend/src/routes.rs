@@ -1038,4 +1038,51 @@ mod tests {
         assert!(event_text.contains("workspace_ops_available"));
         assert!(event_text.contains("\"to_cursor\":2"));
     }
+
+    #[tokio::test]
+    async fn revoked_device_token_rejected_by_middleware() {
+        let state = test_state();
+        let user_id = state.store.create_dev_user("test@example.com").unwrap();
+        let device = state
+            .store
+            .register_device(user_id, "laptop", "fake-key")
+            .unwrap();
+        let token = state
+            .auth
+            .issue_token(user_id, device.id.as_uuid())
+            .unwrap();
+        // Before revocation, an authenticated request succeeds.
+        let router = app(state.clone());
+        let resp = router
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri(format!("/v1/workspaces?user_id={user_id}"))
+                    .header("authorization", format!("Bearer {token}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        // Revoke the device.
+        state.store.revoke_device(device.id).unwrap();
+        // After revocation, the same token is rejected with 401.
+        let router2 = app(state.clone());
+        let resp = router2
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri("/v1/workspaces")
+                    .header("authorization", format!("Bearer {token}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+        let body = resp.into_body().collect().await.unwrap().to_bytes();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json["error"]["code"], "device_revoked");
+    }
 }

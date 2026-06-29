@@ -93,4 +93,27 @@ mod tests {
         assert_eq!(cfg.user_id, back.user_id);
         assert_eq!(cfg.device_id, back.device_id);
     }
+
+    #[test]
+    fn clear_removes_config_and_token() {
+        // Use a temp HOME so we don't touch the real config.
+        let tmp = tempfile::TempDir::new().unwrap();
+        let prev_home = std::env::var("HOME").ok();
+        std::env::set_var("HOME", tmp.path());
+        let cfg = CliConfig {
+            backend_url: "http://localhost:8787".to_owned(),
+            token: "secret-token-to-clear".to_owned(),
+            user_id: uuid::Uuid::new_v4(),
+            device_id: uuid::Uuid::new_v4(),
+        };
+        cfg.save().unwrap();
+        assert!(CliConfig::config_path().unwrap().exists());
+        // Logout / clear removes the config (and thus the token).
+        CliConfig::clear().unwrap();
+        assert!(!CliConfig::config_path().unwrap().exists());
+        // Restore HOME.
+        if let Some(h) = prev_home {
+            std::env::set_var("HOME", h);
+        }
+    }
 }

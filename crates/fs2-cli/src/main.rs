@@ -1019,3 +1019,45 @@ async fn build_status_json() -> String {
     };
     serde_json::to_string_pretty(&status).unwrap_or_else(|_| "{}".to_owned())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn redact_secrets_redacts_token() {
+        let raw = serde_json::json!({
+            "backend_url": "http://localhost:8787",
+            "token": "super-secret-jwt-abc123",
+            "user_id": "00000000-0000-0000-0000-000000000001",
+            "device_id": "00000000-0000-0000-0000-000000000002"
+        })
+        .to_string();
+        let redacted = redact_secrets(&raw);
+        assert!(!redacted.contains("super-secret-jwt-abc123"), "token leaked in redacted output");
+        assert!(redacted.contains("REDACTED"));
+        // Non-sensitive fields are preserved.
+        assert!(redacted.contains("http://localhost:8787"));
+    }
+
+    #[test]
+    fn redact_secrets_redacts_password_and_private_key() {
+        let raw = serde_json::json!({
+            "password": "hunter2",
+            "private_key": "-----BEGIN PRIVATE KEY-----",
+            "name": "my-device"
+        })
+        .to_string();
+        let redacted = redact_secrets(&raw);
+        assert!(!redacted.contains("hunter2"));
+        assert!(!redacted.contains("BEGIN PRIVATE KEY"));
+        assert!(redacted.contains("my-device"));
+    }
+
+    #[test]
+    fn redact_raw_text_redacts_token() {
+        let raw = "token=abc123secret\nname=laptop";
+        let redacted = redact_raw_text(raw);
+        assert!(!redacted.contains("abc123secret"), "token leaked in raw text redaction");
+    }
+}

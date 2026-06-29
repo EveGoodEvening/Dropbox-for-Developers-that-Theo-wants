@@ -1335,14 +1335,16 @@ Acceptance criteria:
 ### 24.1 Token handling
 
 - [ ] Store tokens only in keychain.
-- [ ] Redact tokens in logs.
+  > **Blocked (sandbox):** No OS keychain available; tokens currently stored in `~/.fs2/config.json` for dev. Requires `keyring` crate + platform keychain.
+- [x] Redact tokens in logs.
 - [ ] Refresh tokens automatically.
-- [ ] Reject revoked device tokens.
-- [ ] Add logout flow.
+  > **Deferred:** Requires refresh-token issuance/rotation design not specified in MVP; JWT expires in 1h.
+- [x] Reject revoked device tokens.
+- [x] Add logout flow.
 
 Acceptance criteria:
 
-- [ ] Token leakage tests pass.
+- [x] Token leakage tests pass.
 
 ### 24.2 Key handling
 

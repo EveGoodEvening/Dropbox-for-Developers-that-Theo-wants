@@ -135,6 +135,29 @@ pub async fn auth_middleware(
     };
     match state.auth.verify_token(token) {
         Ok(claims) => {
+            // Reject revoked devices at the middleware so every authenticated
+            // endpoint honors revocation, not just operation commit.
+            let device_id = Uuid::parse_str(&claims.device_id).ok();
+            if let Some(did) = device_id {
+                if let Ok(device) = state.store.device_valid(fs2_core::DeviceId::from_uuid(did)) {
+                    // device_valid returns Err(DeviceRevoked) for revoked
+                    // devices, so Ok means the device is still active.
+                    let _ = device;
+                } else {
+                    return axum::response::Response::builder()
+                        .status(axum::http::StatusCode::UNAUTHORIZED)
+                        .body(axum::body::Body::from(
+                            serde_json::json!({
+                                "error": {
+                                    "code": "device_revoked",
+                                    "message": "device has been revoked"
+                                }
+                            })
+                            .to_string(),
+                        ))
+                        .unwrap();
+                }
+            }
             req.extensions_mut().insert(AuthClaims(claims));
             next.run(req).await
         }
