@@ -701,6 +701,145 @@ impl MemoryStore {
             ))
         })
     }
+
+    /// Fetch a manifest (subtree metadata) starting from a path.
+    ///
+    /// Returns node metadata without file bytes. Supports depth 0 (just the
+    /// node itself), depth 1 (immediate children), and recursive (all
+    /// descendants).
+    pub fn fetch_manifest(
+        &self,
+        workspace_id: WorkspaceId,
+        path: &str,
+        depth: usize,
+    ) -> BackendResult<Vec<ManifestEntry>> {
+        let inner = self.inner.lock().unwrap();
+        // Find the node at the given path.
+        let root_node_id = inner
+            .workspaces
+            .get(&workspace_id)
+            .ok_or_else(|| {
+                BackendError::Domain(fs2_core::Fs2Error::new(
+                    fs2_core::Fs2ErrorCode::WorkspaceNotFound,
+                    "workspace not found",
+                ))
+            })?
+            .root_node_id;
+
+        let start_node_id = if path.is_empty() {
+            root_node_id
+        } else {
+            // Walk the path to find the node.
+            let segments: Vec<&str> = path.split('/').filter(|s| !s.is_empty()).collect();
+            let mut current_id = root_node_id;
+            for seg in segments {
+                let child = inner
+                    .nodes
+                    .values()
+                    .find(|n| {
+                        n.workspace_id == workspace_id
+                            && n.parent_id == Some(current_id)
+                            && n.name == seg
+                            && !n.deleted
+                    })
+                    .ok_or_else(|| {
+                        BackendError::Domain(fs2_core::Fs2Error::new(
+                            fs2_core::Fs2ErrorCode::NodeNotFound,
+                            format!("path segment `{seg}` not found"),
+                        ))
+                    })?;
+                current_id = child.id;
+            }
+            current_id
+        };
+
+        // Collect nodes up to the requested depth.
+        let mut entries = Vec::new();
+        let start_node = inner.nodes.get(&start_node_id).ok_or_else(|| {
+            BackendError::Domain(fs2_core::Fs2Error::new(
+                fs2_core::Fs2ErrorCode::NodeNotFound,
+                "start node not found",
+            ))
+        })?;
+        entries.push(node_to_manifest(
+            start_node,
+            start_node
+                .current_revision_id
+                .and_then(|rid| inner.revisions.get(&rid)),
+        ));
+
+        if depth > 0 {
+            collect_children(&inner, workspace_id, start_node_id, depth, &mut entries);
+        }
+
+        Ok(entries)
+    }
+}
+
+/// A manifest entry: node metadata without file bytes.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct ManifestEntry {
+    /// Node id.
+    pub node_id: String,
+    /// Parent node id.
+    pub parent_id: Option<String>,
+    /// Name.
+    pub name: String,
+    /// Kind (directory, file, symlink).
+    pub kind: String,
+    /// Size in bytes (0 for directories).
+    pub size: u64,
+    /// Whether the node is deleted.
+    pub deleted: bool,
+    /// Blob ID for file content.
+    pub blob_id: Option<String>,
+    /// Symlink target.
+    pub symlink_target: Option<String>,
+}
+
+fn node_to_manifest(node: &NodeRecord, rev: Option<&NodeRevision>) -> ManifestEntry {
+    let (size, blob_id, symlink_target) = if let Some(r) = rev {
+        match &r.content {
+            RevisionContent::Directory => (0, None, None),
+            RevisionContent::File { blob_id, .. } => (r.size, Some(blob_id.clone()), None),
+            RevisionContent::Symlink { target } => (0, None, Some(target.clone())),
+        }
+    } else {
+        (0, None, None)
+    };
+    ManifestEntry {
+        node_id: node.id.to_string(),
+        parent_id: node.parent_id.map(|n| n.to_string()),
+        name: node.name.clone(),
+        kind: node.kind.as_str().to_owned(),
+        size,
+        deleted: node.deleted,
+        blob_id,
+        symlink_target,
+    }
+}
+
+fn collect_children(
+    inner: &MemoryStoreInner,
+    workspace_id: WorkspaceId,
+    parent_id: NodeId,
+    remaining_depth: usize,
+    entries: &mut Vec<ManifestEntry>,
+) {
+    let children: Vec<&NodeRecord> = inner
+        .nodes
+        .values()
+        .filter(|n| n.workspace_id == workspace_id && n.parent_id == Some(parent_id) && !n.deleted)
+        .collect();
+    for child in children {
+        let rev = child
+            .current_revision_id
+            .and_then(|rid| inner.revisions.get(&rid));
+        entries.push(node_to_manifest(child, rev));
+        if remaining_depth > 1 {
+            collect_children(inner, workspace_id, child.id, remaining_depth - 1, entries);
+        }
+    }
 }
 
 #[cfg(test)]

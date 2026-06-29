@@ -55,6 +55,11 @@ pub fn app(state: AppState) -> Router {
             "/v1/workspaces/:workspace_id/ops",
             get(fetch_operations).post(commit_operation),
         )
+        // Manifest
+        .route(
+            "/v1/workspaces/:workspace_id/manifest",
+            get(fetch_manifest),
+        )
         // Blobs (dev direct upload/download)
         .route("/v1/blobs/upload", post(upload_blob).layer(axum::extract::DefaultBodyLimit::disable()))
         .route("/v1/blobs/download", get(download_blob))
@@ -335,6 +340,29 @@ async fn fetch_operations(
         has_more,
         next_cursor: next.as_i64(),
     }))
+}
+
+/// Manifest query parameters.
+#[derive(Debug, Deserialize)]
+pub struct ManifestQuery {
+    /// Path within the workspace (empty for root).
+    pub path: Option<String>,
+    /// Depth: 0 for just the node, 1 for immediate children, etc.
+    pub depth: Option<usize>,
+}
+
+/// GET `/v1/workspaces/:workspace_id/manifest` — fetch subtree metadata.
+async fn fetch_manifest(
+    State(state): State<AppState>,
+    Path(workspace_id): Path<Uuid>,
+    Query(q): Query<ManifestQuery>,
+) -> BackendResult<Json<Vec<crate::store::ManifestEntry>>> {
+    let path = q.path.unwrap_or_default();
+    let depth = q.depth.unwrap_or(1);
+    let entries = state
+        .store
+        .fetch_manifest(WorkspaceId::from_uuid(workspace_id), &path, depth)?;
+    Ok(Json(entries))
 }
 
 /// POST /v1/blobs/upload — direct blob upload (dev mode).
