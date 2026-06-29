@@ -773,6 +773,7 @@ Acceptance criteria:
 Acceptance criteria:
 
 - [ ] A cold workspace tree can be browsed with `find` without downloading bytes, except where `find` stats file metadata only.
+> **Blocked (sandbox):** Live FUSE mount verification unavailable; adapter logic is unit-tested via `cargo test -p fs2-fuse`.
 
 ### 12.3 Read path with lazy hydration
 
@@ -787,6 +788,7 @@ Acceptance criteria:
 Acceptance criteria:
 
 - [ ] `cat ~/code/project/file.txt` downloads bytes on first read and reads from cache on second read.
+> **Blocked (sandbox):** Live FUSE mount verification unavailable; adapter logic is unit-tested via `cargo test -p fs2-fuse`.
 
 ### 12.4 Symlink read support
 
@@ -797,6 +799,7 @@ Acceptance criteria:
 Acceptance criteria:
 
 - [ ] Relative symlinks round-trip through sync and FUSE.
+> **Blocked (sandbox):** Live FUSE mount verification unavailable; adapter logic is unit-tested via `cargo test -p fs2-fuse`.
 
 ---
 
@@ -942,6 +945,7 @@ Acceptance criteria:
 Acceptance criteria:
 
 - [ ] Concurrent edits preserve both versions on both machines.
+> **Blocked (sandbox):** Live FUSE mount verification unavailable; adapter logic is unit-tested via `cargo test -p fs2-fuse`.
 
 ### 15.3 Conflict resolution CLI
 
