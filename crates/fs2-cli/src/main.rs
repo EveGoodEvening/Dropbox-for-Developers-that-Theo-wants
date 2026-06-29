@@ -17,6 +17,14 @@ fn run_from_args(args: impl IntoIterator<Item = String>) -> Result<String, Strin
     match args.as_slice() {
         [] => Ok(help()),
         [one] if one == "--help" || one == "-h" => Ok(help()),
+        [cmd, subcmd, action] if cmd == "git" && subcmd == "submodules" && action == "status" => {
+            git_submodules_status(".")
+        }
+        [cmd, subcmd, action, path]
+            if cmd == "git" && subcmd == "submodules" && action == "status" =>
+        {
+            git_submodules_status(path)
+        }
         [cmd, subcmd] if cmd == "git" && subcmd == "status" => git_status("."),
         [cmd, subcmd, path] if cmd == "git" && subcmd == "status" => git_status(path),
         _ => Err("unsupported command; try `fs2 --help`".to_owned()),
@@ -24,7 +32,8 @@ fn run_from_args(args: impl IntoIterator<Item = String>) -> Result<String, Strin
 }
 
 fn help() -> String {
-    "fs2-devsync CLI\n\nCommands:\n  fs2 git status [path]\n".to_owned()
+    "fs2-devsync CLI\n\nCommands:\n  fs2 git status [path]\n  fs2 git submodules status [path]\n"
+        .to_owned()
 }
 
 fn git_status(path: impl AsRef<Path>) -> Result<String, String> {
@@ -70,8 +79,37 @@ fn git_status(path: impl AsRef<Path>) -> Result<String, String> {
     } else {
         out.push_str("  submodules:\n");
         for submodule in status.submodules {
-            writeln!(out, "    {} ({})", submodule.path, submodule.name)
-                .map_err(|error| error.to_string())?;
+            writeln!(
+                out,
+                "    {} ({}) url={} commit={}",
+                submodule.path,
+                submodule.name,
+                submodule.url.as_deref().unwrap_or("unknown"),
+                submodule.commit.as_deref().unwrap_or("unknown")
+            )
+            .map_err(|error| error.to_string())?;
+        }
+    }
+    Ok(out)
+}
+
+fn git_submodules_status(path: impl AsRef<Path>) -> Result<String, String> {
+    let status = fs2_git::detect_repository(path).map_err(|error| error.to_string())?;
+    let mut out = String::new();
+    out.push_str("Git submodules:\n");
+    if status.submodules.is_empty() {
+        out.push_str("  none\n");
+    } else {
+        for submodule in status.submodules {
+            writeln!(
+                out,
+                "  {} name={} url={} commit={}",
+                submodule.path,
+                submodule.name,
+                submodule.url.as_deref().unwrap_or("unknown"),
+                submodule.commit.as_deref().unwrap_or("unknown")
+            )
+            .map_err(|error| error.to_string())?;
         }
     }
     Ok(out)
@@ -86,6 +124,7 @@ mod tests {
         let output = run_from_args(["--help".to_owned()])?;
 
         assert!(output.contains("fs2 git status [path]"));
+        assert!(output.contains("fs2 git submodules status [path]"));
         Ok(())
     }
 }

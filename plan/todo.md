@@ -1093,11 +1093,11 @@ Acceptance criteria:
 
 ### 18.4 Submodule handling
 
-- [ ] Parse `.gitmodules`.
-- [ ] Record submodule path/URL/commit metadata.
-- [ ] Treat submodule worktree content as normal nested files.
-- [ ] Exclude nested `.git` internals.
-- [ ] Implement `fs2 git submodules status`.
+- [x] Parse `.gitmodules`.
+- [x] Record submodule path/URL/commit metadata.
+- [x] Treat submodule worktree content as normal nested files.
+- [x] Exclude nested `.git` internals.
+- [x] Implement `fs2 git submodules status`.
 
 Acceptance criteria:
 

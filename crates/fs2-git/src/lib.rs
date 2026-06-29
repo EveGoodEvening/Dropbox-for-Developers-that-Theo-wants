@@ -71,6 +71,7 @@ pub struct GitSubmodule {
     pub name: String,
     pub path: String,
     pub url: Option<String>,
+    pub commit: Option<String>,
 }
 
 /// Useful state for `fs2 git status` and backend metadata.
@@ -124,6 +125,14 @@ pub fn detect_repository(path: impl AsRef<Path>) -> Result<GitRepositoryStatus, 
     } else {
         GitRepositoryKind::Standard
     };
+    let mut submodules = parse_gitmodules(&worktree_root)?;
+    attach_submodule_commits(
+        &mut submodules,
+        optional_git_output(&worktree_root, &["submodule", "status", "--recursive"])
+            .transpose()?
+            .as_deref()
+            .unwrap_or(""),
+    );
     Ok(GitRepositoryStatus {
         remotes: parse_remotes(&git_output(&worktree_root, &["remote", "-v"])?),
         current_branch: optional_git_output(
@@ -137,7 +146,7 @@ pub fn detect_repository(path: impl AsRef<Path>) -> Result<GitRepositoryStatus, 
             &worktree_root,
             &["status", "--porcelain=v1"],
         )?),
-        submodules: parse_gitmodules(&worktree_root)?,
+        submodules,
         worktree_root,
         git_dir,
         common_git_dir,
@@ -273,6 +282,33 @@ fn parse_gitmodules(root: &Path) -> Result<Vec<GitSubmodule>, GitError> {
     Ok(entries)
 }
 
+fn attach_submodule_commits(submodules: &mut [GitSubmodule], status: &str) {
+    let commits = parse_submodule_commits(status);
+    for submodule in submodules {
+        if let Some(commit) = commits.get(&submodule.path) {
+            submodule.commit = Some(commit.clone());
+        }
+    }
+}
+
+fn parse_submodule_commits(status: &str) -> BTreeMap<String, String> {
+    let mut commits = BTreeMap::new();
+    for line in status.lines() {
+        let line = line.trim_start_matches([' ', '-', '+', 'U']);
+        let mut parts = line.split_whitespace();
+        let Some(commit) = parts.next() else {
+            continue;
+        };
+        let Some(path) = parts.next() else {
+            continue;
+        };
+        if commit.len() == 40 && commit.chars().all(|ch| ch.is_ascii_hexdigit()) {
+            commits.insert(path.to_owned(), commit.to_owned());
+        }
+    }
+    commits
+}
+
 fn push_submodule(
     entries: &mut Vec<GitSubmodule>,
     name: &mut Option<String>,
@@ -284,6 +320,7 @@ fn push_submodule(
             name,
             path,
             url: url.take(),
+            commit: None,
         });
     }
     *url = None;
@@ -301,6 +338,21 @@ mod tests {
         assert_eq!(crate_name(), "fs2-git");
     }
 
+    #[test]
+    fn parses_submodule_status_commits() {
+        let commits = parse_submodule_commits(
+            " aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa vendor/lib (heads/main)\n-bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb third_party/missing\n",
+        );
+
+        assert_eq!(
+            commits.get("vendor/lib").map(String::as_str),
+            Some("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
+        );
+        assert_eq!(
+            commits.get("third_party/missing").map(String::as_str),
+            Some("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb")
+        );
+    }
     #[test]
     fn detects_normal_repo_state() -> Result<(), Box<dyn std::error::Error>> {
         let repo = init_repo()?;
@@ -330,6 +382,10 @@ mod tests {
         assert_eq!(status.remotes[0].name, "origin");
         assert!(status.is_dirty());
         assert_eq!(status.submodules[0].path, "vendor/lib");
+        assert_eq!(
+            status.submodules[0].url.as_deref(),
+            Some("https://example.invalid/lib.git")
+        );
         Ok(())
     }
 

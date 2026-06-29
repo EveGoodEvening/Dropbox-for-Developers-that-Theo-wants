@@ -835,6 +835,13 @@ pub fn built_in_rules(profiles: &ProfilesConfig) -> Result<Vec<BuiltinRule>, Rul
         RuleAction::LocalOnly,
         None,
     )?;
+    push_builtin(
+        &mut out,
+        BuiltinProfile::Git,
+        "**/.git/**",
+        RuleAction::LocalOnly,
+        None,
+    )?;
     if profiles.node {
         push_builtin(
             &mut out,
@@ -1471,6 +1478,26 @@ scope = "project"
         assert_eq!(
             git_package_lock.effective_rule.action,
             RuleAction::LocalOnly
+        );
+        let nested_git_config = engine.resolve(
+            &path("vendor/lib/.git/config"),
+            RulePathKind::File,
+            EvaluationPurpose::NewLocalCreate,
+            None,
+        )?;
+        assert_eq!(
+            nested_git_config.effective_rule.action,
+            RuleAction::LocalOnly
+        );
+        let submodule_worktree_content = engine.resolve(
+            &path("vendor/lib/src/lib.rs"),
+            RulePathKind::File,
+            EvaluationPurpose::NewLocalCreate,
+            None,
+        )?;
+        assert_eq!(
+            submodule_worktree_content.effective_rule.action,
+            RuleAction::Normal
         );
         Ok(())
     }
