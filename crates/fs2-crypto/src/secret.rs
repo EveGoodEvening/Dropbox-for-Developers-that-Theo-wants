@@ -198,4 +198,24 @@ mod tests {
         let tampered = base64::engine::general_purpose::STANDARD.encode(&bytes);
         assert!(decrypt_secret(&key, &tampered, &header, &aad).is_err());
     }
+
+    #[test]
+    fn device_without_workspace_key_cannot_decrypt() {
+        // 24.2 acceptance: a device without the workspace secret key cannot
+        // decrypt env values. A different key (simulating a device that lacks
+        // the shared workspace key) fails decryption.
+        let owner_key = WorkspaceSecretKey::generate();
+        let other_device_key = WorkspaceSecretKey::generate();
+        let aad = test_aad();
+        let (ciphertext, header) = encrypt_secret(&owner_key, b"sk_test_secret", &aad).unwrap();
+        // The other device's key cannot decrypt.
+        let result = decrypt_secret(&other_device_key, &ciphertext, &header, &aad);
+        assert!(
+            result.is_err(),
+            "a device without the workspace key must not decrypt secrets"
+        );
+        // The error indicates decryption failure (key unavailable).
+        let err = result.unwrap_err();
+        assert!(matches!(err, SecretEncryptionError::Decrypt(_)));
+    }
 }

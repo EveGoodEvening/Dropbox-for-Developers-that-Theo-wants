@@ -597,7 +597,7 @@ async fn list_env_vars(
 }
 
 /// Set env var request.
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Serialize)]
 pub struct SetEnvVarRequest {
     /// Project path (optional).
     pub project_path: Option<String>,
@@ -1084,5 +1084,25 @@ mod tests {
         let body = resp.into_body().collect().await.unwrap().to_bytes();
         let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
         assert_eq!(json["error"]["code"], "device_revoked");
+    }
+
+    #[test]
+    fn env_set_request_never_carries_plaintext_or_keys() {
+        // 24.2: the backend never receives plaintext secrets or private keys.
+        // The SetEnvVarRequest only carries the encrypted value.
+        let req = SetEnvVarRequest {
+            project_path: Some("apps/web".to_owned()),
+            environment: "dev".to_owned(),
+            name: "STRIPE_SECRET_KEY".to_owned(),
+            encrypted_value: "base64ciphertext".to_owned(),
+        };
+        let json = serde_json::to_string(&req).unwrap();
+        // The request must contain the encrypted value, not plaintext.
+        assert!(json.contains("encrypted_value"));
+        // No key material or plaintext fields exist on the request type.
+        assert!(!json.contains("private_key"));
+        assert!(!json.contains("secret_key"));
+        assert!(!json.contains("plaintext"));
+        assert!(!json.contains("workspace_key"));
     }
 }

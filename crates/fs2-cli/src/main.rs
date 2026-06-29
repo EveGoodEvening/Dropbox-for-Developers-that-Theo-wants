@@ -547,20 +547,20 @@ async fn main() -> anyhow::Result<()> {
                         println!("No env vars found for env {env}.");
                         return Ok(());
                     }
-                    // Note: In dev mode, we can't decrypt the values.
-                    // In production, this would decrypt with the workspace secret key.
-                    // For now, we write a placeholder file.
-                    let mut content =
-                        String::from("# fs2 env materialization (values encrypted)\n");
-                    for v in &vars {
-                        use std::fmt::Write;
-                        let _ = writeln!(
-                            content,
-                            "# {} = {} (set, env: {})",
-                            v.name, v.value_display, v.environment
+                    // Decrypting env values requires the workspace secret key.
+                    // The key is not available in dev mode (no keychain); surface
+                    // a clear `secret_unavailable` status instead of silently
+                    // writing placeholders, so the user knows decryption failed.
+                    let key_available = false; // TODO: load from keychain when available
+                    if !key_available {
+                        let err = fs2_core::Fs2Error::new(
+                            fs2_core::Fs2ErrorCode::SecretUnavailable,
+                            "workspace secret key is not available; cannot decrypt env values.                              Store the workspace key in the OS keychain first.",
                         );
+                        anyhow::bail!("secret_unavailable: {}", err.message);
                     }
-                    std::fs::write(&output, content)
+                    // When the key is available, decrypt and materialize here.
+                    std::fs::write(&output, "")
                         .map_err(|e| anyhow::anyhow!("failed to write {output}: {e}"))?;
                     // Set file permissions to 0600 on Unix.
                     #[cfg(unix)]

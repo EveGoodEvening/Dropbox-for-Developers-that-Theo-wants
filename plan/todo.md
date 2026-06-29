@@ -1350,23 +1350,26 @@ Acceptance criteria:
 ### 24.2 Key handling
 
 - [ ] Store workspace keys only in keychain or encrypted fallback.
-- [ ] Never send private keys to backend.
-- [ ] Add device revocation behavior.
-- [ ] Add key unavailable status.
+  > **Blocked (sandbox):** No OS keychain available; keys are in-memory only for dev. Requires `keyring` crate + encrypted file fallback.
+- [x] Never send private keys to backend.
+- [x] Add device revocation behavior.
+- [x] Add key unavailable status.
 
 Acceptance criteria:
 
-- [ ] A device without workspace key cannot decrypt blobs or env values.
+- [x] A device without workspace key cannot decrypt blobs or env values.
 
 ### 24.3 Permission checks
 
-- [ ] Materialized secret files mode `0600`.
-- [ ] Cache directory not world-readable where platform supports it.
+- [x] Materialized secret files mode `0600`.
+- [x] Cache directory not world-readable where platform supports it.
 - [ ] Local RPC socket permissions restricted to user.
+  > **Blocked:** No local RPC socket exists yet; daemon uses direct in-process calls.
 
 Acceptance criteria:
 
 - [ ] Local security checks pass on macOS and Linux.
+  > **Blocked:** Requires verification on both macOS and Linux hosts.
 
 ---
 

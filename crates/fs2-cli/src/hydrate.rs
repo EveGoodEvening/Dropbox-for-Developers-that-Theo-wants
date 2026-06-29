@@ -212,10 +212,16 @@ async fn hydrate_one(
         anyhow::bail!("blob hash verification failed for {file_path}");
     }
 
-    // Cache the blob locally.
+    // Cache the blob locally. Restrict the cache directory to the user
+    // (0700) so cached file bytes are not world-readable (design §24.3).
     let cache_path = blob_cache_path(&blob_id);
     if let Some(parent) = Path::new(&cache_path).parent() {
         std::fs::create_dir_all(parent).ok();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = std::fs::set_permissions(parent, std::fs::Permissions::from_mode(0o700));
+        }
     }
     std::fs::write(&cache_path, &bytes).context("failed to write blob cache")?;
     store
