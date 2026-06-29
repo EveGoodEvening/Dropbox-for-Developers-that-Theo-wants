@@ -347,6 +347,8 @@ Acceptance criteria:
 
 - [ ] Backend starts with a fresh migrated database.
 
+Blocked as of 2026-06-29: Phase 4.2 completion requires a real Postgres execution environment to run migrations on an empty database and verify backend startup against the migrated database. This workstation has no `psql`, `postgres`, or Docker, so the migration test and acceptance cannot be run locally. Provide a reachable `DATABASE_URL`, Docker/testcontainers, CI Postgres result, or explicit approval for a real embedded-Postgres test dependency before implementing and marking these tasks complete.
+
 ### 5.3 Implement auth stub for local development
 
 - [ ] Add dev-only login endpoint that creates a test user.
