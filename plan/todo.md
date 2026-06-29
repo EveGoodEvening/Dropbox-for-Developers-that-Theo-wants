@@ -1107,32 +1107,32 @@ Acceptance criteria:
 
 ### 19.1 Package manager detection
 
-- [ ] Detect Node package manager from `packageManager` in `package.json`.
-- [ ] Fallback to lockfile detection.
-- [ ] Detect monorepo workspace files.
-- [ ] Detect Rust, Python, and Go dependency roots.
+- [x] Detect Node package manager from `packageManager` in `package.json`.
+- [x] Fallback to lockfile detection.
+- [x] Detect monorepo workspace files.
+- [x] Detect Rust, Python, and Go dependency roots.
 
 Acceptance criteria:
 
-- [ ] `fs2 doctor` can explain why `node_modules` is generated and which install command to run.
+- [x] `fs2 doctor` can explain why `node_modules` is generated and which install command to run.
 
 ### 19.2 Generated write suppression
 
-- [ ] Ensure generated paths do not produce upload queue entries.
-- [ ] Stress test `npm install` creating many files.
-- [ ] Stress test Rust `cargo build` creating `target` files.
-- [ ] Ensure status reports generated dirs separately.
+- [x] Ensure generated paths do not produce upload queue entries.
+- [x] Stress test `npm install` creating many files.
+- [x] Stress test Rust `cargo build` creating `target` files.
+- [x] Ensure status reports generated dirs separately.
 
 Acceptance criteria:
 
-- [ ] `npm install` does not attempt to sync thousands of dependency files.
+- [x] `npm install` does not attempt to sync thousands of dependency files.
 
 ### 19.3 Dependency helper commands
 
-- [ ] Implement `fs2 deps status <path>`.
-- [ ] Implement `fs2 deps install <path>` as a safe wrapper that prints and asks before running command, unless `--yes`.
-- [ ] Store last installed lockfile hash locally.
-- [ ] Warn when lockfile hash changed but dependencies not reinstalled.
+- [x] Implement `fs2 deps status <path>`.
+- [x] Implement `fs2 deps install <path>` as a safe wrapper that prints and asks before running command, unless `--yes`.
+- [x] Store last installed lockfile hash locally.
+- [x] Warn when lockfile hash changed but dependencies not reinstalled.
 
 Acceptance criteria:
 
@@ -1148,21 +1148,21 @@ MVP relaxation:
 
 ### 20.1 Implement `fs2 doctor`
 
-- [ ] Check FUSE availability.
-- [ ] Check daemon running.
-- [ ] Check backend connection.
-- [ ] Check auth token.
-- [ ] Check workspace keys.
-- [ ] Check cache directory permissions.
-- [ ] Check path collisions.
-- [ ] Check `.env` sync safety.
-- [ ] Check `.git` sync safety.
-- [ ] Check generated directories without rules.
-- [ ] Check package manager mismatch.
+- [x] Check FUSE availability.
+- [x] Check daemon running.
+- [x] Check backend connection.
+- [x] Check auth token.
+- [x] Check workspace keys.
+- [x] Check cache directory permissions.
+- [x] Check path collisions.
+- [x] Check `.env` sync safety.
+- [x] Check `.git` sync safety.
+- [x] Check generated directories without rules.
+- [x] Check package manager mismatch.
 
 Acceptance criteria:
 
-- [ ] Doctor output gives actionable commands, not vague warnings.
+- [x] Doctor output gives actionable commands, not vague warnings.
 
 ### 20.2 Implement diagnostics bundle
 
@@ -1502,7 +1502,7 @@ A coding agent should implement in this order unless blocked:
 17. [ ] Git-aware diagnostics/materialization.
 18. [ ] Cache pin/prune.
 19. [ ] `doctor`.
-20. [ ] Packaging/docs/dogfood.
+20. [x] Packaging/docs/dogfood.
 
 Do not start with UI, team features, Windows, artifact caching, or Git replacement.
 

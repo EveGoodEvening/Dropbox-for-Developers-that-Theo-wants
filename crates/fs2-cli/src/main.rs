@@ -3,6 +3,7 @@
 //! Commands: login, logout, workspace, status, device.
 
 mod config;
+mod doctor;
 
 use clap::{Parser, Subcommand};
 use std::io::{self, Write};
@@ -46,6 +47,12 @@ enum Commands {
     },
     /// Show sync and workspace status.
     Status {
+        /// Output JSON.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Run diagnostics checks.
+    Doctor {
         /// Output JSON.
         #[arg(long)]
         json: bool,
@@ -178,6 +185,26 @@ async fn main() -> anyhow::Result<()> {
                 );
                 println!("User: {}", cfg.user_id);
                 println!("Device: {}", cfg.device_id);
+            }
+        }
+        Some(Commands::Doctor { json }) => {
+            let results = doctor::run_checks();
+            if json {
+                println!("{}", serde_json::to_string_pretty(&results)?);
+            } else {
+                let all_passed = results.iter().all(|r| r.passed);
+                for r in &results {
+                    let status = if r.passed { "PASS" } else { "FAIL" };
+                    println!("{status} {}: {}", r.name, r.message);
+                    if let Some(ref sugg) = r.suggestion {
+                        println!("  -> {sugg}");
+                    }
+                }
+                if all_passed {
+                    println!("\nAll checks passed.");
+                } else {
+                    println!("\nSome checks failed. See suggestions above.");
+                }
             }
         }
         None => {
