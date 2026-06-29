@@ -599,6 +599,8 @@ dependencies = [
  "fs2-backend",
  "fs2-core",
  "fs2-crypto",
+ "fs2-git",
+ "fs2-rules",
  "fs2-sync",
  "serde_json",
  "tempfile",

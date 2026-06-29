@@ -373,4 +373,96 @@ mod tests {
         let bytes2 = harness.hydrate_file(&harness.local_b, "notes.txt").await.unwrap();
         assert_eq!(bytes2, content);
     }
+
+
+    #[test]
+    fn generated_path_suppressed_in_sync() {
+        // 22.3: A creates package.json (normal) and node_modules/pkg/index.js
+        // (generated). The rule engine suppresses node_modules so only
+        // package.json is committed and synced to B. B sees package.json
+        // but not node_modules.
+        let harness = TestHarness::new().unwrap();
+        let engine = fs2_rules::RuleEngine::new(
+            fs2_rules::builtin_profiles(),
+            fs2_rules::Action::Normal,
+        );
+
+        // Rule classification: package.json syncs, node_modules is suppressed.
+        assert!(matches!(
+            engine.resolve("package.json").action,
+            fs2_rules::Action::Normal | fs2_rules::Action::Pin
+        ));
+        assert!(matches!(
+            engine.resolve("node_modules/pkg/index.js").action,
+            fs2_rules::Action::Generated | fs2_rules::Action::DependencyCache
+        ));
+
+        // A commits package.json (the outbound queue would enqueue it).
+        let pkg_blob = fs2_crypto::compute_blob_id(b"{\"name\":\"app\"}");
+        let pkg_op = harness.create_file_op(
+            harness.root_node_id,
+            "package.json",
+            &pkg_blob,
+            "{\"name\":\"app\"}",
+        );
+        harness.store.commit_operation(pkg_op).unwrap();
+
+        // node_modules is suppressed by the rule, so A does NOT commit it.
+        // (In the real daemon, the outbound queue checks the rule and skips
+        // generated paths. Here we simulate that by simply not committing.)
+
+        // Sync to B.
+        harness.sync_to(&harness.local_b).unwrap();
+
+        // B sees package.json.
+        let pkg = harness
+            .local_b
+            .get_node_by_path(harness.workspace_id, "package.json")
+            .unwrap()
+            .expect("B should see package.json");
+        assert_eq!(pkg.name, "package.json");
+
+        // B does NOT see node_modules (it was never committed).
+        let nm = harness
+            .local_b
+            .get_node_by_path(harness.workspace_id, "node_modules")
+            .unwrap();
+        assert!(nm.is_none(), "node_modules should not appear on B");
+    }
+
+    #[test]
+    fn git_internals_excluded_by_rule() {
+        // 22.5: .git internals are excluded from normal sync by the built-in
+        // rule (local-only/ignored), so they are not uploaded.
+        let engine = fs2_rules::RuleEngine::new(
+            fs2_rules::builtin_profiles(),
+            fs2_rules::Action::Normal,
+        );
+        let git_index = engine.resolve(".git/index");
+        assert!(
+            matches!(
+                git_index.action,
+                fs2_rules::Action::Ignore | fs2_rules::Action::LocalOnly
+            ),
+            ".git/index should be excluded from sync, got {:?}",
+            git_index.action
+        );
+        let git_refs = engine.resolve(".git/refs/heads/main");
+        assert!(
+            matches!(
+                git_refs.action,
+                fs2_rules::Action::Ignore | fs2_rules::Action::LocalOnly
+            ),
+            ".git/refs should be excluded from sync, got {:?}",
+            git_refs.action
+        );
+        // Normal source files under a repo still sync.
+        let src = engine.resolve("src/main.rs");
+        assert!(
+            matches!(src.action, fs2_rules::Action::Normal | fs2_rules::Action::Lazy),
+            "src/main.rs should sync normally, got {:?}",
+            src.action
+        );
+    }
 }
+

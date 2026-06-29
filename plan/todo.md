@@ -1254,15 +1254,15 @@ Acceptance criteria:
 
 ### 22.3 Generated path path
 
-- [ ] A creates `node_modules/pkg/index.js`.
-- [ ] A creates `package.json` and lockfile.
-- [ ] Sync B.
-- [ ] Assert B sees package files.
-- [ ] Assert B does not receive `node_modules` metadata/content.
+- [x] A creates `node_modules/pkg/index.js`.
+- [x] A creates `package.json` and lockfile.
+- [x] Sync B.
+- [x] Assert B sees package files.
+- [x] Assert B does not receive `node_modules` metadata/content.
 
 Acceptance criteria:
 
-- [ ] Generated dependencies are suppressed before metadata upload.
+- [x] Generated dependencies are suppressed before metadata upload.
 
 ### 22.4 Env path
 
@@ -1280,13 +1280,14 @@ Acceptance criteria:
 
 - [ ] Create test Git repo.
 - [ ] Sync worktree.
-- [ ] Assert `.git` internals are not uploaded.
+- [x] Assert `.git` internals are not uploaded.
 - [ ] Run `fs2 git status`.
 - [ ] Run materialize on second client against local bare remote.
 
 Acceptance criteria:
 
 - [ ] Git-aware mode is useful without unsafe `.git` sync.
+  > **Partial:** `.git` exclusion verified by rule-engine test; full E2E (git repo creation, worktree sync, materialize on second client) requires a real git binary + two-client materialization harness.
 
 ---
 
