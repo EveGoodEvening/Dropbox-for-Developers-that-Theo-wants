@@ -68,6 +68,7 @@ pub enum EvaluationPurpose {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum BuiltinProfile {
+    Git,
     Node,
     Rust,
     Python,
@@ -820,6 +821,20 @@ pub fn parse_config_toml(input: &str) -> Result<Config, RuleError> {
 
 pub fn built_in_rules(profiles: &ProfilesConfig) -> Result<Vec<BuiltinRule>, RuleError> {
     let mut out = Vec::new();
+    push_builtin(
+        &mut out,
+        BuiltinProfile::Git,
+        ".git/",
+        RuleAction::LocalOnly,
+        None,
+    )?;
+    push_builtin(
+        &mut out,
+        BuiltinProfile::Git,
+        ".git/**",
+        RuleAction::LocalOnly,
+        None,
+    )?;
     if profiles.node {
         push_builtin(
             &mut out,
@@ -1440,6 +1455,23 @@ scope = "project"
             None,
         )?;
         assert_eq!(dist.effective_rule.action, RuleAction::Normal);
+        let git_index = engine.resolve(
+            &path(".git/index"),
+            RulePathKind::File,
+            EvaluationPurpose::NewLocalCreate,
+            None,
+        )?;
+        assert_eq!(git_index.effective_rule.action, RuleAction::LocalOnly);
+        let git_package_lock = engine.resolve(
+            &path(".git/package-lock.json"),
+            RulePathKind::File,
+            EvaluationPurpose::NewLocalCreate,
+            None,
+        )?;
+        assert_eq!(
+            git_package_lock.effective_rule.action,
+            RuleAction::LocalOnly
+        );
         Ok(())
     }
 

@@ -1070,7 +1070,7 @@ Acceptance criteria:
 
 ### 18.2 Exclude `.git` by default
 
-- [ ] Add built-in rule for `.git/**` as local-only/ignored internal.
+- [x] Add built-in rule for `.git/**` as local-only/ignored internal.
 - [ ] Ensure FUSE write path does not upload `.git` internals.
 - [ ] `fs2 doctor` warns if user overrides this to normal sync.
 
