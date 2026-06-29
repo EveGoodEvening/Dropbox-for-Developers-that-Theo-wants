@@ -126,6 +126,50 @@ pub fn builtin_profiles() -> Vec<RuleEntry> {
         action: Action::Ignore,
         source: RuleSource::BuiltinGit,
     });
+    // Editor/swap/temp ignore rules so atomic saves and editor swap files
+    // don't create noisy synced temp files (design §13.5).
+    rules.extend([
+        RuleEntry {
+            pattern: "*.swp".to_owned(),
+            action: Action::Ignore,
+            source: RuleSource::Profile("editor".to_owned()),
+        },
+        RuleEntry {
+            pattern: "*.swo".to_owned(),
+            action: Action::Ignore,
+            source: RuleSource::Profile("editor".to_owned()),
+        },
+        RuleEntry {
+            pattern: "*~".to_owned(),
+            action: Action::Ignore,
+            source: RuleSource::Profile("editor".to_owned()),
+        },
+        RuleEntry {
+            pattern: ".*~".to_owned(),
+            action: Action::Ignore,
+            source: RuleSource::Profile("editor".to_owned()),
+        },
+        RuleEntry {
+            pattern: ".#*".to_owned(),
+            action: Action::Ignore,
+            source: RuleSource::Profile("editor".to_owned()),
+        },
+        RuleEntry {
+            pattern: "#*#".to_owned(),
+            action: Action::Ignore,
+            source: RuleSource::Profile("editor".to_owned()),
+        },
+        RuleEntry {
+            pattern: "*.tmp".to_owned(),
+            action: Action::Ignore,
+            source: RuleSource::Profile("editor".to_owned()),
+        },
+        RuleEntry {
+            pattern: ".DS_Store".to_owned(),
+            action: Action::Ignore,
+            source: RuleSource::Profile("editor".to_owned()),
+        },
+    ]);
     rules
 }
 
@@ -170,5 +214,23 @@ mod tests {
         let engine = RuleEngine::new(builtin_profiles(), Action::Normal);
         let rule = engine.resolve("apps/web/dist/index.html");
         assert_eq!(rule.action, Action::Normal);
+    }
+
+    #[test]
+    fn editor_swap_temp_files_ignored() {
+        let engine = RuleEngine::new(builtin_profiles(), Action::Normal);
+        // vim swap files
+        assert_eq!(engine.resolve(".app.ts.swp").action, Action::Ignore);
+        assert_eq!(engine.resolve("app.ts.swo").action, Action::Ignore);
+        // backup files
+        assert_eq!(engine.resolve("app.ts~").action, Action::Ignore);
+        // emacs lock files
+        assert_eq!(engine.resolve(".#app.ts").action, Action::Ignore);
+        // temp files
+        assert_eq!(engine.resolve("data.tmp").action, Action::Ignore);
+        // macOS .DS_Store
+        assert_eq!(engine.resolve(".DS_Store").action, Action::Ignore);
+        // Normal files still sync.
+        assert_eq!(engine.resolve("app.ts").action, Action::Normal);
     }
 }

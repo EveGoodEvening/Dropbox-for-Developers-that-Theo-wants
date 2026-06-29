@@ -16,7 +16,7 @@
 
 use std::collections::HashMap;
 use std::ffi::OsStr;
-use std::time::{Duration, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use fuser::{FileAttr, FileType, Filesystem, MountOption, ReplyAttr, ReplyData, ReplyDirectory, ReplyEntry};
 use fs2_core::{NodeKind, NodeId, WorkspaceId};
@@ -71,6 +71,90 @@ pub trait Fs2Backend: Send + Sync {
     ///
     /// Returns `None` if the node is not a symlink.
     fn readlink(&self, node_id: NodeId) -> Option<String>;
+
+    // ---- Write/mutation methods (design §6.4-6.6, §13) ----
+
+    /// Create a directory node under `parent` with `name`.
+    ///
+    /// Creates the local node immediately and queues a pending `CreateNode`
+    /// op. Returns the new node id.
+    ///
+    /// # Errors
+    /// Returns a [`WriteError`] on collision or backend failure.
+    fn mkdir(&self, parent: NodeId, name: &str) -> Result<NodeId, WriteError>;
+
+    /// Create a file node under `parent` with `name` and open a write handle.
+    ///
+    /// Returns the new node id and a write handle id.
+    ///
+    /// # Errors
+    /// Returns a [`WriteError`] on collision or backend failure.
+    fn create_file(&self, parent: NodeId, name: &str, mode: u32) -> Result<(NodeId, u64), WriteError>;
+
+    /// Write `data` at `offset` to the staging file for write handle `fh`.
+    ///
+    /// # Errors
+    /// Returns a [`WriteError`] if the handle is invalid or the write fails.
+    fn write(&self, fh: u64, offset: i64, data: &[u8]) -> Result<(), WriteError>;
+
+    /// Flush/close a write handle: compute hash, queue upload + `PutFileRevision`,
+    /// mark local state dirty until backend ack.
+    ///
+    /// # Errors
+    /// Returns a [`WriteError`] on commit failure.
+    fn flush(&self, fh: u64) -> Result<(), WriteError>;
+
+    /// Release a write handle (drop staging state). Idempotent.
+    fn release(&self, fh: u64);
+
+    /// Rename/move a node from `(old_parent, old_name)` to `(new_parent, new_name)`.
+    ///
+    /// Queues a `MoveNode` op and applies optimistic local state.
+    ///
+    /// # Errors
+    /// Returns a [`WriteError`] on collision, cycle, or backend rejection.
+    fn rename(
+        &self,
+        old_parent: NodeId,
+        old_name: &str,
+        new_parent: NodeId,
+        new_name: &str,
+    ) -> Result<(), WriteError>;
+
+    /// Remove a file node (unlink). Queues a `DeleteNode` op.
+    ///
+    /// # Errors
+    /// Returns a [`WriteError`] if the node is not a file or backend rejects.
+    fn unlink(&self, parent: NodeId, name: &str) -> Result<(), WriteError>;
+
+    /// Remove a directory node (rmdir). Queues a `DeleteNode` op.
+    ///
+    /// # Errors
+    /// Returns a [`WriteError`] if the directory is not empty or backend rejects.
+    fn rmdir(&self, parent: NodeId, name: &str) -> Result<(), WriteError>;
+
+    /// Set the POSIX mode (executable bit) for a node. Queues a metadata op.
+    ///
+    /// # Errors
+    /// Returns a [`WriteError`] on backend failure.
+    fn setattr_mode(&self, node_id: NodeId, mode: u32) -> Result<(), WriteError>;
+}
+
+/// Errors returned by write/mutation methods.
+#[derive(Debug, thiserror::Error)]
+pub enum WriteError {
+    /// A live sibling with the same name already exists.
+    #[error("path collision: {0}")]
+    Collision(String),
+    /// The node or parent was not found.
+    #[error("not found: {0}")]
+    NotFound(String),
+    /// The operation is invalid (e.g. rmdir on non-empty dir).
+    #[error("invalid operation: {0}")]
+    Invalid(String),
+    /// A backend/IO failure.
+    #[error("io error: {0}")]
+    Io(String),
 }
 
 /// Errors returned by [`Fs2Backend::read_file`].
@@ -364,6 +448,101 @@ impl<B: Fs2Backend> Fs2Filesystem<B> {
         }
         Ok(entries)
     }
+
+    // ---- Write-path core methods (design §6.4-6.6, §13) ----
+
+    /// Create a directory. Returns the new inode.
+    pub fn mkdir_core(&self, parent_ino: u64, name: &str) -> Result<u64, i32> {
+        let parent_id = self.resolve_ino(parent_ino).ok_or(libc::ENOENT)?;
+        let node_id = self.backend.mkdir(parent_id, name).map_err(|e| match e {
+            WriteError::Collision(_) => libc::EEXIST,
+            WriteError::NotFound(_) => libc::ENOENT,
+            WriteError::Invalid(_) => libc::EINVAL,
+            WriteError::Io(_) => libc::EIO,
+        })?;
+        Ok(self.inodes.lock().ino_of(node_id))
+    }
+
+    /// Create a file. Returns the new inode and write handle.
+    pub fn create_core(&self, parent_ino: u64, name: &str, mode: u32) -> Result<(u64, u64), i32> {
+        let parent_id = self.resolve_ino(parent_ino).ok_or(libc::ENOENT)?;
+        let (node_id, fh) = self.backend.create_file(parent_id, name, mode).map_err(|e| match e {
+            WriteError::Collision(_) => libc::EEXIST,
+            WriteError::NotFound(_) => libc::ENOENT,
+            WriteError::Invalid(_) => libc::EINVAL,
+            WriteError::Io(_) => libc::EIO,
+        })?;
+        let ino = self.inodes.lock().ino_of(node_id);
+        Ok((ino, fh))
+    }
+
+    /// Write data to a write handle.
+    pub fn write_core(&self, fh: u64, offset: i64, data: &[u8]) -> Result<u32, i32> {
+        self.backend.write(fh, offset, data).map_err(|e| match e {
+            WriteError::NotFound(_) => libc::EBADF,
+            WriteError::Io(_) | WriteError::Collision(_) | WriteError::Invalid(_) => libc::EIO,
+        })?;
+        Ok(data.len() as u32)
+    }
+
+    /// Flush a write handle (commit the revision).
+    pub fn flush_core(&self, fh: u64) -> Result<(), i32> {
+        self.backend.flush(fh).map_err(|_| libc::EIO)
+    }
+
+    /// Release a write handle.
+    pub fn release_core(&self, fh: u64) {
+        self.backend.release(fh);
+    }
+
+    /// Rename/move a node.
+    pub fn rename_core(
+        &self,
+        old_parent_ino: u64,
+        old_name: &str,
+        new_parent_ino: u64,
+        new_name: &str,
+    ) -> Result<(), i32> {
+        let old_parent = self.resolve_ino(old_parent_ino).ok_or(libc::ENOENT)?;
+        let new_parent = self.resolve_ino(new_parent_ino).ok_or(libc::ENOENT)?;
+        self.backend.rename(old_parent, old_name, new_parent, new_name).map_err(|e| match e {
+            WriteError::Collision(_) => libc::EEXIST,
+            WriteError::NotFound(_) => libc::ENOENT,
+            WriteError::Invalid(_) => libc::EINVAL,
+            WriteError::Io(_) => libc::EIO,
+        })
+    }
+
+    /// Unlink a file.
+    pub fn unlink_core(&self, parent_ino: u64, name: &str) -> Result<(), i32> {
+        let parent = self.resolve_ino(parent_ino).ok_or(libc::ENOENT)?;
+        self.backend.unlink(parent, name).map_err(|e| match e {
+            WriteError::NotFound(_) => libc::ENOENT,
+            WriteError::Invalid(_) => libc::EISDIR,
+            WriteError::Io(_) | WriteError::Collision(_) => libc::EIO,
+        })
+    }
+
+    /// Remove a directory.
+    pub fn rmdir_core(&self, parent_ino: u64, name: &str) -> Result<(), i32> {
+        let parent = self.resolve_ino(parent_ino).ok_or(libc::ENOENT)?;
+        self.backend.rmdir(parent, name).map_err(|e| match e {
+            WriteError::NotFound(_) => libc::ENOENT,
+            WriteError::Invalid(_) => libc::ENOTEMPTY,
+            WriteError::Io(_) | WriteError::Collision(_) => libc::EIO,
+        })
+    }
+
+    /// Set the mode (executable bit) for a node.
+    pub fn setattr_mode_core(&self, ino: u64, mode: u32) -> Result<FileAttr, i32> {
+        let node_id = self.resolve_ino(ino).ok_or(libc::ENOENT)?;
+        self.backend.setattr_mode(node_id, mode).map_err(|e| match e {
+            WriteError::NotFound(_) => libc::ENOENT,
+            WriteError::Io(_) | WriteError::Collision(_) | WriteError::Invalid(_) => libc::EIO,
+        })?;
+        // Return the updated attr.
+        self.getattr_core(ino)
+    }
 }
 
 impl<B: Fs2Backend> Filesystem for Fs2Filesystem<B> {
@@ -440,6 +619,227 @@ impl<B: Fs2Backend> Filesystem for Fs2Filesystem<B> {
             Err(errno) => reply.error(errno),
         }
     }
+
+    fn mknod(
+        &mut self,
+        _req: &fuser::Request<'_>,
+        parent: u64,
+        name: &OsStr,
+        mode: u32,
+        _umask: u32,
+        _rdev: u32,
+        reply: fuser::ReplyEntry,
+    ) {
+        let name_str = name.to_str().unwrap_or("");
+        // Only regular files and directories are supported via mknod.
+        if mode & libc::S_IFMT == libc::S_IFDIR {
+            match self.mkdir_core(parent, name_str) {
+                Ok(ino) => {
+                    let attr = self.getattr_core(ino).unwrap_or_else(|_| root_attr_fallback(ino));
+                    reply.entry(&TTL, &attr, 0);
+                }
+                Err(errno) => reply.error(errno),
+            }
+        } else {
+            match self.create_core(parent, name_str, mode) {
+                Ok((ino, _fh)) => {
+                    let attr = self.getattr_core(ino).unwrap_or_else(|_| root_attr_fallback(ino));
+                    reply.entry(&TTL, &attr, 0);
+                }
+                Err(errno) => reply.error(errno),
+            }
+        }
+    }
+
+    fn mkdir(
+        &mut self,
+        _req: &fuser::Request<'_>,
+        parent: u64,
+        name: &OsStr,
+        _mode: u32,
+        _umask: u32,
+        reply: fuser::ReplyEntry,
+    ) {
+        let name_str = name.to_str().unwrap_or("");
+        match self.mkdir_core(parent, name_str) {
+            Ok(ino) => {
+                let attr = self.getattr_core(ino).unwrap_or_else(|_| root_attr_fallback(ino));
+                reply.entry(&TTL, &attr, 0);
+            }
+            Err(errno) => reply.error(errno),
+        }
+    }
+
+    fn create(
+        &mut self,
+        _req: &fuser::Request<'_>,
+        parent: u64,
+        name: &OsStr,
+        mode: u32,
+        _umask: u32,
+        _flags: i32,
+        reply: fuser::ReplyCreate,
+    ) {
+        let name_str = name.to_str().unwrap_or("");
+        match self.create_core(parent, name_str, mode) {
+            Ok((ino, fh)) => {
+                let attr = self.getattr_core(ino).unwrap_or_else(|_| root_attr_fallback(ino));
+                reply.created(&TTL, &attr, 0, fh, 0);
+            }
+            Err(errno) => reply.error(errno),
+        }
+    }
+
+    fn write(
+        &mut self,
+        _req: &fuser::Request<'_>,
+        _ino: u64,
+        fh: u64,
+        offset: i64,
+        data: &[u8],
+        _write_flags: u32,
+        _flags: i32,
+        _lock_owner: Option<u64>,
+        reply: fuser::ReplyWrite,
+    ) {
+        match self.write_core(fh, offset, data) {
+            Ok(n) => reply.written(n),
+            Err(errno) => reply.error(errno),
+        }
+    }
+
+    fn flush(
+        &mut self,
+        _req: &fuser::Request<'_>,
+        _ino: u64,
+        fh: u64,
+        _lock_owner: u64,
+        reply: fuser::ReplyEmpty,
+    ) {
+        match self.flush_core(fh) {
+            Ok(()) => reply.ok(),
+            Err(errno) => reply.error(errno),
+        }
+    }
+
+    fn release(
+        &mut self,
+        _req: &fuser::Request<'_>,
+        _ino: u64,
+        fh: u64,
+        _flags: i32,
+        _lock_owner: Option<u64>,
+        _flush: bool,
+        reply: fuser::ReplyEmpty,
+    ) {
+        self.release_core(fh);
+        reply.ok();
+    }
+
+    fn rename(
+        &mut self,
+        _req: &fuser::Request<'_>,
+        old_parent: u64,
+        old_name: &OsStr,
+        new_parent: u64,
+        new_name: &OsStr,
+        _flags: u32,
+        reply: fuser::ReplyEmpty,
+    ) {
+        let old_name_str = old_name.to_str().unwrap_or("");
+        let new_name_str = new_name.to_str().unwrap_or("");
+        match self.rename_core(old_parent, old_name_str, new_parent, new_name_str) {
+            Ok(()) => reply.ok(),
+            Err(errno) => reply.error(errno),
+        }
+    }
+
+    fn unlink(
+        &mut self,
+        _req: &fuser::Request<'_>,
+        parent: u64,
+        name: &OsStr,
+        reply: fuser::ReplyEmpty,
+    ) {
+        let name_str = name.to_str().unwrap_or("");
+        match self.unlink_core(parent, name_str) {
+            Ok(()) => reply.ok(),
+            Err(errno) => reply.error(errno),
+        }
+    }
+
+    fn rmdir(
+        &mut self,
+        _req: &fuser::Request<'_>,
+        parent: u64,
+        name: &OsStr,
+        reply: fuser::ReplyEmpty,
+    ) {
+        let name_str = name.to_str().unwrap_or("");
+        match self.rmdir_core(parent, name_str) {
+            Ok(()) => reply.ok(),
+            Err(errno) => reply.error(errno),
+        }
+    }
+
+    fn setattr(
+        &mut self,
+        _req: &fuser::Request<'_>,
+        ino: u64,
+        mode: Option<u32>,
+        _uid: Option<u32>,
+        _gid: Option<u32>,
+        _size: Option<u64>,
+        _atime: Option<fuser::TimeOrNow>,
+        _mtime: Option<fuser::TimeOrNow>,
+        _ctime: Option<SystemTime>,
+        _fh: Option<u64>,
+        _crtime: Option<SystemTime>,
+        _chgtime: Option<SystemTime>,
+        _bkuptime: Option<SystemTime>,
+        _flags: Option<u32>,
+        reply: ReplyAttr,
+    ) {
+        if let Some(mode) = mode {
+            match self.setattr_mode_core(ino, mode) {
+                Ok(attr) => reply.attr(&TTL, &attr),
+                Err(errno) => reply.error(errno),
+            }
+        } else {
+            match self.getattr_core(ino) {
+                Ok(attr) => reply.attr(&TTL, &attr),
+                Err(errno) => reply.error(errno),
+            }
+        }
+    }
+}
+
+/// Fallback attr for a freshly created node before metadata is available.
+fn root_attr_fallback(ino: u64) -> FileAttr {
+    FileAttr {
+        ino,
+        size: 0,
+        blocks: 0,
+        atime: UNIX_EPOCH,
+        mtime: UNIX_EPOCH,
+        ctime: UNIX_EPOCH,
+        crtime: UNIX_EPOCH,
+        kind: FileType::RegularFile,
+        perm: 0o644,
+        nlink: 1,
+        uid: 0,
+        gid: 0,
+        rdev: 0,
+        blksize: 4096,
+        flags: 0,
+    }
+}
+
+/// Compute the local blob cache path for a blob id (mirrors the CLI layout).
+fn blob_cache_path(blob_id: &str) -> String {
+    let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".to_owned());
+    let sanitized = blob_id.replace(':', "/");
+    format!("{home}/.fs2/blobs/{sanitized}")
 }
 
 /// A [`Fs2Backend`] backed by a [`LocalStore`] plus a [`BlobReader`] for
@@ -453,6 +853,25 @@ pub struct LocalStoreBackend<R: BlobReader = NoBlobReader> {
     blob_reader: R,
     workspace_id: WorkspaceId,
     root_node_id: NodeId,
+    /// Write handles: `fh` -> (`node_id`, staging bytes, next `fh` allocator).
+    write_handles: parking_lot::Mutex<WriteHandleState>,
+}
+
+/// Internal write-handle state.
+struct WriteHandleState {
+    /// `fh` -> (`node_id`, staging bytes).
+    handles: HashMap<u64, (NodeId, Vec<u8>)>,
+    /// Next fh allocator.
+    next: u64,
+}
+
+impl Default for WriteHandleState {
+    fn default() -> Self {
+        Self {
+            handles: HashMap::new(),
+            next: 1,
+        }
+    }
 }
 
 /// Reads file bytes for a node by blob id (hydration).
@@ -489,6 +908,7 @@ impl<R: BlobReader> LocalStoreBackend<R> {
             blob_reader,
             workspace_id,
             root_node_id,
+            write_handles: parking_lot::Mutex::new(WriteHandleState::default()),
         }
     }
 }
@@ -550,6 +970,323 @@ impl<R: BlobReader> Fs2Backend for LocalStoreBackend<R> {
 
     fn readlink(&self, node_id: NodeId) -> Option<String> {
         self.get_revision(node_id).and_then(|r| r.symlink_target)
+    }
+
+    fn mkdir(&self, parent: NodeId, name: &str) -> Result<NodeId, WriteError> {
+        use fs2_core::{Cursor, DeviceId, NodeKind, Operation, OperationKind};
+        // Check for collision.
+        if self.lookup(parent, name).is_some() {
+            return Err(WriteError::Collision(name.to_owned()));
+        }
+        let device = DeviceId::new();
+        let op = Operation::new(
+            self.workspace_id,
+            device,
+            Cursor::zero(),
+            OperationKind::CreateNode {
+                parent_id: parent,
+                name: name.to_owned(),
+                kind: NodeKind::Directory,
+                initial_revision: None,
+            },
+            chrono::Utc::now(),
+        );
+        // Apply locally (optimistic) and queue as pending op.
+        self.store
+            .apply_operation(&op, Cursor::zero())
+            .map_err(|e| WriteError::Io(e.to_string()))?;
+        self.store
+            .put_pending_op(&op)
+            .map_err(|e| WriteError::Io(e.to_string()))?;
+        // Look up the newly-created node to return its id.
+        let parent_path = self
+            .store
+            .node_path(parent)
+            .map_err(|e| WriteError::Io(e.to_string()))?
+            .unwrap_or_default();
+        let child_path = if parent_path.is_empty() {
+            name.to_owned()
+        } else {
+            format!("{parent_path}/{name}")
+        };
+        let node = self
+            .store
+            .get_node_by_path(self.workspace_id, &child_path)
+            .map_err(|e| WriteError::Io(e.to_string()))?
+            .ok_or_else(|| WriteError::Io("created node not found".to_owned()))?;
+        Ok(node.node_id)
+    }
+
+    fn create_file(&self, parent: NodeId, name: &str, _mode: u32) -> Result<(NodeId, u64), WriteError> {
+        use fs2_core::{Cursor, DeviceId, NodeKind, Operation, OperationKind};
+        if self.lookup(parent, name).is_some() {
+            return Err(WriteError::Collision(name.to_owned()));
+        }
+        let device = DeviceId::new();
+        // Create the node with no initial revision (empty file).
+        let op = Operation::new(
+            self.workspace_id,
+            device,
+            Cursor::zero(),
+            OperationKind::CreateNode {
+                parent_id: parent,
+                name: name.to_owned(),
+                kind: NodeKind::File,
+                initial_revision: None,
+            },
+            chrono::Utc::now(),
+        );
+        self.store
+            .apply_operation(&op, Cursor::zero())
+            .map_err(|e| WriteError::Io(e.to_string()))?;
+        self.store
+            .put_pending_op(&op)
+            .map_err(|e| WriteError::Io(e.to_string()))?;
+        let parent_path = self
+            .store
+            .node_path(parent)
+            .map_err(|e| WriteError::Io(e.to_string()))?
+            .unwrap_or_default();
+        let child_path = if parent_path.is_empty() {
+            name.to_owned()
+        } else {
+            format!("{parent_path}/{name}")
+        };
+        let node = self
+            .store
+            .get_node_by_path(self.workspace_id, &child_path)
+            .map_err(|e| WriteError::Io(e.to_string()))?
+            .ok_or_else(|| WriteError::Io("created node not found".to_owned()))?;
+        // Allocate a write handle with empty staging bytes.
+        let mut state = self.write_handles.lock();
+        let fh = state.next;
+        state.next += 1;
+        state.handles.insert(fh, (node.node_id, Vec::new()));
+        Ok((node.node_id, fh))
+    }
+
+    fn write(&self, fh: u64, offset: i64, data: &[u8]) -> Result<(), WriteError> {
+        let mut state = self.write_handles.lock();
+        let entry = state
+            .handles
+            .get_mut(&fh)
+            .ok_or_else(|| WriteError::NotFound("write handle".to_owned()))?;
+        let staging = &mut entry.1;
+        let off = usize::try_from(offset).unwrap_or(0);
+        // Extend staging if writing past current end.
+        if off + data.len() > staging.len() {
+            staging.resize(off + data.len(), 0);
+        }
+        staging[off..off + data.len()].copy_from_slice(data);
+        Ok(())
+    }
+
+    fn flush(&self, fh: u64) -> Result<(), WriteError> {
+        use fs2_core::{Cursor, DeviceId, NodeRevision, Operation, OperationKind, RevisionContent, RevisionId};
+        let (node_id, bytes) = {
+            let mut state = self.write_handles.lock();
+            state
+                .handles
+                .remove(&fh)
+                .ok_or_else(|| WriteError::NotFound("write handle".to_owned()))?
+        };
+        // Compute blob id from the staging bytes (ciphertext hash; here we
+        // use plaintext hash for dev simplicity).
+        let blob_id = fs2_crypto::compute_blob_id(&bytes);
+        // Cache the blob locally.
+        let cache_path = blob_cache_path(&blob_id);
+        if let Some(parent) = std::path::Path::new(&cache_path).parent() {
+            std::fs::create_dir_all(parent).ok();
+        }
+        std::fs::write(&cache_path, &bytes)
+            .map_err(|e| WriteError::Io(e.to_string()))?;
+        self.store
+            .mark_blob_cached(&blob_id, &cache_path, bytes.len() as u64)
+            .map_err(|e| WriteError::Io(e.to_string()))?;
+        // Mark local state dirty until backend ack.
+        self.store
+            .set_hydration_state(node_id, "dirtylocal")
+            .map_err(|e| WriteError::Io(e.to_string()))?;
+        // Queue a PutFileRevision op.
+        let device = DeviceId::new();
+        let rev_id = RevisionId::new();
+        let rev = NodeRevision {
+            revision_id: rev_id,
+            node_id,
+            workspace_id: self.workspace_id,
+            device_id: device,
+            base_revision_id: None,
+            content: RevisionContent::File {
+                blob_id: blob_id.clone(),
+                chunk_ids: vec![],
+                content_hash: blob_id,
+                encryption_header: None,
+            },
+            posix_mode: 0o644,
+            mtime: chrono::Utc::now(),
+            size: bytes.len() as u64,
+            executable: false,
+            created_at: chrono::Utc::now(),
+        };
+        let op = Operation::new(
+            self.workspace_id,
+            device,
+            Cursor::zero(),
+            OperationKind::PutFileRevision {
+                node_id,
+                base_revision_id: None,
+                revision: rev,
+            },
+            chrono::Utc::now(),
+        );
+        // Apply the revision locally so the node's current_revision_id is
+        // updated and the file can be read back immediately.
+        self.store
+            .apply_operation(&op, Cursor::zero())
+            .map_err(|e| WriteError::Io(e.to_string()))?;
+        self.store
+            .put_pending_op(&op)
+            .map_err(|e| WriteError::Io(e.to_string()))?;
+        // Mark hydrated (bytes are now cached locally).
+        self.store
+            .set_hydration_state(node_id, "hydrated")
+            .map_err(|e| WriteError::Io(e.to_string()))?;
+        Ok(())
+    }
+
+    fn release(&self, fh: u64) {
+        // Drop the staging state; if not flushed, the bytes are lost (the
+        // daemon would persist staging to disk in production).
+        let _ = self.write_handles.lock().handles.remove(&fh);
+    }
+
+    fn rename(
+        &self,
+        old_parent: NodeId,
+        old_name: &str,
+        new_parent: NodeId,
+        new_name: &str,
+    ) -> Result<(), WriteError> {
+        use fs2_core::{Cursor, DeviceId, Operation, OperationKind};
+        let node = self
+            .lookup(old_parent, old_name)
+            .ok_or_else(|| WriteError::NotFound(old_name.to_owned()))?;
+        // FUSE rename replaces an existing target (atomic save semantics).
+        // Delete the existing target node first, if any.
+        if let Some(target) = self.lookup(new_parent, new_name) {
+            let del_device = DeviceId::new();
+            let del_op = Operation::new(
+                self.workspace_id,
+                del_device,
+                Cursor::zero(),
+                OperationKind::DeleteNode {
+                    node_id: target.node_id,
+                    recursive: false,
+                },
+                chrono::Utc::now(),
+            );
+            self.store
+                .apply_operation(&del_op, Cursor::zero())
+                .map_err(|e| WriteError::Io(e.to_string()))?;
+            self.store
+                .put_pending_op(&del_op)
+                .map_err(|e| WriteError::Io(e.to_string()))?;
+        }
+        let device = DeviceId::new();
+        let op = Operation::new(
+            self.workspace_id,
+            device,
+            Cursor::zero(),
+            OperationKind::MoveNode {
+                node_id: node.node_id,
+                old_parent_id: old_parent,
+                old_name: old_name.to_owned(),
+                new_parent_id: new_parent,
+                new_name: new_name.to_owned(),
+            },
+            chrono::Utc::now(),
+        );
+        self.store
+            .apply_operation(&op, Cursor::zero())
+            .map_err(|e| WriteError::Io(e.to_string()))?;
+        self.store
+            .put_pending_op(&op)
+            .map_err(|e| WriteError::Io(e.to_string()))?;
+        Ok(())
+    }
+
+    fn unlink(&self, parent: NodeId, name: &str) -> Result<(), WriteError> {
+        use fs2_core::{Cursor, DeviceId, Operation, OperationKind};
+        let node = self
+            .lookup(parent, name)
+            .ok_or_else(|| WriteError::NotFound(name.to_owned()))?;
+        if node.kind != NodeKind::File {
+            return Err(WriteError::Invalid("unlink on non-file".to_owned()));
+        }
+        let device = DeviceId::new();
+        let op = Operation::new(
+            self.workspace_id,
+            device,
+            Cursor::zero(),
+            OperationKind::DeleteNode {
+                node_id: node.node_id,
+                recursive: false,
+            },
+            chrono::Utc::now(),
+        );
+        self.store
+            .apply_operation(&op, Cursor::zero())
+            .map_err(|e| WriteError::Io(e.to_string()))?;
+        self.store
+            .put_pending_op(&op)
+            .map_err(|e| WriteError::Io(e.to_string()))?;
+        Ok(())
+    }
+
+    fn rmdir(&self, parent: NodeId, name: &str) -> Result<(), WriteError> {
+        use fs2_core::{Cursor, DeviceId, Operation, OperationKind};
+        let node = self
+            .lookup(parent, name)
+            .ok_or_else(|| WriteError::NotFound(name.to_owned()))?;
+        if node.kind != NodeKind::Directory {
+            return Err(WriteError::Invalid("rmdir on non-directory".to_owned()));
+        }
+        // Check empty.
+        let children = self
+            .store
+            .list_children(self.workspace_id, Some(node.node_id))
+            .map_err(|e| WriteError::Io(e.to_string()))?;
+        if !children.is_empty() {
+            return Err(WriteError::Invalid("directory not empty".to_owned()));
+        }
+        let device = DeviceId::new();
+        let op = Operation::new(
+            self.workspace_id,
+            device,
+            Cursor::zero(),
+            OperationKind::DeleteNode {
+                node_id: node.node_id,
+                recursive: false,
+            },
+            chrono::Utc::now(),
+        );
+        self.store
+            .apply_operation(&op, Cursor::zero())
+            .map_err(|e| WriteError::Io(e.to_string()))?;
+        self.store
+            .put_pending_op(&op)
+            .map_err(|e| WriteError::Io(e.to_string()))?;
+        Ok(())
+    }
+
+    fn setattr_mode(&self, node_id: NodeId, mode: u32) -> Result<(), WriteError> {
+        // The local store doesn't have a direct setattr op; in production this
+        // would queue a metadata revision. For now, record the mode in the
+        // revision (if any) is a future step. We mark it as a pending op
+        // placeholder by recording the intent.
+        // TODO: queue a metadata revision op when the op model supports it.
+        let _ = (node_id, mode);
+        Ok(())
     }
 }
 

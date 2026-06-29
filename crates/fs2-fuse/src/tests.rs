@@ -12,7 +12,7 @@ use fs2_sync::{LocalNode, LocalRevision};
 use parking_lot::Mutex;
 
 use super::{
-    BlobReader, Fs2Backend, Fs2Filesystem, LocalStoreBackend, NoBlobReader, ReadError, ROOT_INO,
+    BlobReader, Fs2Backend, Fs2Filesystem, LocalStoreBackend, NoBlobReader, ReadError, ROOT_INO, WriteError,
 };
 use fs2_core::{Cursor, DeviceId, NodeRevision, Operation, OperationKind, RevisionContent};
 
@@ -24,6 +24,10 @@ struct MockBackend {
     revisions: Mutex<HashMap<NodeId, LocalRevision>>,
     bytes: Mutex<HashMap<NodeId, Vec<u8>>>,
     symlinks: Mutex<HashMap<NodeId, String>>,
+    write_handles: Mutex<HashMap<u64, (NodeId, Vec<u8>)>>,
+    next_fh: Mutex<u64>,
+    /// Recorded pending ops (for verifying write-path behavior).
+    pending_ops: Mutex<Vec<String>>,
 }
 
 impl MockBackend {
@@ -48,6 +52,9 @@ impl MockBackend {
             revisions: Mutex::new(HashMap::new()),
             bytes: Mutex::new(HashMap::new()),
             symlinks: Mutex::new(HashMap::new()),
+            write_handles: Mutex::new(HashMap::new()),
+            next_fh: Mutex::new(1),
+            pending_ops: Mutex::new(Vec::new()),
         }
     }
 
@@ -184,6 +191,121 @@ impl Fs2Backend for MockBackend {
     fn readlink(&self, node_id: NodeId) -> Option<String> {
         self.symlinks.lock().get(&node_id).cloned()
     }
+
+    fn mkdir(&self, parent: NodeId, name: &str) -> Result<NodeId, WriteError> {
+        let collision = self.nodes.lock().values().any(|n| n.parent_id == Some(parent) && n.name == name && !n.deleted);
+        if collision {
+            return Err(WriteError::Collision(name.to_owned()));
+        }
+        let id = NodeId::new();
+        self.nodes.lock().insert(id, LocalNode {
+            node_id: id,
+            workspace_id: self.workspace_id,
+            parent_id: Some(parent),
+            name: name.to_owned(),
+            kind: NodeKind::Directory,
+            current_revision_id: None,
+            deleted: false,
+        });
+        self.pending_ops.lock().push(format!("mkdir:{name}"));
+        Ok(id)
+    }
+
+    fn create_file(&self, parent: NodeId, name: &str, _mode: u32) -> Result<(NodeId, u64), WriteError> {
+        let collision = self.nodes.lock().values().any(|n| n.parent_id == Some(parent) && n.name == name && !n.deleted);
+        if collision {
+            return Err(WriteError::Collision(name.to_owned()));
+        }
+        let id = NodeId::new();
+        self.nodes.lock().insert(id, LocalNode {
+            node_id: id,
+            workspace_id: self.workspace_id,
+            parent_id: Some(parent),
+            name: name.to_owned(),
+            kind: NodeKind::File,
+            current_revision_id: None,
+            deleted: false,
+        });
+        let mut next = self.next_fh.lock();
+        let fh = *next;
+        *next += 1;
+        drop(next);
+        self.write_handles.lock().insert(fh, (id, Vec::new()));
+        self.pending_ops.lock().push(format!("create:{name}"));
+        Ok((id, fh))
+    }
+
+    fn write(&self, fh: u64, offset: i64, data: &[u8]) -> Result<(), WriteError> {
+        let mut handles = self.write_handles.lock();
+        let entry = handles.get_mut(&fh).ok_or_else(|| WriteError::NotFound("fh".to_owned()))?;
+        let staging = &mut entry.1;
+        let off = usize::try_from(offset).unwrap_or(0);
+        if off + data.len() > staging.len() {
+            staging.resize(off + data.len(), 0);
+        }
+        staging[off..off + data.len()].copy_from_slice(data);
+        Ok(())
+    }
+
+    fn flush(&self, fh: u64) -> Result<(), WriteError> {
+        let (node_id, bytes) = self.write_handles.lock().remove(&fh).ok_or_else(|| WriteError::NotFound("fh".to_owned()))?;
+        self.bytes.lock().insert(node_id, bytes);
+        self.pending_ops.lock().push(format!("flush:{node_id}"));
+        Ok(())
+    }
+
+    fn release(&self, fh: u64) {
+        self.write_handles.lock().remove(&fh);
+    }
+
+    fn rename(&self, old_parent: NodeId, old_name: &str, new_parent: NodeId, new_name: &str) -> Result<(), WriteError> {
+        let node = self.lookup(old_parent, old_name).ok_or_else(|| WriteError::NotFound(old_name.to_owned()))?;
+        // FUSE rename replaces an existing target (atomic save semantics).
+        if let Some(target) = self.lookup(new_parent, new_name) {
+            if let Some(n) = self.nodes.lock().get_mut(&target.node_id) {
+                n.deleted = true;
+            }
+        }
+        if let Some(n) = self.nodes.lock().get_mut(&node.node_id) {
+            n.parent_id = Some(new_parent);
+            n.name = new_name.to_owned();
+        }
+        self.pending_ops.lock().push(format!("rename:{old_name}->{new_name}"));
+        Ok(())
+    }
+
+    fn unlink(&self, parent: NodeId, name: &str) -> Result<(), WriteError> {
+        let node = self.lookup(parent, name).ok_or_else(|| WriteError::NotFound(name.to_owned()))?;
+        if node.kind != NodeKind::File {
+            return Err(WriteError::Invalid("not a file".to_owned()));
+        }
+        if let Some(n) = self.nodes.lock().get_mut(&node.node_id) {
+            n.deleted = true;
+        }
+        self.pending_ops.lock().push(format!("unlink:{name}"));
+        Ok(())
+    }
+
+    fn rmdir(&self, parent: NodeId, name: &str) -> Result<(), WriteError> {
+        let node = self.lookup(parent, name).ok_or_else(|| WriteError::NotFound(name.to_owned()))?;
+        if node.kind != NodeKind::Directory {
+            return Err(WriteError::Invalid("not a directory".to_owned()));
+        }
+        let has_children = self.nodes.lock().values().any(|n| n.parent_id == Some(node.node_id) && !n.deleted);
+        if has_children {
+            return Err(WriteError::Invalid("not empty".to_owned()));
+        }
+        if let Some(n) = self.nodes.lock().get_mut(&node.node_id) {
+            n.deleted = true;
+        }
+        self.pending_ops.lock().push(format!("rmdir:{name}"));
+        Ok(())
+    }
+
+    fn setattr_mode(&self, _node_id: NodeId, _mode: u32) -> Result<(), WriteError> {
+        self.pending_ops.lock().push("setattr".to_owned());
+        Ok(())
+    }
 }
 
 /// A mock backend whose `read_file` always fails (simulates offline/not-hydrated).
@@ -213,6 +335,33 @@ impl Fs2Backend for OfflineBackend {
     }
     fn readlink(&self, node_id: NodeId) -> Option<String> {
         self.0.readlink(node_id)
+    }
+    fn mkdir(&self, parent: NodeId, name: &str) -> Result<NodeId, WriteError> {
+        self.0.mkdir(parent, name)
+    }
+    fn create_file(&self, parent: NodeId, name: &str, mode: u32) -> Result<(NodeId, u64), WriteError> {
+        self.0.create_file(parent, name, mode)
+    }
+    fn write(&self, fh: u64, offset: i64, data: &[u8]) -> Result<(), WriteError> {
+        self.0.write(fh, offset, data)
+    }
+    fn flush(&self, fh: u64) -> Result<(), WriteError> {
+        self.0.flush(fh)
+    }
+    fn release(&self, fh: u64) {
+        self.0.release(fh);
+    }
+    fn rename(&self, old_parent: NodeId, old_name: &str, new_parent: NodeId, new_name: &str) -> Result<(), WriteError> {
+        self.0.rename(old_parent, old_name, new_parent, new_name)
+    }
+    fn unlink(&self, parent: NodeId, name: &str) -> Result<(), WriteError> {
+        self.0.unlink(parent, name)
+    }
+    fn rmdir(&self, parent: NodeId, name: &str) -> Result<(), WriteError> {
+        self.0.rmdir(parent, name)
+    }
+    fn setattr_mode(&self, node_id: NodeId, mode: u32) -> Result<(), WriteError> {
+        self.0.setattr_mode(node_id, mode)
     }
 }
 
@@ -582,4 +731,230 @@ fn local_store_backend_readlink_for_symlink() {
     assert_eq!(attr.kind, fuser::FileType::Symlink);
     let target = fs.readlink_core(attr.ino).expect("readlink");
     assert_eq!(target, "../other.txt");
+}
+
+
+// ---- Write-path tests (13.1-13.5) ----
+
+#[test]
+fn mkdir_creates_directory_and_pending_op() {
+    let (fs, _root) = make_fs();
+    let ino = fs.mkdir_core(ROOT_INO, "newdir").expect("mkdir");
+    let attr = fs.getattr_core(ino).expect("attr");
+    assert_eq!(attr.kind, fuser::FileType::Directory);
+    // A pending op was recorded.
+    let ops = fs.backend.pending_ops.lock().clone();
+    assert!(ops.iter().any(|o| o.contains("mkdir:newdir")));
+}
+
+#[test]
+fn mkdir_collision_is_eexist() {
+    let (fs, _root) = make_fs();
+    fs.mkdir_core(ROOT_INO, "dir").unwrap();
+    assert_eq!(fs.mkdir_core(ROOT_INO, "dir").unwrap_err(), libc::EEXIST);
+}
+
+#[test]
+fn create_file_opens_write_handle() {
+    let (fs, _root) = make_fs();
+    let (ino, fh) = fs.create_core(ROOT_INO, "file.txt", 0o644).expect("create");
+    let attr = fs.getattr_core(ino).expect("attr");
+    assert_eq!(attr.kind, fuser::FileType::RegularFile);
+    assert!(fh > 0);
+}
+
+#[test]
+fn write_and_flush_commits_content() {
+    let (fs, _root) = make_fs();
+    let (ino, fh) = fs.create_core(ROOT_INO, "a.txt", 0o644).expect("create");
+    fs.write_core(fh, 0, b"hello").expect("write");
+    fs.write_core(fh, 5, b" world").expect("write2");
+    fs.flush_core(fh).expect("flush");
+    // After flush, the file has content.
+    let bytes = fs.read_core(ino, 0, 100).expect("read");
+    assert_eq!(bytes, b"hello world");
+    // A flush op was recorded.
+    let ops = fs.backend.pending_ops.lock().clone();
+    assert!(ops.iter().any(|o| o.contains("flush:")));
+}
+
+#[test]
+fn write_to_invalid_handle_is_ebadf() {
+    let (fs, _root) = make_fs();
+    assert_eq!(fs.write_core(999, 0, b"data").unwrap_err(), libc::EBADF);
+}
+
+#[test]
+fn release_drops_write_handle() {
+    let (fs, _root) = make_fs();
+    let (_ino, fh) = fs.create_core(ROOT_INO, "a.txt", 0o644).expect("create");
+    fs.write_core(fh, 0, b"data").expect("write");
+    fs.release_core(fh);
+    // After release, flushing the same handle fails.
+    assert!(fs.flush_core(fh).is_err());
+}
+
+#[test]
+fn rename_moves_node() {
+    let (fs, _root) = make_fs();
+    let _dir = fs.mkdir_core(ROOT_INO, "dir1").unwrap();
+    fs.rename_core(ROOT_INO, "dir1", ROOT_INO, "dir2").expect("rename");
+    // Old name is gone, new name exists.
+    assert!(fs.lookup_core(ROOT_INO, "dir1").is_err());
+    let attr = fs.lookup_core(ROOT_INO, "dir2").expect("dir2 exists");
+    assert_eq!(attr.kind, fuser::FileType::Directory);
+}
+
+#[test]
+fn rename_replaces_existing_target() {
+    // FUSE rename over an existing target replaces it (atomic save).
+    let (fs, _root) = make_fs();
+    fs.mkdir_core(ROOT_INO, "a").unwrap();
+    fs.mkdir_core(ROOT_INO, "b").unwrap();
+    fs.rename_core(ROOT_INO, "a", ROOT_INO, "b").expect("rename replaces");
+    // "a" is gone, "b" is the renamed node.
+    assert!(fs.lookup_core(ROOT_INO, "a").is_err());
+    let attr = fs.lookup_core(ROOT_INO, "b").expect("b exists");
+    assert_eq!(attr.kind, fuser::FileType::Directory);
+}
+
+#[test]
+fn unlink_removes_file() {
+    let (fs, root) = make_fs();
+    let _id = fs.backend.add_file(root, "file.txt", b"hi", false);
+    fs.unlink_core(ROOT_INO, "file.txt").expect("unlink");
+    assert!(fs.lookup_core(ROOT_INO, "file.txt").is_err());
+}
+
+#[test]
+fn unlink_on_directory_is_eisdir() {
+    let (fs, _root) = make_fs();
+    fs.mkdir_core(ROOT_INO, "dir").unwrap();
+    assert_eq!(fs.unlink_core(ROOT_INO, "dir").unwrap_err(), libc::EISDIR);
+}
+
+#[test]
+fn rmdir_removes_empty_directory() {
+    let (fs, _root) = make_fs();
+    fs.mkdir_core(ROOT_INO, "empty").unwrap();
+    fs.rmdir_core(ROOT_INO, "empty").expect("rmdir");
+    assert!(fs.lookup_core(ROOT_INO, "empty").is_err());
+}
+
+#[test]
+fn rmdir_non_empty_is_enotempty() {
+    let (fs, _root) = make_fs();
+    let _dir_ino = fs.mkdir_core(ROOT_INO, "dir").unwrap();
+    // Add a child under dir (need the node_id, not ino).
+    let dir_node = fs.backend.nodes.lock().values().find(|n| n.name == "dir").cloned().unwrap();
+    fs.backend.add_dir(dir_node.node_id, "child");
+    assert_eq!(fs.rmdir_core(ROOT_INO, "dir").unwrap_err(), libc::ENOTEMPTY);
+}
+
+#[test]
+fn setattr_mode_records_op() {
+    let (fs, root) = make_fs();
+    let _id = fs.backend.add_file(root, "run.sh", b"#!/bin/sh
+", true);
+    let attr = fs.lookup_core(ROOT_INO, "run.sh").expect("lookup");
+    fs.setattr_mode_core(attr.ino, 0o755).expect("setattr");
+    let ops = fs.backend.pending_ops.lock().clone();
+    assert!(ops.iter().any(|o| o == "setattr"));
+}
+
+#[test]
+fn atomic_save_temp_write_then_rename() {
+    // 13.5: atomic save = write to temp file, then rename over target.
+    let (fs, _root) = make_fs();
+    // Create the target file.
+    let (_target_ino, _) = fs.create_core(ROOT_INO, "app.ts", 0o644).expect("create");
+    // Editor writes to a temp file.
+    let (temp_ino, temp_fh) = fs.create_core(ROOT_INO, ".app.ts.swp", 0o644).expect("create temp");
+    fs.write_core(temp_fh, 0, b"new content").expect("write temp");
+    fs.flush_core(temp_fh).expect("flush temp");
+    // Rename temp over target (atomic save).
+    fs.rename_core(ROOT_INO, ".app.ts.swp", ROOT_INO, "app.ts").expect("rename");
+    // The target now has the new content.
+    let bytes = fs.read_core(temp_ino, 0, 100).expect("read");
+    assert_eq!(bytes, b"new content");
+}
+
+#[test]
+fn write_path_pending_ops_recorded() {
+    // 13.1: mkdir and echo hi > file.txt produce pending ops.
+    let (fs, _root) = make_fs();
+    fs.mkdir_core(ROOT_INO, "apps").unwrap();
+    let (_ino, fh) = fs.create_core(ROOT_INO, "hi.txt", 0o644).unwrap();
+    fs.write_core(fh, 0, b"hi").unwrap();
+    fs.flush_core(fh).unwrap();
+    let ops = fs.backend.pending_ops.lock().clone();
+    assert!(ops.iter().any(|o| o.contains("mkdir:apps")));
+    assert!(ops.iter().any(|o| o.contains("create:hi.txt")));
+    assert!(ops.iter().any(|o| o.contains("flush:")));
+}
+
+
+#[test]
+fn local_store_backend_write_flush_read_roundtrip() {
+    // Verifies the CRITICAL fix: flush applies the revision so the file can
+    // be read back through LocalStoreBackend.
+    use fs2_core::{Cursor, DeviceId, NodeKind, NodeRevision, Operation, OperationKind, RevisionContent, RevisionId};
+    let store = fs2_sync::LocalStore::open_in_memory().unwrap();
+    let ws_id = WorkspaceId::new();
+    let root_id = NodeId::new();
+    let device = DeviceId::new();
+    store.upsert_workspace(ws_id, "test-ws", root_id).unwrap();
+    store.insert_root_node(ws_id, root_id).unwrap();
+    // Create a file node via apply_operation.
+    let file_node_id = NodeId::new();
+    let rev_id = RevisionId::new();
+    let op = Operation::new(
+        ws_id,
+        device,
+        Cursor::zero(),
+        OperationKind::CreateNode {
+            parent_id: root_id,
+            name: "out.txt".to_owned(),
+            kind: NodeKind::File,
+            initial_revision: Some(NodeRevision {
+                revision_id: rev_id,
+                node_id: file_node_id,
+                workspace_id: ws_id,
+                device_id: device,
+                base_revision_id: None,
+                content: RevisionContent::File {
+                    blob_id: format!("sha256:{file_node_id}"),
+                    chunk_ids: vec![],
+                    content_hash: "h".to_owned(),
+                    encryption_header: None,
+                },
+                posix_mode: 0o644,
+                mtime: chrono::Utc::now(),
+                size: 0,
+                executable: false,
+                created_at: chrono::Utc::now(),
+            }),
+        },
+        chrono::Utc::now(),
+    );
+    store.apply_operation(&op, Cursor::from(1)).unwrap();
+    let _file_node = store.get_node_by_path(ws_id, "out.txt").unwrap().expect("file");
+
+    // Use a MockBlobReader that returns the written bytes by blob_id.
+    let bytes_map = std::collections::HashMap::new();
+    let reader = MockBlobReader { bytes: bytes_map };
+    let backend = LocalStoreBackend::new(store, reader, ws_id, root_id);
+    // Create a new file, write, flush, then read back.
+    let (new_node, fh) = backend.create_file(root_id, "written.txt", 0o644).expect("create");
+    backend.write(fh, 0, b"roundtrip content").expect("write");
+    // The flush will compute blob_id and cache; the MockBlobReader won't have it,
+    // but flush writes to the cache path and marks hydrated. We verify the
+    // revision is applied (current_revision_id is set).
+    backend.flush(fh).expect("flush");
+    // The node should now have a current_revision_id.
+    let updated = backend.get_node(new_node).expect("node");
+    assert!(updated.current_revision_id.is_some(), "flush must apply the revision");
+    // A pending op was queued.
+    let pending = backend.store.list_pending_ops().unwrap();
+    assert!(!pending.is_empty(), "flush must queue a pending op");
 }

@@ -537,6 +537,7 @@ dependencies = [
  "anyhow",
  "chrono",
  "fs2-core",
+ "fs2-crypto",
  "fs2-sync",
  "fuser",
  "libc",
