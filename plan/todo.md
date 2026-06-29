@@ -108,87 +108,87 @@ Acceptance criteria:
 
 ### 2.1 Implement IDs and shared types in `fs2-core`
 
-- [ ] Add typed wrappers:
-  - [ ] `UserId`
-  - [ ] `WorkspaceId`
-  - [ ] `DeviceId`
-  - [ ] `NodeId`
-  - [ ] `RevisionId`
-  - [ ] `OpId`
-  - [ ] `BlobId`
-  - [ ] `Cursor`
-- [ ] Implement serde serialization/deserialization.
-- [ ] Implement display/from-string parsing.
-- [ ] Add property tests for ID round trips.
+- [x] Add typed wrappers:
+  - [x] `UserId`
+  - [x] `WorkspaceId`
+  - [x] `DeviceId`
+  - [x] `NodeId`
+  - [x] `RevisionId`
+  - [x] `OpId`
+  - [x] `BlobId`
+  - [x] `Cursor`
+- [x] Implement serde serialization/deserialization.
+- [x] Implement display/from-string parsing.
+- [x] Add property tests for ID round trips.
 
 Acceptance criteria:
 
-- [ ] IDs do not appear as raw `Uuid` throughout the codebase except at boundaries.
+- [x] IDs do not appear as raw `Uuid` throughout the codebase except at boundaries.
 
 ### 2.2 Implement node and revision types
 
-- [ ] Add `NodeKind` enum:
-  - [ ] `Directory`
-  - [ ] `File`
-  - [ ] `Symlink`
-- [ ] Add `Node` struct.
-- [ ] Add `NodeRevision` struct.
-- [ ] Add `RevisionContent` enum.
-- [ ] Add portable file metadata fields:
-  - [ ] size
-  - [ ] mtime
-  - [ ] POSIX mode
-  - [ ] executable bit
-  - [ ] symlink target
-- [ ] Add serialization tests with JSON snapshots.
+- [x] Add `NodeKind` enum:
+  - [x] `Directory`
+  - [x] `File`
+  - [x] `Symlink`
+- [x] Add `Node` struct.
+- [x] Add `NodeRevision` struct.
+- [x] Add `RevisionContent` enum.
+- [x] Add portable file metadata fields:
+  - [x] size
+  - [x] mtime
+  - [x] POSIX mode
+  - [x] executable bit
+  - [x] symlink target
+- [x] Add serialization tests with JSON snapshots.
 
 Acceptance criteria:
 
-- [ ] A node tree can be serialized by backend and deserialized by client with identical values.
+- [x] A node tree can be serialized by backend and deserialized by client with identical values.
 
 ### 2.3 Implement operations
 
-- [ ] Add `Operation` struct.
-- [ ] Add `OperationKind` enum:
-  - [ ] `CreateNode`
-  - [ ] `PutFileRevision`
-  - [ ] `MoveNode`
-  - [ ] `DeleteNode`
-  - [ ] `RestoreNode`
-  - [ ] `SetRule`
-  - [ ] `SetEnvVar`
-  - [ ] `DeleteEnvVar`
-- [ ] Add idempotency field `op_id`.
-- [ ] Add `base_cursor` and base revision fields.
-- [ ] Add validation helpers for operation shape.
-- [ ] Add snapshot tests for each operation kind.
+- [x] Add `Operation` struct.
+- [x] Add `OperationKind` enum:
+  - [x] `CreateNode`
+  - [x] `PutFileRevision`
+  - [x] `MoveNode`
+  - [x] `DeleteNode`
+  - [x] `RestoreNode`
+  - [x] `SetRule`
+  - [x] `SetEnvVar`
+  - [x] `DeleteEnvVar`
+- [x] Add idempotency field `op_id`.
+- [x] Add `base_cursor` and base revision fields.
+- [x] Add validation helpers for operation shape.
+- [x] Add snapshot tests for each operation kind.
 
 Acceptance criteria:
 
-- [ ] Backend and client can share the same operation JSON contract.
+- [x] Backend and client can share the same operation JSON contract.
 
 ### 2.4 Implement error model
 
-- [ ] Define `Fs2Error` enum with stable codes:
-  - [ ] `Unauthorized`
-  - [ ] `DeviceRevoked`
-  - [ ] `WorkspaceNotFound`
-  - [ ] `NodeNotFound`
-  - [ ] `PathCollision`
-  - [ ] `RevisionConflict`
-  - [ ] `BlobMissing`
-  - [ ] `InvalidOperation`
-  - [ ] `QuotaExceeded`
-  - [ ] `RateLimited`
-  - [ ] `Offline`
-  - [ ] `NotHydrated`
-  - [ ] `SecretUnavailable`
-- [ ] Implement conversion to HTTP error response.
-- [ ] Implement conversion to CLI-friendly messages.
+- [x] Define `Fs2Error` enum with stable codes:
+  - [x] `Unauthorized`
+  - [x] `DeviceRevoked`
+  - [x] `WorkspaceNotFound`
+  - [x] `NodeNotFound`
+  - [x] `PathCollision`
+  - [x] `RevisionConflict`
+  - [x] `BlobMissing`
+  - [x] `InvalidOperation`
+  - [x] `QuotaExceeded`
+  - [x] `RateLimited`
+  - [x] `Offline`
+  - [x] `NotHydrated`
+  - [x] `SecretUnavailable`
+- [x] Implement conversion to HTTP error response.
+- [x] Implement conversion to CLI-friendly messages.
 
 Acceptance criteria:
 
-- [ ] Error responses are structured and machine-readable.
+- [x] Error responses are structured and machine-readable.
 
 ---
 
