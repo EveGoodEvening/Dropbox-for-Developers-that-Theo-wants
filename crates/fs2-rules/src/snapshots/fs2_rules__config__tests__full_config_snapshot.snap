@@ -1,0 +1,5 @@
+---
+source: crates/fs2-rules/src/config.rs
+expression: json
+---
+"{\n  \"version\": 1,\n  \"workspace_name\": \"personal-code\",\n  \"default_file_policy\": \"lazy\",\n  \"default_new_file_policy\": \"normal\",\n  \"case_policy\": \"portable\",\n  \"cache\": {\n    \"max_bytes\": \"50GiB\",\n    \"min_free_bytes\": \"20GiB\",\n    \"eviction\": \"lru\"\n  },\n  \"git\": {\n    \"mode\": \"aware\",\n    \"auto_fetch\": true,\n    \"auto_merge\": false,\n    \"sync_git_dir\": false\n  },\n  \"env\": {\n    \"mode\": \"encrypted\",\n    \"materialize\": \"on-command\",\n    \"materialize_filename\": \".env.fs2\"\n  },\n  \"rules\": [\n    {\n      \"pattern\": \"node_modules/**\",\n      \"action\": \"dependency-cache\",\n      \"manager\": \"node\"\n    },\n    {\n      \"pattern\": \"datasets/**\",\n      \"action\": \"lazy\"\n    }\n  ]\n}"

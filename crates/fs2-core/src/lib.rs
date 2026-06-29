@@ -11,8 +11,10 @@ pub mod error;
 pub mod ids;
 pub mod node;
 pub mod op;
+pub mod path;
 
 pub use error::{ErrorCode, Fs2Error};
 pub use ids::{BlobId, Cursor, DeviceId, NodeId, OpId, RevisionId, UserId, WorkspaceId};
 pub use node::{Node, NodeKind, NodeRevision, RevisionContent};
 pub use op::{Operation, OperationKind};
+pub use path::{collision_key, CasePolicy, PathError, RelPath};

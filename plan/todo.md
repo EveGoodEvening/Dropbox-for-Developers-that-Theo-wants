@@ -196,33 +196,33 @@ Acceptance criteria:
 
 ### 3.1 Implement path utilities
 
-- [ ] Add workspace-relative path type.
-- [ ] Reject:
-  - [ ] absolute paths
-  - [ ] `..` traversal
-  - [ ] null bytes
-  - [ ] empty path segments except root
-- [ ] Normalize separators to `/` internally.
-- [ ] Preserve original filename display string.
-- [ ] Add tests for malicious paths.
+- [x] Add workspace-relative path type.
+- [x] Reject:
+  - [x] absolute paths
+  - [x] `..` traversal
+  - [x] null bytes
+  - [x] empty path segments except root
+- [x] Normalize separators to `/` internally.
+- [x] Preserve original filename display string.
+- [x] Add tests for malicious paths.
 
 Acceptance criteria:
 
-- [ ] No API accepts a path that can escape the workspace root.
+- [x] No API accepts a path that can escape the workspace root.
 
 ### 3.2 Implement portable collision key
 
-- [ ] Add Unicode normalization helper.
-- [ ] Add case-folding helper.
-- [ ] Compute `normalized_name` for portable workspaces.
-- [ ] Add tests:
-  - [ ] `Foo.ts` vs `foo.ts`
-  - [ ] Unicode composed vs decomposed names
-  - [ ] names valid on Linux but unsafe on macOS
+- [x] Add Unicode normalization helper.
+- [x] Add case-folding helper.
+- [x] Compute `normalized_name` for portable workspaces.
+- [x] Add tests:
+  - [x] `Foo.ts` vs `foo.ts`
+  - [x] Unicode composed vs decomposed names
+  - [x] names valid on Linux but unsafe on macOS
 
 Acceptance criteria:
 
-- [ ] Portable workspaces block known macOS/Linux collision hazards.
+- [x] Portable workspaces block known macOS/Linux collision hazards.
 
 ---
 
@@ -230,79 +230,79 @@ Acceptance criteria:
 
 ### 4.1 Implement `.fs2ignore` parser in `fs2-rules`
 
-- [ ] Support comments.
-- [ ] Support blank lines.
-- [ ] Support gitignore-style globs.
-- [ ] Support action prefixes:
-  - [ ] `:ignore`
-  - [ ] `:local-only`
-  - [ ] `:generated`
-  - [ ] `:lazy`
-  - [ ] `:pin`
-  - [ ] `:normal`
-  - [ ] `:secret`
-  - [ ] `:dependency-cache`
-- [ ] Make no-prefix default to `ignore`.
-- [ ] Implement last-match-wins behavior.
-- [ ] Add parser error reporting with line numbers.
+- [x] Support comments.
+- [x] Support blank lines.
+- [x] Support gitignore-style globs.
+- [x] Support action prefixes:
+  - [x] `:ignore`
+  - [x] `:local-only`
+  - [x] `:generated`
+  - [x] `:lazy`
+  - [x] `:pin`
+  - [x] `:normal`
+  - [x] `:secret`
+  - [x] `:dependency-cache`
+- [x] Make no-prefix default to `ignore`.
+- [x] Implement last-match-wins behavior.
+- [x] Add parser error reporting with line numbers.
 
 Acceptance criteria:
 
-- [ ] A `.fs2ignore` file can be parsed into deterministic ordered rules.
+- [x] A `.fs2ignore` file can be parsed into deterministic ordered rules.
 
 ### 4.2 Implement `.fs2/config.toml` parser
 
-- [ ] Define config schema.
-- [ ] Parse cache config.
-- [ ] Parse Git config.
-- [ ] Parse env config.
-- [ ] Parse structured rules.
-- [ ] Validate action names.
-- [ ] Validate cache size strings.
-- [ ] Add config snapshot tests.
+- [x] Define config schema.
+- [x] Parse cache config.
+- [x] Parse Git config.
+- [x] Parse env config.
+- [x] Parse structured rules.
+- [x] Validate action names.
+- [x] Validate cache size strings.
+- [x] Add config snapshot tests.
 
 Acceptance criteria:
 
-- [ ] Invalid config fails fast with useful CLI messages.
+- [x] Invalid config fails fast with useful CLI messages.
 
 ### 4.3 Implement rule precedence
 
-- [ ] Implement precedence order:
-  - [ ] explicit CLI override
-  - [ ] `.fs2/config.toml` most-specific rule
-  - [ ] `.fs2ignore` last match
-  - [ ] built-in profile
-  - [ ] workspace default
-- [ ] Add tests for precedence conflicts.
+- [x] Implement precedence order:
+  - [x] explicit CLI override
+  - [x] `.fs2/config.toml` most-specific rule
+  - [x] `.fs2ignore` last match
+  - [x] built-in profile
+  - [x] workspace default
+- [x] Add tests for precedence conflicts.
 
 Acceptance criteria:
 
-- [ ] Given a path, the rule engine returns exactly one effective action and explanation.
+- [x] Given a path, the rule engine returns exactly one effective action and explanation.
 
 ### 4.4 Built-in profiles
 
-- [ ] Add Node profile:
-  - [ ] `node_modules/` as `dependency-cache`
-  - [ ] `.next/` as `generated`
-  - [ ] `.nuxt/` as `generated`
-  - [ ] `.turbo/` as `generated`
-  - [ ] `coverage/` as `generated`
-  - [ ] lockfiles as `pin` or `normal`
-- [ ] Add Rust profile:
-  - [ ] `target/` as `generated`
-  - [ ] `Cargo.lock` as `normal` or `pin`
-- [ ] Add Python profile:
-  - [ ] `.venv/` as `generated`
-  - [ ] `venv/` as `generated`
-  - [ ] `__pycache__/` as `generated`
-  - [ ] lockfiles as `normal` or `pin`
-- [ ] Add Go profile:
-  - [ ] `go.sum` as `normal` or `pin`
-- [ ] Do not globally mark `dist/` generated without a prompt or project-specific rule.
+- [x] Add Node profile:
+  - [x] `node_modules/` as `dependency-cache`
+  - [x] `.next/` as `generated`
+  - [x] `.nuxt/` as `generated`
+  - [x] `.turbo/` as `generated`
+  - [x] `coverage/` as `generated`
+  - [x] lockfiles as `pin` or `normal`
+- [x] Add Rust profile:
+  - [x] `target/` as `generated`
+  - [x] `Cargo.lock` as `normal` or `pin`
+- [x] Add Python profile:
+  - [x] `.venv/` as `generated`
+  - [x] `venv/` as `generated`
+  - [x] `__pycache__/` as `generated`
+  - [x] lockfiles as `normal` or `pin`
+- [x] Add Go profile:
+  - [x] `go.sum` as `normal` or `pin`
+- [x] Do not globally mark `dist/` generated without a prompt or project-specific rule.
 
 Acceptance criteria:
 
-- [ ] Creating `node_modules` does not enqueue sync operations under default Node profile.
+- [x] Creating `node_modules` does not enqueue sync operations under default Node profile.
 
 ---
 
@@ -1495,7 +1495,7 @@ A coding agent should implement in this order unless blocked:
 10. [ ] FUSE read-only mount showing metadata.
 11. [ ] Lazy hydration on read.
 12. [ ] FUSE file creation/write/upload.
-13. [ ] Rule engine default suppressing `node_modules`.
+13. [x] Rule engine default suppressing `node_modules`.
 14. [ ] Conflict detection/preservation.
 15. [ ] Offline queue/replay.
 16. [ ] Env secret sync.
