@@ -494,15 +494,15 @@ Acceptance criteria:
 
 ### 7.2 Blob registration endpoints
 
-- [ ] Implement `POST /v1/blobs/presign-upload` or direct dev upload endpoint.
-- [ ] Implement `POST /v1/blobs/presign-download` or direct dev download endpoint.
-- [ ] Implement `GET /v1/blobs/{id}/status`.
+- [x] Implement `POST /v1/blobs/presign-upload` or direct dev upload endpoint.
+- [x] Implement `POST /v1/blobs/presign-download` or direct dev download endpoint.
+- [x] Implement `GET /v1/blobs/{id}/status`.
 - [ ] Store blob metadata in Postgres.
-- [ ] Validate declared size and hash where possible.
+- [x] Validate declared size and hash where possible.
 
 Acceptance criteria:
 
-- [ ] Client can upload and download a blob by ID.
+- [x] Client can upload and download a blob by ID.
 
 ### 7.3 Content addressing
 

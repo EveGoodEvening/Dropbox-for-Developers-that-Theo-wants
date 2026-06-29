@@ -17,7 +17,7 @@ use bytes::Bytes;
 use fs2_core::{DeviceId, UserId};
 use hmac::{Hmac, Mac};
 use serde::{Deserialize, Serialize};
-use sha2::Sha256;
+use sha2::{Digest, Sha256};
 use std::{
     collections::HashMap,
     env, fmt,
@@ -321,14 +321,22 @@ pub struct AppState {
     jwt_secret: RedactedSecret,
     dev_user_id: UserId,
     devices: Arc<RwLock<HashMap<DeviceId, DeviceRecord>>>,
+    blob_store: Arc<LocalFilesystemBlobStore>,
+    blob_metadata: Arc<RwLock<HashMap<String, BlobMetadata>>>,
 }
 
 impl AppState {
     pub fn dev(jwt_secret: RedactedSecret) -> Self {
+        Self::dev_with_blob_root(jwt_secret, PathBuf::from(".fs2-dev/blobs"))
+    }
+
+    pub fn dev_with_blob_root(jwt_secret: RedactedSecret, blob_root: impl Into<PathBuf>) -> Self {
         Self {
             jwt_secret,
             dev_user_id: UserId::new_v4(),
             devices: Arc::new(RwLock::new(HashMap::new())),
+            blob_store: Arc::new(LocalFilesystemBlobStore::new(blob_root)),
+            blob_metadata: Arc::new(RwLock::new(HashMap::new())),
         }
     }
 }
@@ -378,6 +386,48 @@ pub struct DeviceListResponse {
     pub devices: Vec<DeviceRecord>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BlobMetadata {
+    pub blob_id: String,
+    pub size: u64,
+    pub encryption_header: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct DevBlobUploadRequest {
+    pub blob_id: String,
+    pub bytes_base64: String,
+    pub size: u64,
+    pub encryption_header: Option<String>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct DevBlobUploadResponse {
+    pub blob_id: String,
+    pub size: u64,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct DevBlobDownloadRequest {
+    pub blob_id: String,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct DevBlobDownloadResponse {
+    pub blob_id: String,
+    pub bytes_base64: String,
+    pub size: u64,
+    pub encryption_header: Option<String>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct BlobStatusResponse {
+    pub blob_id: String,
+    pub exists: bool,
+    pub size: Option<u64>,
+    pub encryption_header: Option<String>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AccessClaims {
     sub: UserId,
@@ -407,6 +457,7 @@ pub enum ApiError {
     Unauthorized(&'static str),
     DeviceRevoked,
     InvalidRequest(&'static str),
+    BlobMissing,
     Internal(String),
 }
 
@@ -425,6 +476,11 @@ impl IntoResponse for ApiError {
                 StatusCode::BAD_REQUEST,
                 "invalid_request",
                 message.to_owned(),
+            ),
+            Self::BlobMissing => (
+                StatusCode::NOT_FOUND,
+                "blob_missing",
+                "blob does not exist".to_owned(),
             ),
             Self::Internal(message) => (StatusCode::INTERNAL_SERVER_ERROR, "internal", message),
         };
@@ -453,6 +509,9 @@ pub fn app_with_state(state: AppState) -> Router {
         .route("/v1/auth/whoami", get(whoami))
         .route("/v1/devices", get(list_devices).post(enroll_device))
         .route("/v1/devices/:device_id/revoke", post(revoke_device))
+        .route("/v1/blobs/dev-upload", post(dev_blob_upload))
+        .route("/v1/blobs/dev-download", post(dev_blob_download))
+        .route("/v1/blobs/:blob_id/status", get(blob_status))
         .with_state(state)
 }
 
@@ -462,7 +521,10 @@ pub async fn serve(
 ) -> Result<(), std::io::Error> {
     let listener = TcpListener::bind(config.bind_addr).await?;
     info!(bind_addr = %config.bind_addr, "fs2-backend listening");
-    let state = AppState::dev(config.jwt_secret);
+    let state = AppState::dev_with_blob_root(
+        config.jwt_secret,
+        blob_root_for_config(&config.object_store),
+    );
     axum::serve(listener, app_with_state(state))
         .with_graceful_shutdown(shutdown)
         .await
@@ -584,6 +646,126 @@ async fn revoke_device(
     Ok(StatusCode::NO_CONTENT)
 }
 
+async fn dev_blob_upload(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(request): Json<DevBlobUploadRequest>,
+) -> Result<Json<DevBlobUploadResponse>, ApiError> {
+    let _auth = authenticate(&headers, &state).await?;
+    let bytes = URL_SAFE_NO_PAD
+        .decode(&request.bytes_base64)
+        .map_err(|_| ApiError::InvalidRequest("bytes_base64 must be URL-safe base64"))?;
+    if bytes.len() as u64 != request.size {
+        return Err(ApiError::InvalidRequest(
+            "declared blob size does not match payload",
+        ));
+    }
+    validate_blob_hash(&request.blob_id, &bytes)?;
+    state
+        .blob_store
+        .put(&request.blob_id, Bytes::from(bytes))
+        .await
+        .map_err(blob_store_api_error)?;
+    let metadata = BlobMetadata {
+        blob_id: request.blob_id.clone(),
+        size: request.size,
+        encryption_header: request.encryption_header,
+    };
+    state
+        .blob_metadata
+        .write()
+        .await
+        .insert(metadata.blob_id.clone(), metadata);
+    Ok(Json(DevBlobUploadResponse {
+        blob_id: request.blob_id,
+        size: request.size,
+    }))
+}
+
+async fn dev_blob_download(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(request): Json<DevBlobDownloadRequest>,
+) -> Result<Json<DevBlobDownloadResponse>, ApiError> {
+    let _auth = authenticate(&headers, &state).await?;
+    let bytes = state
+        .blob_store
+        .get(&request.blob_id)
+        .await
+        .map_err(blob_store_api_error)?;
+    validate_blob_hash(&request.blob_id, &bytes)?;
+    let metadata = state
+        .blob_metadata
+        .read()
+        .await
+        .get(&request.blob_id)
+        .cloned();
+    Ok(Json(DevBlobDownloadResponse {
+        blob_id: request.blob_id,
+        bytes_base64: URL_SAFE_NO_PAD.encode(&bytes),
+        size: bytes.len() as u64,
+        encryption_header: metadata.and_then(|metadata| metadata.encryption_header),
+    }))
+}
+
+async fn blob_status(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(blob_id): Path<String>,
+) -> Result<Json<BlobStatusResponse>, ApiError> {
+    let _auth = authenticate(&headers, &state).await?;
+    let exists = state
+        .blob_store
+        .exists(&blob_id)
+        .await
+        .map_err(blob_store_api_error)?;
+    let metadata = state.blob_metadata.read().await.get(&blob_id).cloned();
+    Ok(Json(BlobStatusResponse {
+        blob_id,
+        exists,
+        size: metadata.as_ref().map(|metadata| metadata.size),
+        encryption_header: metadata.and_then(|metadata| metadata.encryption_header),
+    }))
+}
+
+fn blob_store_api_error(error: BlobStoreError) -> ApiError {
+    match error {
+        BlobStoreError::InvalidKey(_) => ApiError::InvalidRequest("invalid blob id"),
+        BlobStoreError::Io(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            ApiError::BlobMissing
+        }
+        BlobStoreError::Io(error) => ApiError::Internal(error.to_string()),
+    }
+}
+
+fn blob_root_for_config(object_store: &ObjectStoreConfig) -> PathBuf {
+    match object_store {
+        ObjectStoreConfig::Local { root } => root.clone(),
+        ObjectStoreConfig::S3 { .. } => PathBuf::from(".fs2-dev/blobs"),
+    }
+}
+
+fn validate_blob_hash(blob_id: &str, bytes: &[u8]) -> Result<(), ApiError> {
+    if let Some(expected) = blob_id.strip_prefix("sha256:") {
+        let actual = hex_lower(&Sha256::digest(bytes));
+        if expected != actual {
+            return Err(ApiError::InvalidRequest(
+                "sha256 blob id does not match payload",
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn hex_lower(bytes: &[u8]) -> String {
+    let mut out = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        use std::fmt::Write as _;
+        let _ = write!(out, "{byte:02x}");
+    }
+    out
+}
+
 fn validate_device_fields(name: &str, public_key: &str) -> Result<(), ApiError> {
     if name.trim().is_empty() {
         return Err(ApiError::InvalidRequest("device name must not be empty"));
@@ -700,6 +882,7 @@ fn unix_timestamp() -> Result<u64, ApiError> {
 
 #[cfg(test)]
 mod tests {
+    #![allow(clippy::too_many_lines)]
     use super::*;
     use axum::{body::Body, http::Request};
     use serde::de::DeserializeOwned;
@@ -718,6 +901,20 @@ mod tests {
         ));
         assert!(format!("{config:?}").contains("<redacted>"));
         assert!(!format!("{config:?}").contains(DEFAULT_DEV_SECRET));
+        Ok(())
+    }
+
+    #[test]
+    fn local_blob_root_uses_configured_object_store_root() -> Result<(), Box<dyn std::error::Error>>
+    {
+        let config = BackendConfig::from_lookup(|key| {
+            (key == "FS2_OBJECT_STORE").then(|| "local:/tmp/fs2-test-blobs".to_owned())
+        })?;
+
+        assert_eq!(
+            blob_root_for_config(&config.object_store),
+            PathBuf::from("/tmp/fs2-test-blobs")
+        );
         Ok(())
     }
 
@@ -767,6 +964,118 @@ mod tests {
 
         assert_eq!(whoami.user_id, login.user_id);
         assert_eq!(whoami.device_id, login.device_id);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn dev_blob_endpoints_upload_status_download_and_validate_hash(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let dir = TempDir::new()?;
+        let state = AppState::dev_with_blob_root(
+            RedactedSecret::new(DEFAULT_DEV_SECRET.to_owned())?,
+            dir.path(),
+        );
+        let app = app_with_state(state);
+        let login = post_json::<DevLoginResponse>(
+            app.clone(),
+            "/v1/auth/dev-login",
+            serde_json::json!({
+                "device_name": "blob-client",
+                "platform": {"os": "linux"},
+                "public_key": "blob-key"
+            }),
+            None,
+        )
+        .await?;
+        let bytes = b"ciphertext bytes";
+        let blob_id = format!("sha256:{}", hex_lower(&Sha256::digest(bytes)));
+
+        let upload = post_json::<DevBlobUploadResponse>(
+            app.clone(),
+            "/v1/blobs/dev-upload",
+            serde_json::json!({
+                "blob_id": blob_id,
+                "bytes_base64": URL_SAFE_NO_PAD.encode(bytes),
+                "size": bytes.len(),
+                "encryption_header": "v1-header"
+            }),
+            Some(&login.access_token),
+        )
+        .await?;
+        assert_eq!(upload.blob_id, blob_id);
+
+        let status = get_json::<BlobStatusResponse>(
+            app.clone(),
+            &format!("/v1/blobs/{blob_id}/status"),
+            Some(&login.access_token),
+        )
+        .await?;
+        assert!(status.exists);
+        assert_eq!(status.size, Some(bytes.len() as u64));
+
+        let download = post_json::<DevBlobDownloadResponse>(
+            app.clone(),
+            "/v1/blobs/dev-download",
+            serde_json::json!({"blob_id": blob_id}),
+            Some(&login.access_token),
+        )
+        .await?;
+        assert_eq!(download.bytes_base64, URL_SAFE_NO_PAD.encode(bytes));
+        assert_eq!(download.encryption_header.as_deref(), Some("v1-header"));
+
+        let rejected = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/blobs/dev-upload")
+                    .header("authorization", format!("Bearer {}", login.access_token))
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({
+                            "blob_id": "sha256:0000",
+                            "bytes_base64": URL_SAFE_NO_PAD.encode(bytes),
+                            "size": bytes.len(),
+                            "encryption_header": null
+                        })
+                        .to_string(),
+                    ))?,
+            )
+            .await?;
+        assert_eq!(rejected.status(), StatusCode::BAD_REQUEST);
+        let invalid_id = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/blobs/dev-upload")
+                    .header("authorization", format!("Bearer {}", login.access_token))
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({
+                            "blob_id": "../escape",
+                            "bytes_base64": URL_SAFE_NO_PAD.encode(bytes),
+                            "size": bytes.len(),
+                            "encryption_header": null
+                        })
+                        .to_string(),
+                    ))?,
+            )
+            .await?;
+        assert_eq!(invalid_id.status(), StatusCode::BAD_REQUEST);
+        let missing = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/blobs/dev-download")
+                    .header("authorization", format!("Bearer {}", login.access_token))
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({"blob_id": "sha256:ffffffff"}).to_string(),
+                    ))?,
+            )
+            .await?;
+        assert_eq!(missing.status(), StatusCode::NOT_FOUND);
         Ok(())
     }
 
