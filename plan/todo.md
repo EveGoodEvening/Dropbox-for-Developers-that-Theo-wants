@@ -1054,27 +1054,27 @@ Acceptance criteria:
 
 ### 18.1 Git repository detection
 
-- [ ] Detect `.git` directory or file.
-- [ ] Detect worktrees.
-- [ ] Parse remote URLs.
-- [ ] Detect current branch.
-- [ ] Detect HEAD commit.
-- [ ] Detect dirty status summary.
-- [ ] Detect `.gitmodules`.
+- [x] Detect `.git` directory or file.
+- [x] Detect worktrees.
+- [x] Parse remote URLs.
+- [x] Detect current branch.
+- [x] Detect HEAD commit.
+- [x] Detect dirty status summary.
+- [x] Detect `.gitmodules`.
 
 Acceptance criteria:
 
-- [ ] `fs2 git status` reports useful state for normal repos and submodule repos.
+- [x] `fs2 git status` reports useful state for normal repos and submodule repos.
 
 ### 18.2 Exclude `.git` by default
 
-- [ ] Add built-in rule for `.git/**` as local-only/ignored internal.
-- [ ] Ensure FUSE write path does not upload `.git` internals.
-- [ ] `fs2 doctor` warns if user overrides this to normal sync.
+- [x] Add built-in rule for `.git/**` as local-only/ignored internal.
+- [x] Ensure FUSE write path does not upload `.git` internals.
+- [x] `fs2 doctor` warns if user overrides this to normal sync.
 
 Acceptance criteria:
 
-- [ ] No `.git/index` or packfile is uploaded under default config.
+- [x] No `.git/index` or packfile is uploaded under default config.
 
 ### 18.3 Git materialization command
 
@@ -1091,11 +1091,11 @@ Acceptance criteria:
 
 ### 18.4 Submodule handling
 
-- [ ] Parse `.gitmodules`.
-- [ ] Record submodule path/URL/commit metadata.
-- [ ] Treat submodule worktree content as normal nested files.
-- [ ] Exclude nested `.git` internals.
-- [ ] Implement `fs2 git submodules status`.
+- [x] Parse `.gitmodules`.
+- [x] Record submodule path/URL/commit metadata.
+- [x] Treat submodule worktree content as normal nested files.
+- [x] Exclude nested `.git` internals.
+- [x] Implement `fs2 git submodules status`.
 
 Acceptance criteria:
 
