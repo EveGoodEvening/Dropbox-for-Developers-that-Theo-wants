@@ -309,6 +309,8 @@ dependencies = [
  "fs2-core",
  "ignore",
  "serde",
+ "serde_json",
+ "tempfile",
  "toml",
 ]
 

@@ -1109,10 +1109,10 @@ Acceptance criteria:
 
 ### 19.1 Package manager detection
 
-- [ ] Detect Node package manager from `packageManager` in `package.json`.
-- [ ] Fallback to lockfile detection.
-- [ ] Detect monorepo workspace files.
-- [ ] Detect Rust, Python, and Go dependency roots.
+- [x] Detect Node package manager from `packageManager` in `package.json`.
+- [x] Fallback to lockfile detection.
+- [x] Detect monorepo workspace files.
+- [x] Detect Rust, Python, and Go dependency roots.
 
 Acceptance criteria:
 

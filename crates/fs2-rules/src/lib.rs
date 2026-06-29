@@ -13,7 +13,12 @@
 use fs2_core::{CasePolicy, FsRule, RuleAction, WorkspacePath};
 use ignore::gitignore::{Gitignore, GitignoreBuilder};
 use serde::{Deserialize, Serialize};
-use std::{cmp::Ordering, fmt, path::PathBuf, str::FromStr};
+use std::{
+    cmp::Ordering,
+    fmt, fs,
+    path::{Path, PathBuf},
+    str::FromStr,
+};
 
 /// Returns the crate name for smoke tests and early workspace validation.
 pub const fn crate_name() -> &'static str {
@@ -1261,13 +1266,538 @@ const fn default_case_policy() -> CasePolicy {
     CasePolicy::Portable
 }
 
+/// Supported dependency ecosystems.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum DependencyEcosystem {
+    Node,
+    Rust,
+    Python,
+    Go,
+}
+
+/// Detected package manager for dependency guidance.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum PackageManager {
+    Npm,
+    Pnpm,
+    Yarn,
+    Bun,
+    Cargo,
+    Pip,
+    Poetry,
+    Uv,
+    Go,
+}
+
+/// Dependency root metadata used by doctor/status guidance.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DependencyRoot {
+    pub root: PathBuf,
+    pub ecosystem: DependencyEcosystem,
+    pub manager: PackageManager,
+    pub lockfiles: Vec<String>,
+    pub workspace_files: Vec<String>,
+    pub generated_paths: Vec<String>,
+    pub install_command: Vec<String>,
+}
+
+/// Recursively discovers dependency roots under a workspace directory.
+pub fn discover_dependency_roots(root: impl AsRef<Path>) -> Result<Vec<DependencyRoot>, RuleError> {
+    let mut roots = Vec::new();
+    discover_dependency_roots_inner(root.as_ref(), &mut roots)?;
+    roots.sort_by(|left, right| {
+        left.root
+            .cmp(&right.root)
+            .then(left.ecosystem_name().cmp(right.ecosystem_name()))
+    });
+    Ok(roots)
+}
+
+/// Detects dependency roots at one exact directory.
+pub fn detect_dependency_roots_at(
+    root: impl AsRef<Path>,
+) -> Result<Vec<DependencyRoot>, RuleError> {
+    let root = root.as_ref();
+    let mut out = Vec::new();
+    if let Some(node) = detect_node_root(root)? {
+        out.push(node);
+    }
+    if root.join("Cargo.toml").is_file() {
+        out.push(DependencyRoot {
+            root: root.to_path_buf(),
+            ecosystem: DependencyEcosystem::Rust,
+            manager: PackageManager::Cargo,
+            lockfiles: existing_files(root, &["Cargo.lock"]),
+            workspace_files: Vec::new(),
+            generated_paths: vec!["target/".to_owned()],
+            install_command: vec!["cargo".to_owned(), "build".to_owned()],
+        });
+    }
+    if let Some(python) = detect_python_root(root) {
+        out.push(python);
+    }
+    if root.join("go.mod").is_file() || root.join("go.work").is_file() {
+        out.push(DependencyRoot {
+            root: root.to_path_buf(),
+            ecosystem: DependencyEcosystem::Go,
+            manager: PackageManager::Go,
+            lockfiles: existing_files(root, &["go.sum", "go.work.sum"]),
+            workspace_files: existing_files(root, &["go.work"]),
+            generated_paths: vec!["bin/".to_owned()],
+            install_command: vec!["go".to_owned(), "mod".to_owned(), "download".to_owned()],
+        });
+    }
+    Ok(out)
+}
+
+impl DependencyRoot {
+    const fn ecosystem_name(&self) -> &'static str {
+        match self.ecosystem {
+            DependencyEcosystem::Node => "node",
+            DependencyEcosystem::Rust => "rust",
+            DependencyEcosystem::Python => "python",
+            DependencyEcosystem::Go => "go",
+        }
+    }
+}
+
+fn discover_dependency_roots_inner(
+    root: &Path,
+    roots: &mut Vec<DependencyRoot>,
+) -> Result<(), RuleError> {
+    if should_skip_dependency_dir(root) {
+        return Ok(());
+    }
+    roots.extend(detect_dependency_roots_at(root)?);
+    for entry in
+        fs::read_dir(root).map_err(|error| RuleError::new("dependency-root", error.to_string()))?
+    {
+        let entry = entry.map_err(|error| RuleError::new("dependency-root", error.to_string()))?;
+        let path = entry.path();
+        let file_type = entry
+            .file_type()
+            .map_err(|error| RuleError::new("dependency-root", error.to_string()))?;
+        if file_type.is_dir() {
+            discover_dependency_roots_inner(&path, roots)?;
+        }
+    }
+    Ok(())
+}
+
+fn should_skip_dependency_dir(path: &Path) -> bool {
+    path.file_name()
+        .and_then(|name| name.to_str())
+        .is_some_and(|name| {
+            matches!(
+                name,
+                ".git" | "node_modules" | "target" | ".venv" | "venv" | "__pycache__"
+            )
+        })
+}
+
+fn detect_node_root(root: &Path) -> Result<Option<DependencyRoot>, RuleError> {
+    let package_json = root.join("package.json");
+    let lockfiles = existing_files(
+        root,
+        &[
+            "pnpm-lock.yaml",
+            "yarn.lock",
+            "package-lock.json",
+            "bun.lockb",
+        ],
+    );
+    let workspace_files = existing_files(root, &["pnpm-workspace.yaml", "turbo.json", "nx.json"]);
+    if !package_json.is_file() && lockfiles.is_empty() && workspace_files.is_empty() {
+        return Ok(None);
+    }
+    let manager = package_manager_from_package_json(&package_json)?
+        .or_else(|| package_manager_from_lockfiles(&lockfiles))
+        .or_else(|| package_manager_from_workspace_files(&workspace_files))
+        .unwrap_or(PackageManager::Npm);
+    let mut workspace_files = workspace_files;
+    if package_json_declares_workspaces(&package_json)? {
+        workspace_files.push("package.json#workspaces".to_owned());
+    }
+    Ok(Some(DependencyRoot {
+        root: root.to_path_buf(),
+        ecosystem: DependencyEcosystem::Node,
+        manager,
+        lockfiles,
+        workspace_files,
+        generated_paths: vec![
+            "node_modules/".to_owned(),
+            ".next/".to_owned(),
+            ".nuxt/".to_owned(),
+            ".turbo/".to_owned(),
+        ],
+        install_command: node_install_command(manager),
+    }))
+}
+
+fn package_manager_from_package_json(path: &Path) -> Result<Option<PackageManager>, RuleError> {
+    if !path.is_file() {
+        return Ok(None);
+    }
+    let text = fs::read_to_string(path)
+        .map_err(|error| RuleError::new("package.json", error.to_string()))?;
+    let value: serde_json::Value = serde_json::from_str(&text)
+        .map_err(|error| RuleError::new("package.json", error.to_string()))?;
+    let manager = value
+        .get("packageManager")
+        .and_then(serde_json::Value::as_str)
+        .and_then(|value| {
+            value
+                .split_once('@')
+                .map_or(Some(value), |(name, _)| Some(name))
+        })
+        .and_then(node_manager_from_name);
+    Ok(manager)
+}
+
+fn package_json_declares_workspaces(path: &Path) -> Result<bool, RuleError> {
+    if !path.is_file() {
+        return Ok(false);
+    }
+    let text = fs::read_to_string(path)
+        .map_err(|error| RuleError::new("package.json", error.to_string()))?;
+    let value: serde_json::Value = serde_json::from_str(&text)
+        .map_err(|error| RuleError::new("package.json", error.to_string()))?;
+    Ok(value.get("workspaces").is_some())
+}
+
+fn node_manager_from_name(name: &str) -> Option<PackageManager> {
+    match name {
+        "npm" => Some(PackageManager::Npm),
+        "pnpm" => Some(PackageManager::Pnpm),
+        "yarn" => Some(PackageManager::Yarn),
+        "bun" => Some(PackageManager::Bun),
+        _ => None,
+    }
+}
+
+fn package_manager_from_lockfiles(lockfiles: &[String]) -> Option<PackageManager> {
+    for (file, manager) in [
+        ("pnpm-lock.yaml", PackageManager::Pnpm),
+        ("yarn.lock", PackageManager::Yarn),
+        ("package-lock.json", PackageManager::Npm),
+        ("bun.lockb", PackageManager::Bun),
+    ] {
+        if lockfiles.iter().any(|lockfile| lockfile == file) {
+            return Some(manager);
+        }
+    }
+    None
+}
+
+fn package_manager_from_workspace_files(workspace_files: &[String]) -> Option<PackageManager> {
+    if workspace_files
+        .iter()
+        .any(|file| file == "pnpm-workspace.yaml")
+    {
+        Some(PackageManager::Pnpm)
+    } else {
+        None
+    }
+}
+
+fn node_install_command(manager: PackageManager) -> Vec<String> {
+    match manager {
+        PackageManager::Pnpm => vec!["pnpm".to_owned(), "install".to_owned()],
+        PackageManager::Yarn => vec!["yarn".to_owned(), "install".to_owned()],
+        PackageManager::Bun => vec!["bun".to_owned(), "install".to_owned()],
+        _ => vec!["npm".to_owned(), "install".to_owned()],
+    }
+}
+
+fn detect_python_root(root: &Path) -> Option<DependencyRoot> {
+    let mut lockfiles = existing_files(root, &["uv.lock", "poetry.lock"]);
+    if let Ok(entries) = fs::read_dir(root) {
+        for entry in entries.flatten() {
+            let Some(name) = entry.file_name().to_str().map(str::to_owned) else {
+                continue;
+            };
+            if is_requirements_file(&name) {
+                lockfiles.push(name);
+            }
+        }
+    }
+    lockfiles.sort();
+    lockfiles.dedup();
+    let has_pyproject = root.join("pyproject.toml").is_file();
+    if !has_pyproject && lockfiles.is_empty() {
+        return None;
+    }
+    let manager = if lockfiles.iter().any(|file| file == "uv.lock") {
+        PackageManager::Uv
+    } else if lockfiles.iter().any(|file| file == "poetry.lock") {
+        PackageManager::Poetry
+    } else {
+        PackageManager::Pip
+    };
+    let install_command = python_install_command(manager, &lockfiles, has_pyproject);
+    Some(DependencyRoot {
+        root: root.to_path_buf(),
+        ecosystem: DependencyEcosystem::Python,
+        manager,
+        lockfiles,
+        workspace_files: Vec::new(),
+        generated_paths: vec![
+            ".venv/".to_owned(),
+            "venv/".to_owned(),
+            "__pycache__/".to_owned(),
+        ],
+        install_command,
+    })
+}
+
+fn python_install_command(
+    manager: PackageManager,
+    lockfiles: &[String],
+    has_pyproject: bool,
+) -> Vec<String> {
+    match manager {
+        PackageManager::Uv => vec!["uv".to_owned(), "sync".to_owned()],
+        PackageManager::Poetry => vec!["poetry".to_owned(), "install".to_owned()],
+        _ => match (
+            lockfiles.iter().find(|file| is_requirements_file(file)),
+            has_pyproject,
+        ) {
+            (Some(requirements), _) => vec![
+                "python".to_owned(),
+                "-m".to_owned(),
+                "pip".to_owned(),
+                "install".to_owned(),
+                "-r".to_owned(),
+                requirements.clone(),
+            ],
+            (None, true) => vec![
+                "python".to_owned(),
+                "-m".to_owned(),
+                "pip".to_owned(),
+                "install".to_owned(),
+                "-e".to_owned(),
+                ".".to_owned(),
+            ],
+            (None, false) => vec![
+                "python".to_owned(),
+                "-m".to_owned(),
+                "pip".to_owned(),
+                "install".to_owned(),
+                ".".to_owned(),
+            ],
+        },
+    }
+}
+
+fn is_requirements_file(file: &str) -> bool {
+    file.starts_with("requirements")
+        && Path::new(file)
+            .extension()
+            .is_some_and(|extension| extension.eq_ignore_ascii_case("txt"))
+}
+
+fn existing_files(root: &Path, names: &[&str]) -> Vec<String> {
+    names
+        .iter()
+        .filter(|name| root.join(name).is_file())
+        .map(|name| (*name).to_owned())
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     #![allow(clippy::panic)]
     use super::*;
+    use std::fs;
+    use tempfile::TempDir;
 
     fn path(value: &str) -> WorkspacePath {
         WorkspacePath::parse(value).unwrap_or_else(|error| panic!("{error}"))
+    }
+
+    #[test]
+    fn detects_node_package_manager_and_workspace_files() -> Result<(), Box<dyn std::error::Error>>
+    {
+        let dir = TempDir::new()?;
+        fs::write(
+            dir.path().join("package.json"),
+            r#"{"packageManager":"pnpm@9.0.0","workspaces":["apps/*"]}"#,
+        )?;
+        fs::write(
+            dir.path().join("pnpm-workspace.yaml"),
+            "packages:\n  - apps/*\n",
+        )?;
+
+        let roots = detect_dependency_roots_at(dir.path())?;
+
+        assert_eq!(roots.len(), 1);
+        assert_eq!(roots[0].ecosystem, DependencyEcosystem::Node);
+        assert_eq!(roots[0].manager, PackageManager::Pnpm);
+        assert!(roots[0]
+            .workspace_files
+            .iter()
+            .any(|file| file == "pnpm-workspace.yaml"));
+        assert!(roots[0]
+            .workspace_files
+            .iter()
+            .any(|file| file == "package.json#workspaces"));
+        assert_eq!(roots[0].install_command, ["pnpm", "install"]);
+        Ok(())
+    }
+
+    #[test]
+    fn falls_back_to_node_lockfile_detection() -> Result<(), Box<dyn std::error::Error>> {
+        let dir = TempDir::new()?;
+        fs::write(dir.path().join("yarn.lock"), "")?;
+
+        let roots = detect_dependency_roots_at(dir.path())?;
+
+        assert_eq!(roots[0].manager, PackageManager::Yarn);
+        assert_eq!(roots[0].lockfiles, ["yarn.lock"]);
+        Ok(())
+    }
+
+    #[test]
+    fn pnpm_workspace_file_selects_pnpm_without_lockfile() -> Result<(), Box<dyn std::error::Error>>
+    {
+        let dir = TempDir::new()?;
+        fs::write(
+            dir.path().join("pnpm-workspace.yaml"),
+            "packages:\n  - apps/*\n",
+        )?;
+
+        let roots = detect_dependency_roots_at(dir.path())?;
+
+        assert_eq!(roots[0].manager, PackageManager::Pnpm);
+        assert_eq!(roots[0].install_command, ["pnpm", "install"]);
+        Ok(())
+    }
+
+    #[test]
+    fn python_install_command_uses_existing_requirements_file(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let dir = TempDir::new()?;
+        fs::write(dir.path().join("requirements-dev.txt"), "pytest\n")?;
+
+        let roots = detect_dependency_roots_at(dir.path())?;
+
+        assert_eq!(
+            roots[0].install_command,
+            [
+                "python",
+                "-m",
+                "pip",
+                "install",
+                "-r",
+                "requirements-dev.txt"
+            ]
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn detects_arbitrary_requirements_txt_python_root() -> Result<(), Box<dyn std::error::Error>> {
+        let dir = TempDir::new()?;
+        fs::write(dir.path().join("requirements-prod.txt"), "flask\n")?;
+
+        let roots = detect_dependency_roots_at(dir.path())?;
+
+        assert_eq!(roots[0].ecosystem, DependencyEcosystem::Python);
+        assert_eq!(
+            roots[0].install_command,
+            [
+                "python",
+                "-m",
+                "pip",
+                "install",
+                "-r",
+                "requirements-prod.txt"
+            ]
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn detects_go_work_only_root() -> Result<(), Box<dyn std::error::Error>> {
+        let dir = TempDir::new()?;
+        fs::write(dir.path().join("go.work"), "go 1.22\n")?;
+
+        let roots = detect_dependency_roots_at(dir.path())?;
+
+        assert_eq!(roots[0].ecosystem, DependencyEcosystem::Go);
+        assert_eq!(roots[0].workspace_files, ["go.work"]);
+        Ok(())
+    }
+
+    #[test]
+    fn python_pyproject_command_does_not_reference_missing_requirements(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let dir = TempDir::new()?;
+        fs::write(
+            dir.path().join("pyproject.toml"),
+            "[project]\nname = \"demo\"\n",
+        )?;
+
+        let roots = detect_dependency_roots_at(dir.path())?;
+
+        assert_eq!(
+            roots[0].install_command,
+            ["python", "-m", "pip", "install", "-e", "."]
+        );
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn discovery_does_not_follow_directory_symlinks() -> Result<(), Box<dyn std::error::Error>> {
+        let dir = TempDir::new()?;
+        let outside = TempDir::new()?;
+        fs::write(
+            outside.path().join("Cargo.toml"),
+            "[package]\nname = \"outside\"\n",
+        )?;
+        std::os::unix::fs::symlink(outside.path(), dir.path().join("linked"))?;
+
+        let roots = discover_dependency_roots(dir.path())?;
+
+        assert!(roots.is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn discovers_rust_python_and_go_roots() -> Result<(), Box<dyn std::error::Error>> {
+        let dir = TempDir::new()?;
+        let rust = dir.path().join("rust-app");
+        let python = dir.path().join("python-app");
+        let go = dir.path().join("go-app");
+        fs::create_dir_all(&rust)?;
+        fs::create_dir_all(&python)?;
+        fs::create_dir_all(&go)?;
+        fs::write(rust.join("Cargo.toml"), "[package]\nname = \"demo\"\n")?;
+        fs::write(
+            python.join("pyproject.toml"),
+            "[project]\nname = \"demo\"\n",
+        )?;
+        fs::write(python.join("uv.lock"), "")?;
+        fs::write(go.join("go.mod"), "module example.invalid/demo\n")?;
+
+        let roots = discover_dependency_roots(dir.path())?;
+
+        assert!(roots
+            .iter()
+            .any(|root| root.ecosystem == DependencyEcosystem::Rust
+                && root.manager == PackageManager::Cargo));
+        assert!(roots
+            .iter()
+            .any(|root| root.ecosystem == DependencyEcosystem::Python
+                && root.manager == PackageManager::Uv));
+        assert!(roots
+            .iter()
+            .any(|root| root.ecosystem == DependencyEcosystem::Go
+                && root.manager == PackageManager::Go));
+        Ok(())
     }
 
     #[test]
