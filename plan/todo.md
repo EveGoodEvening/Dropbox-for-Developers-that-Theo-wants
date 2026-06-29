@@ -538,11 +538,11 @@ MVP note:
 
 ### 8.1 Implement workspace key model
 
-- [ ] Add `WorkspaceContentKey` type.
-- [ ] Add `WorkspaceSecretKey` type.
-- [ ] Generate keys with CSPRNG.
+- [x] Add `WorkspaceContentKey` type.
+- [x] Add `WorkspaceSecretKey` type.
+- [x] Generate keys with CSPRNG.
 - [ ] Store keys locally through OS keychain abstraction.
-- [ ] For development, allow encrypted file fallback with explicit warning.
+- [x] For development, allow encrypted file fallback with explicit warning.
 
 Acceptance criteria:
 
@@ -550,12 +550,12 @@ Acceptance criteria:
 
 ### 8.2 Implement blob encryption
 
-- [ ] Choose high-level AEAD primitive.
-- [ ] Encrypt bytes before upload.
-- [ ] Decrypt bytes after download.
-- [ ] Include versioned encryption header.
-- [ ] Verify authenticated decryption failure on tampering.
-- [ ] Add tests for round trips and tamper detection.
+- [x] Choose high-level AEAD primitive.
+- [x] Encrypt bytes before upload.
+- [x] Decrypt bytes after download.
+- [x] Include versioned encryption header.
+- [x] Verify authenticated decryption failure on tampering.
+- [x] Add tests for round trips and tamper detection.
 
 Acceptance criteria:
 
@@ -563,14 +563,14 @@ Acceptance criteria:
 
 ### 8.3 Implement secret encryption
 
-- [ ] Encrypt env values with workspace secret key.
-- [ ] Include associated data:
-  - [ ] workspace ID
-  - [ ] env var ID
-  - [ ] env var name
-  - [ ] environment
-- [ ] Add decrypt tests.
-- [ ] Add wrong-key failure tests.
+- [x] Encrypt env values with workspace secret key.
+- [x] Include associated data:
+  - [x] workspace ID
+  - [x] env var ID
+  - [x] env var name
+  - [x] environment
+- [x] Add decrypt tests.
+- [x] Add wrong-key failure tests.
 
 Acceptance criteria:
 
