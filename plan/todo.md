@@ -474,7 +474,7 @@ Acceptance criteria:
 
 ### 7.1 Object store abstraction
 
-- [ ] Define trait:
+- [x] Define trait:
 
 ```rust
 trait BlobStore {
@@ -484,13 +484,13 @@ trait BlobStore {
 }
 ```
 
-- [ ] Implement local filesystem blob store for tests.
+- [x] Implement local filesystem blob store for tests.
 - [ ] Implement S3-compatible blob store.
 - [ ] Add MinIO or localstack test option.
 
 Acceptance criteria:
 
-- [ ] Backend can run entirely locally without cloud credentials.
+- [x] Backend can run entirely locally without cloud credentials.
 
 ### 7.2 Blob registration endpoints
 
@@ -506,15 +506,15 @@ Acceptance criteria:
 
 ### 7.3 Content addressing
 
-- [ ] Implement hash computation.
-- [ ] Decide initial `BlobId` format:
-  - [ ] `sha256:<ciphertext_hash>` preferred
-- [ ] Verify downloaded blob hash before use.
-- [ ] Add corrupt blob test.
+- [x] Implement hash computation.
+- [x] Decide initial `BlobId` format:
+  - [x] `sha256:<ciphertext_hash>` preferred
+- [x] Verify downloaded blob hash before use.
+- [x] Add corrupt blob test.
 
 Acceptance criteria:
 
-- [ ] Corrupt object-store bytes are rejected before being served to the user.
+- [x] Corrupt object-store bytes are rejected before being served to the user.
 
 ### 7.4 Chunking, optional after vertical slice
 
@@ -530,7 +530,7 @@ Acceptance criteria:
 
 MVP note:
 
-- [ ] Whole-file blobs are acceptable for the first vertical slice.
+- [x] Whole-file blobs are acceptable for the first vertical slice.
 
 ---
 

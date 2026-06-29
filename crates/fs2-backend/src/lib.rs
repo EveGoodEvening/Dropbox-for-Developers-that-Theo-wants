@@ -13,6 +13,7 @@ use axum::{
     Json, Router,
 };
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
+use bytes::Bytes;
 use fs2_core::{DeviceId, UserId};
 use hmac::{Hmac, Mac};
 use serde::{Deserialize, Serialize};
@@ -22,11 +23,13 @@ use std::{
     env, fmt,
     future::Future,
     net::{AddrParseError, SocketAddr},
-    path::PathBuf,
+    path::{Path as FsPath, PathBuf},
+    pin::Pin,
     str::FromStr,
     sync::Arc,
     time::{SystemTime, UNIX_EPOCH},
 };
+use tokio::io::AsyncWriteExt;
 use tokio::{net::TcpListener, sync::RwLock};
 use tracing::info;
 use tracing_subscriber::{fmt as tracing_fmt, EnvFilter};
@@ -162,6 +165,156 @@ impl fmt::Display for ConfigError {
 }
 
 impl std::error::Error for ConfigError {}
+
+pub type BlobStoreFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
+
+pub trait BlobStore: fmt::Debug + Send + Sync {
+    fn put<'a>(
+        &'a self,
+        key: &'a str,
+        bytes: Bytes,
+    ) -> BlobStoreFuture<'a, Result<(), BlobStoreError>>;
+
+    fn get<'a>(&'a self, key: &'a str) -> BlobStoreFuture<'a, Result<Bytes, BlobStoreError>>;
+
+    fn exists<'a>(&'a self, key: &'a str) -> BlobStoreFuture<'a, Result<bool, BlobStoreError>>;
+}
+
+#[derive(Debug)]
+pub enum BlobStoreError {
+    InvalidKey(String),
+    Io(std::io::Error),
+}
+
+impl fmt::Display for BlobStoreError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::InvalidKey(message) => formatter.write_str(message),
+            Self::Io(error) => write!(formatter, "blob store I/O error: {error}"),
+        }
+    }
+}
+
+impl std::error::Error for BlobStoreError {}
+
+impl From<std::io::Error> for BlobStoreError {
+    fn from(error: std::io::Error) -> Self {
+        Self::Io(error)
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct LocalFilesystemBlobStore {
+    root: PathBuf,
+}
+
+impl LocalFilesystemBlobStore {
+    #[must_use]
+    pub fn new(root: impl Into<PathBuf>) -> Self {
+        Self { root: root.into() }
+    }
+
+    fn path_for(&self, key: &str) -> Result<PathBuf, BlobStoreError> {
+        validate_blob_key(key)?;
+        Ok(self.root.join(key))
+    }
+}
+
+impl BlobStore for LocalFilesystemBlobStore {
+    fn put<'a>(
+        &'a self,
+        key: &'a str,
+        bytes: Bytes,
+    ) -> BlobStoreFuture<'a, Result<(), BlobStoreError>> {
+        Box::pin(async move {
+            let path = self.path_for(key)?;
+            if let Some(parent) = path.parent() {
+                tokio::fs::create_dir_all(parent).await?;
+            }
+            let temporary = create_temporary_blob(&path, bytes).await?;
+            tokio::fs::rename(temporary, path).await?;
+            Ok(())
+        })
+    }
+
+    fn get<'a>(&'a self, key: &'a str) -> BlobStoreFuture<'a, Result<Bytes, BlobStoreError>> {
+        Box::pin(async move { Ok(Bytes::from(tokio::fs::read(self.path_for(key)?).await?)) })
+    }
+
+    fn exists<'a>(&'a self, key: &'a str) -> BlobStoreFuture<'a, Result<bool, BlobStoreError>> {
+        Box::pin(async move {
+            match tokio::fs::metadata(self.path_for(key)?).await {
+                Ok(metadata) => Ok(metadata.is_file()),
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+                Err(error) => Err(BlobStoreError::Io(error)),
+            }
+        })
+    }
+}
+
+async fn create_temporary_blob(path: &FsPath, bytes: Bytes) -> Result<PathBuf, BlobStoreError> {
+    let parent = path.parent().unwrap_or_else(|| FsPath::new("."));
+    let name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or_else(|| {
+            BlobStoreError::InvalidKey("blob key must end in UTF-8 file name".to_owned())
+        })?;
+    let nonce = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_err(|error| BlobStoreError::InvalidKey(error.to_string()))?
+        .as_nanos();
+    for attempt in 0..16_u8 {
+        let temporary = parent.join(format!(
+            ".fs2-upload-{name}-{}-{nonce}-{attempt}",
+            std::process::id()
+        ));
+        match tokio::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&temporary)
+            .await
+        {
+            Ok(mut file) => {
+                file.write_all(&bytes).await?;
+                return Ok(temporary);
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
+            Err(error) => return Err(BlobStoreError::Io(error)),
+        }
+    }
+    Err(BlobStoreError::Io(std::io::Error::new(
+        std::io::ErrorKind::AlreadyExists,
+        "could not allocate temporary blob path",
+    )))
+}
+
+fn validate_blob_key(key: &str) -> Result<(), BlobStoreError> {
+    if key.is_empty() {
+        return Err(BlobStoreError::InvalidKey(
+            "blob key must not be empty".to_owned(),
+        ));
+    }
+    let path = FsPath::new(key);
+    if path.is_absolute() {
+        return Err(BlobStoreError::InvalidKey(
+            "blob key must be relative".to_owned(),
+        ));
+    }
+    if key.contains('\\') {
+        return Err(BlobStoreError::InvalidKey(
+            "blob key must use forward slashes".to_owned(),
+        ));
+    }
+    for segment in key.split('/') {
+        if segment.is_empty() || segment == "." || segment == ".." {
+            return Err(BlobStoreError::InvalidKey(
+                "blob key must not contain empty or traversal segments".to_owned(),
+            ));
+        }
+    }
+    Ok(())
+}
 
 #[derive(Debug, Clone)]
 pub struct AppState {
@@ -550,6 +703,7 @@ mod tests {
     use super::*;
     use axum::{body::Body, http::Request};
     use serde::de::DeserializeOwned;
+    use tempfile::TempDir;
     use tower::util::ServiceExt;
 
     #[test]
@@ -673,6 +827,44 @@ mod tests {
             )
             .await?;
         assert_eq!(rejected.status(), StatusCode::UNAUTHORIZED);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn local_blob_store_put_get_exists_and_rejects_traversal(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let dir = TempDir::new()?;
+        let store = LocalFilesystemBlobStore::new(dir.path());
+        let key = "sha256/ab/cdef";
+
+        assert!(!store.exists(key).await?);
+        store
+            .put(key, Bytes::from_static(b"encrypted bytes"))
+            .await?;
+
+        assert!(store.exists(key).await?);
+        assert_eq!(
+            store.get(key).await?,
+            Bytes::from_static(b"encrypted bytes")
+        );
+        store
+            .put("sha256/ab/cdef.tmp", Bytes::from_static(b"tmp blob"))
+            .await?;
+        store
+            .put("sha256/ab/cdef", Bytes::from_static(b"updated bytes"))
+            .await?;
+        assert_eq!(
+            store.get("sha256/ab/cdef.tmp").await?,
+            Bytes::from_static(b"tmp blob")
+        );
+        assert_eq!(
+            store.get("sha256/ab/cdef").await?,
+            Bytes::from_static(b"updated bytes")
+        );
+        assert!(store.put("../escape", Bytes::new()).await.is_err());
+        assert!(store.get("/absolute").await.is_err());
+        assert!(store.put("sha256/ab//cdef", Bytes::new()).await.is_err());
+        assert!(store.put("sha256/ab/./cdef", Bytes::new()).await.is_err());
         Ok(())
     }
 
