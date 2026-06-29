@@ -1,27 +1,11 @@
-# Dropbox for Developers that Theo wants
+# FS2 Devsync
 
-Idea from Theo (https://x.com/theo/status/2069621429189161350 / https://www.youtube.com/watch?v=wEAb0x3wTRc). Note that Theo has no endorsement on this project (yet).
+FS2 Devsync is an experimental developer-focused sync layer for making a `~/code` workspace available across macOS and Linux machines with metadata-first sync, lazy file hydration, encrypted environment-variable sync, Git-aware safety, and generated-directory rules for paths such as `node_modules` and `target`. It is not production-ready, Theo has not endorsed it, and it must not be trusted with irreplaceable private code or secrets until the safety checklist in `plan/todo.md` is complete.
 
-## Rationale - **Dropbox for Developers (Cross-Machine Code Sync)**
+## Current status
 
-### Pain Point
-Theo develops on multiple machines (Mac Mini × 2, GMK Tech Box Linux), and managing code synchronization is a nightmare:
+This repository is in early implementation. The design lives in `plan/design.md`; the executable checklist lives in `plan/todo.md`.
 
--  Forget to run `git pull` on one machine, and the worktree gets stale
--  Environment variables are set on one machine but not on another
--  Project directory structures are inconsistent across machines
--  Git submodule hell — nobody wants to deal with it
+## MVP boundaries
 
-**Dropbox doesn’t have these problems** — the structure is exactly the same on every machine, and everything syncs automatically.
-
-### Theo wants:
-
--  Code folders that sync automatically, like Dropbox
--  Environment variable synchronization
--  On-demand downloading: sync the structure first, and only fetch file contents when a specific file is accessed
--  `node_modules` and other platform-specific things need special handling
--  Something like Google Drive/Dropbox’s own equivalent of `.gitignore`
--  Theo has started a project called **FS2** (File System 2), but it’s nowhere near enough
-
-> “Building something like this doesn’t require your ability or knowledge. It requires your **token budget and patience**.”
-
+Read `docs/mvp.md` and `docs/non-goals.md` before adding features. The MVP is single-user, macOS/Linux only, FUSE-backed for desktop use, Postgres-backed for metadata, S3-compatible for blobs, SQLite-backed locally, encrypted for file blobs and env values, and Git-aware without blind `.git` directory sync.

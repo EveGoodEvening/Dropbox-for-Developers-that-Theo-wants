@@ -26,34 +26,34 @@
 
 ### 1.1 Confirm MVP boundaries
 
-- [ ] Create `docs/mvp.md` with the following MVP decisions:
-  - [ ] single-user account model
-  - [ ] macOS and Linux only
-  - [ ] FUSE mount required for desktop client
-  - [ ] materialized checkout mode allowed for tests/agents
-  - [ ] Postgres metadata backend
-  - [ ] S3-compatible blob store
-  - [ ] local SQLite cache
-  - [ ] encrypted file blobs preferred
-  - [ ] encrypted env var sync required
-  - [ ] `.git` internals excluded by default
-  - [ ] no team sharing in MVP
-  - [ ] no Windows support in MVP
-- [ ] Create `docs/non-goals.md` and explicitly list deferred work:
-  - [ ] Git replacement
-  - [ ] automatic code merge
-  - [ ] E2EE metadata
-  - [ ] artifact cache
-  - [ ] web dashboard
-  - [ ] editor integrations
+- [x] Create `docs/mvp.md` with the following MVP decisions:
+  - [x] single-user account model
+  - [x] macOS and Linux only
+  - [x] FUSE mount required for desktop client
+  - [x] materialized checkout mode allowed for tests/agents
+  - [x] Postgres metadata backend
+  - [x] S3-compatible blob store
+  - [x] local SQLite cache
+  - [x] encrypted file blobs preferred
+  - [x] encrypted env var sync required
+  - [x] `.git` internals excluded by default
+  - [x] no team sharing in MVP
+  - [x] no Windows support in MVP
+- [x] Create `docs/non-goals.md` and explicitly list deferred work:
+  - [x] Git replacement
+  - [x] automatic code merge
+  - [x] E2EE metadata
+  - [x] artifact cache
+  - [x] web dashboard
+  - [x] editor integrations
 
 Acceptance criteria:
 
-- [ ] A new contributor can read `docs/mvp.md` and know exactly what not to build.
+- [x] A new contributor can read `docs/mvp.md` and know exactly what not to build.
 
 ### 1.2 Initialize repository
 
-- [ ] Create Rust workspace:
+- [x] Create Rust workspace:
 
 ```text
 fs2-devsync/
@@ -78,29 +78,29 @@ fs2-devsync/
   scripts/
 ```
 
-- [ ] Add workspace lints:
-  - [ ] deny unsafe code by default, except FUSE/platform modules if unavoidable
-  - [ ] deny missing `Debug` where useful
-  - [ ] enable clippy in CI
-- [ ] Add `rustfmt.toml`.
-- [ ] Add `justfile` or `Makefile` with:
-  - [ ] `just test`
-  - [ ] `just clippy`
-  - [ ] `just fmt`
-  - [ ] `just dev-backend`
-  - [ ] `just dev-client`
-- [ ] Add GitHub Actions or equivalent CI:
-  - [ ] format check
-  - [ ] clippy
-  - [ ] unit tests
-  - [ ] integration tests without FUSE
-- [ ] Add `README.md` with one-paragraph project summary and warning that it is experimental.
-- [ ] Add `SECURITY.md` with initial secret-handling policy.
+- [x] Add workspace lints:
+  - [x] deny unsafe code by default, except FUSE/platform modules if unavoidable
+  - [x] deny missing `Debug` where useful
+  - [x] enable clippy in CI
+- [x] Add `rustfmt.toml`.
+- [x] Add `justfile` or `Makefile` with:
+  - [x] `just test`
+  - [x] `just clippy`
+  - [x] `just fmt`
+  - [x] `just dev-backend`
+  - [x] `just dev-client`
+- [x] Add GitHub Actions or equivalent CI:
+  - [x] format check
+  - [x] clippy
+  - [x] unit tests
+  - [x] integration tests without FUSE
+- [x] Add `README.md` with one-paragraph project summary and warning that it is experimental.
+- [x] Add `SECURITY.md` with initial secret-handling policy.
 
 Acceptance criteria:
 
-- [ ] `cargo test --workspace` runs with empty placeholder tests.
-- [ ] CI runs on PRs.
+- [x] `cargo test --workspace` runs with empty placeholder tests.
+- [x] CI runs on PRs.
 
 ---
 
