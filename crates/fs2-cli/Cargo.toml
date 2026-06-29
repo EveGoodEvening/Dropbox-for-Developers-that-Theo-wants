@@ -22,3 +22,4 @@ fs2-core = { path = "../fs2-core" }
 fs2-sync = { path = "../fs2-sync" }
 hostname = "0.4"
 base64 = "0.22"
+fs2-env = { path = "../fs2-env" }

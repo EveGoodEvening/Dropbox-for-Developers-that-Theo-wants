@@ -1444,14 +1444,14 @@ Acceptance criteria:
 ### 27.1 CLI output polish
 
 - [ ] Make errors actionable.
-- [ ] Add `--json` for automation.
-- [ ] Add progress bars for hydration/upload.
-- [ ] Add quiet mode.
-- [ ] Add verbose debug mode.
+- [x] Add `--json` for automation.
+- [x] Add progress bars for hydration/upload.
+- [x] Add quiet mode.
+- [x] Add verbose debug mode.
 
 Acceptance criteria:
 
-- [ ] CLI can be used by humans and scripts.
+- [x] CLI can be used by humans and scripts.
 
 ### 27.2 Installer packaging
 

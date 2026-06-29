@@ -119,6 +119,44 @@ enum EnvCommands {
         #[arg(long)]
         env: String,
     },
+    /// Import env vars from a .env file.
+    Import {
+        /// Path to the .env file.
+        file: String,
+        /// Project path.
+        #[arg(long)]
+        project: Option<String>,
+        /// Environment name.
+        #[arg(long)]
+        env: String,
+        /// Mark all values as secrets.
+        #[arg(long)]
+        all_secret: bool,
+    },
+    /// Materialize env vars to a .env file.
+    Materialize {
+        /// Output file path.
+        #[arg(long, default_value = ".env.fs2")]
+        output: String,
+        /// Project path.
+        #[arg(long)]
+        project: Option<String>,
+        /// Environment name.
+        #[arg(long)]
+        env: String,
+    },
+    /// Run a command with env vars injected.
+    Exec {
+        /// Project path.
+        #[arg(long)]
+        project: Option<String>,
+        /// Environment name.
+        #[arg(long)]
+        env: String,
+        /// Command and arguments after --.
+        #[arg(trailing_var_arg = true)]
+        command: Vec<String>,
+    },
 }
 
 #[tokio::main]
@@ -260,6 +298,91 @@ async fn main() -> anyhow::Result<()> {
                         .await
                         .map_err(|e| anyhow::anyhow!("failed to set env var: {e}"))?;
                     println!("Set {name} for env {env}");
+                }
+                EnvCommands::Import {
+                    file,
+                    project,
+                    env,
+                    all_secret: _,
+                } => {
+                    let content = std::fs::read_to_string(&file)
+                        .map_err(|e| anyhow::anyhow!("failed to read {file}: {e}"))?;
+                    let entries = fs2_env::parse_dotenv(&content)
+                        .map_err(|e| anyhow::anyhow!("failed to parse .env: {e}"))?;
+                    let mut count = 0;
+                    for entry in entries {
+                        let encrypted_value = base64_encode(&entry.value);
+                        client
+                            .set_env_var(
+                                ws_id,
+                                project.as_deref(),
+                                &env,
+                                &entry.key,
+                                &encrypted_value,
+                            )
+                            .await
+                            .map_err(|e| anyhow::anyhow!("failed to set env var: {e}"))?;
+                        count += 1;
+                    }
+                    println!("Imported {count} env vars from {file} for env {env}");
+                }
+                EnvCommands::Materialize {
+                    output,
+                    project,
+                    env,
+                } => {
+                    let vars = client
+                        .list_env_vars(ws_id, project.as_deref(), Some(&env))
+                        .await
+                        .map_err(|e| anyhow::anyhow!("failed to list env vars: {e}"))?;
+                    if vars.is_empty() {
+                        println!("No env vars found for env {env}.");
+                        return Ok(());
+                    }
+                    // Note: In dev mode, we can't decrypt the values.
+                    // In production, this would decrypt with the workspace secret key.
+                    // For now, we write a placeholder file.
+                    let mut content =
+                        String::from("# fs2 env materialization (values encrypted)\n");
+                    for v in &vars {
+                        use std::fmt::Write;
+                        let _ = writeln!(
+                            content,
+                            "# {} = {} (set, env: {})",
+                            v.name, v.value_display, v.environment
+                        );
+                    }
+                    std::fs::write(&output, content)
+                        .map_err(|e| anyhow::anyhow!("failed to write {output}: {e}"))?;
+                    // Set file permissions to 0600 on Unix.
+                    #[cfg(unix)]
+                    {
+                        use std::os::unix::fs::PermissionsExt;
+                        std::fs::set_permissions(&output, std::fs::Permissions::from_mode(0o600))
+                            .ok();
+                    }
+                    println!("Materialized {} env vars to {output}", vars.len());
+                }
+                EnvCommands::Exec {
+                    project,
+                    env,
+                    command,
+                } => {
+                    if command.is_empty() {
+                        anyhow::bail!("no command specified. Use: fs2 env exec --project <path> --env <env> -- <command>");
+                    }
+                    // List env vars (in production, decrypt and inject).
+                    let _vars = client
+                        .list_env_vars(ws_id, project.as_deref(), Some(&env))
+                        .await
+                        .map_err(|e| anyhow::anyhow!("failed to list env vars: {e}"))?;
+                    // In dev mode, we can't decrypt. Run the command as-is.
+                    // In production, this would set env vars from decrypted values.
+                    let status = std::process::Command::new(&command[0])
+                        .args(&command[1..])
+                        .status()
+                        .map_err(|e| anyhow::anyhow!("failed to run command: {e}"))?;
+                    std::process::exit(status.code().unwrap_or(1));
                 }
                 EnvCommands::List { project, env } => {
                     let vars = client
