@@ -532,8 +532,16 @@ fn validate_rule(rule: &FsRule) -> Result<(), ValidationError> {
 }
 
 fn validate_env_metadata(metadata: &EnvVarMetadata) -> Result<(), ValidationError> {
-    require_non_empty(&metadata.env_name, "metadata.env_name")?;
-    require_non_empty(&metadata.environment, "metadata.environment")?;
+    require(
+        is_valid_env_var_name(&metadata.env_name),
+        "metadata.env_name",
+        "must be shell-portable ASCII identifier",
+    )?;
+    require(
+        is_valid_environment_name(&metadata.environment),
+        "metadata.environment",
+        "must be lowercase ASCII environment name",
+    )?;
     match &metadata.scope {
         EnvScope::Workspace | EnvScope::Machine { .. } => {}
         EnvScope::Project { project_path } | EnvScope::ProjectMachine { project_path, .. } => {
@@ -545,6 +553,27 @@ fn validate_env_metadata(metadata: &EnvVarMetadata) -> Result<(), ValidationErro
         }
     }
     Ok(())
+}
+
+fn is_valid_env_var_name(value: &str) -> bool {
+    let mut chars = value.chars();
+    let Some(first) = chars.next() else {
+        return false;
+    };
+    (first == '_' || first.is_ascii_alphabetic())
+        && chars.all(|ch| ch == '_' || ch.is_ascii_alphanumeric())
+}
+
+fn is_valid_environment_name(value: &str) -> bool {
+    if value.is_empty() || value.len() > 64 {
+        return false;
+    }
+    let mut chars = value.chars();
+    let Some(first) = chars.next() else {
+        return false;
+    };
+    first.is_ascii_lowercase()
+        && chars.all(|ch| ch == '-' || ch == '_' || ch.is_ascii_lowercase() || ch.is_ascii_digit())
 }
 
 fn validate_node_name(name: &str, field: &'static str) -> Result<(), ValidationError> {
@@ -722,6 +751,7 @@ pub struct CliErrorMessage {
 
 #[cfg(test)]
 mod tests {
+    #![allow(clippy::too_many_lines)]
     use super::*;
     use proptest::prelude::*;
     use serde_json::json;
@@ -1112,6 +1142,44 @@ mod tests {
                     scope: EnvScope::Project {
                         project_path: "../x".to_owned(),
                     },
+                    secret_kind: SecretKind::Secret,
+                },
+            },
+            created_at: sample_time()?,
+        };
+        assert!(operation.validate_shape().is_err());
+
+        let operation = Operation {
+            op_id: OpId::from_uuid(uuid_from(24)),
+            workspace_id: WorkspaceId::from_uuid(uuid_from(2)),
+            device_id: DeviceId::from_uuid(uuid_from(3)),
+            base_cursor: Cursor::new(0)?,
+            kind: OperationKind::SetEnvVar {
+                env_var_id: EnvVarId::from_uuid(uuid_from(16)),
+                encrypted_payload: "encrypted-envelope".to_owned(),
+                metadata: EnvVarMetadata {
+                    env_name: "2BAD".to_owned(),
+                    environment: "dev".to_owned(),
+                    scope: EnvScope::Workspace,
+                    secret_kind: SecretKind::Secret,
+                },
+            },
+            created_at: sample_time()?,
+        };
+        assert!(operation.validate_shape().is_err());
+
+        let operation = Operation {
+            op_id: OpId::from_uuid(uuid_from(25)),
+            workspace_id: WorkspaceId::from_uuid(uuid_from(2)),
+            device_id: DeviceId::from_uuid(uuid_from(3)),
+            base_cursor: Cursor::new(0)?,
+            kind: OperationKind::SetEnvVar {
+                env_var_id: EnvVarId::from_uuid(uuid_from(16)),
+                encrypted_payload: "encrypted-envelope".to_owned(),
+                metadata: EnvVarMetadata {
+                    env_name: "STRIPE_SECRET_KEY".to_owned(),
+                    environment: "Dev".to_owned(),
+                    scope: EnvScope::Workspace,
                     secret_kind: SecretKind::Secret,
                 },
             },

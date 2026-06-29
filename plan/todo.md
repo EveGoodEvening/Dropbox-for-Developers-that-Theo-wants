@@ -998,18 +998,18 @@ Acceptance criteria:
 
 ### 17.1 Env data model
 
-- [ ] Implement `EnvVar` types in `fs2-core` or `fs2-env`.
-- [ ] Add environment name validation.
-- [ ] Add variable name validation.
-- [ ] Add scope model:
-  - [ ] workspace
-  - [ ] project
-  - [ ] machine
-  - [ ] project-machine
+- [x] Implement `EnvVar` types in `fs2-core` or `fs2-env`.
+- [x] Add environment name validation.
+- [x] Add variable name validation.
+- [x] Add scope model:
+  - [x] workspace
+  - [x] project
+  - [x] machine
+  - [x] project-machine
 
 Acceptance criteria:
 
-- [ ] Env var records have unambiguous precedence.
+- [x] Env var records have unambiguous precedence.
 
 ### 17.2 Backend env endpoints
 

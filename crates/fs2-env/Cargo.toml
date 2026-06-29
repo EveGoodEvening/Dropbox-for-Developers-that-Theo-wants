@@ -5,5 +5,12 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 
+[dependencies]
+fs2-core = { path = "../fs2-core" }
+serde = { version = "1", features = ["derive"] }
+
+[dev-dependencies]
+uuid = "1"
+
 [lints]
 workspace = true

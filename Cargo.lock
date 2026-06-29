@@ -282,6 +282,11 @@ version = "0.1.0"
 [[package]]
 name = "fs2-env"
 version = "0.1.0"
+dependencies = [
+ "fs2-core",
+ "serde",
+ "uuid",
+]
 
 [[package]]
 name = "fs2-fuse"
