@@ -1,5 +1,9 @@
 # Dropbox for Developers that Theo wants
 
+> **WARNING:** This project is experimental and not yet distributed. Do not use
+> it for production data. See `docs/mvp.md` for scope and `SECURITY.md` for the
+> security model.
+
 Idea from Theo (https://x.com/theo/status/2069621429189161350 / https://www.youtube.com/watch?v=wEAb0x3wTRc). Note that Theo has no endorsement on this project (yet).
 
 ## Rationale - **Dropbox for Developers (Cross-Machine Code Sync)**

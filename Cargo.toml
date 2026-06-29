@@ -1,0 +1,60 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/fs2-core",
+    "crates/fs2-cli",
+    "crates/fs2-daemon",
+    "crates/fs2-fuse",
+    "crates/fs2-sync",
+    "crates/fs2-rules",
+    "crates/fs2-env",
+    "crates/fs2-git",
+    "crates/fs2-crypto",
+    "crates/fs2-backend",
+    "crates/fs2-testkit",
+]
+
+[workspace.package]
+version = "0.0.1"
+edition = "2021"
+rust-version = "1.75"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/EveGoodEvening/Dropbox-for-Developers-that-Theo-wants"
+
+[workspace.lints.rust]
+unsafe_code = "deny"
+missing_docs = "warn"
+missing_debug_implementations = "deny"
+
+[workspace.lints.clippy]
+all = { level = "warn", priority = -1 }
+pedantic = { level = "warn", priority = -1 }
+dbg_macro = "warn"
+print_stdout = "warn"
+print_stderr = "warn"
+
+[workspace.dependencies]
+# Shared crate versions; pinned to avoid brand-new releases.
+serde = { version = "1.0.228", features = ["derive"] }
+serde_json = "1.0.140"
+toml = "0.8.19"
+uuid = { version = "1.16", features = ["v4", "serde"] }
+chrono = { version = "0.4.41", features = ["serde"] }
+thiserror = "2.0.12"
+anyhow = "1.0.98"
+tracing = "0.1.41"
+tracing-subscriber = { version = "0.3.19", features = ["env-filter"] }
+tokio = { version = "1.45", features = ["full"] }
+bytes = "1.10.1"
+hex = "0.4.3"
+sha2 = "0.10.9"
+proptest = "1.6.0"
+tempfile = "3.20.0"
+insta = { version = "1.43.1", features = ["json", "redactions"] }
+
+[profile.dev]
+debug = 1
+
+[profile.release]
+debug = 0
+lto = "thin"

@@ -1,0 +1,20 @@
+[package]
+name = "fs2-daemon"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Local daemon runtime, local RPC, sync loops."
+
+[dependencies]
+fs2-core = { path = "../fs2-core" }
+fs2-sync = { path = "../fs2-sync" }
+fs2-rules = { path = "../fs2-rules" }
+serde = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+
+[lints]
+workspace = true

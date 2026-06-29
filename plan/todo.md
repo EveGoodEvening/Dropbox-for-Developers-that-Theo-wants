@@ -9,16 +9,16 @@
 
 ## 0. Working rules for the coding agent
 
-- [ ] Treat `design.md` as the source of truth for architecture and semantics.
-- [ ] Prefer a working vertical slice over broad incomplete scaffolding.
-- [ ] Do not implement blind `.git` directory sync in MVP.
-- [ ] Do not log secrets, tokens, decrypted env values, or private keys.
-- [ ] Do not silently overwrite local dirty data.
-- [ ] Add tests with every feature; sync software without tests is unsafe.
-- [ ] Keep all protocol and data-model types in shared crates so backend and client cannot drift.
-- [ ] Every network mutation must be idempotent using stable IDs.
-- [ ] Every file-write path must preserve a local recoverable copy until the backend acknowledges it.
-- [ ] Keep user-facing commands boring and predictable.
+- [x] Treat `design.md` as the source of truth for architecture and semantics.
+- [x] Prefer a working vertical slice over broad incomplete scaffolding.
+- [x] Do not implement blind `.git` directory sync in MVP.
+- [x] Do not log secrets, tokens, decrypted env values, or private keys.
+- [x] Do not silently overwrite local dirty data.
+- [x] Add tests with every feature; sync software without tests is unsafe.
+- [x] Keep all protocol and data-model types in shared crates so backend and client cannot drift.
+- [x] Every network mutation must be idempotent using stable IDs.
+- [x] Every file-write path must preserve a local recoverable copy until the backend acknowledges it.
+- [x] Keep user-facing commands boring and predictable.
 
 ---
 
@@ -26,34 +26,34 @@
 
 ### 1.1 Confirm MVP boundaries
 
-- [ ] Create `docs/mvp.md` with the following MVP decisions:
-  - [ ] single-user account model
-  - [ ] macOS and Linux only
-  - [ ] FUSE mount required for desktop client
-  - [ ] materialized checkout mode allowed for tests/agents
-  - [ ] Postgres metadata backend
-  - [ ] S3-compatible blob store
-  - [ ] local SQLite cache
-  - [ ] encrypted file blobs preferred
-  - [ ] encrypted env var sync required
-  - [ ] `.git` internals excluded by default
-  - [ ] no team sharing in MVP
-  - [ ] no Windows support in MVP
-- [ ] Create `docs/non-goals.md` and explicitly list deferred work:
-  - [ ] Git replacement
-  - [ ] automatic code merge
-  - [ ] E2EE metadata
-  - [ ] artifact cache
-  - [ ] web dashboard
-  - [ ] editor integrations
+- [x] Create `docs/mvp.md` with the following MVP decisions:
+  - [x] single-user account model
+  - [x] macOS and Linux only
+  - [x] FUSE mount required for desktop client
+  - [x] materialized checkout mode allowed for tests/agents
+  - [x] Postgres metadata backend
+  - [x] S3-compatible blob store
+  - [x] local SQLite cache
+  - [x] encrypted file blobs preferred
+  - [x] encrypted env var sync required
+  - [x] `.git` internals excluded by default
+  - [x] no team sharing in MVP
+  - [x] no Windows support in MVP
+- [x] Create `docs/non-goals.md` and explicitly list deferred work:
+  - [x] Git replacement
+  - [x] automatic code merge
+  - [x] E2EE metadata
+  - [x] artifact cache
+  - [x] web dashboard
+  - [x] editor integrations
 
 Acceptance criteria:
 
-- [ ] A new contributor can read `docs/mvp.md` and know exactly what not to build.
+- [x] A new contributor can read `docs/mvp.md` and know exactly what not to build.
 
 ### 1.2 Initialize repository
 
-- [ ] Create Rust workspace:
+- [x] Create Rust workspace:
 
 ```text
 fs2-devsync/
@@ -78,28 +78,28 @@ fs2-devsync/
   scripts/
 ```
 
-- [ ] Add workspace lints:
-  - [ ] deny unsafe code by default, except FUSE/platform modules if unavoidable
-  - [ ] deny missing `Debug` where useful
-  - [ ] enable clippy in CI
-- [ ] Add `rustfmt.toml`.
-- [ ] Add `justfile` or `Makefile` with:
-  - [ ] `just test`
-  - [ ] `just clippy`
-  - [ ] `just fmt`
-  - [ ] `just dev-backend`
-  - [ ] `just dev-client`
-- [ ] Add GitHub Actions or equivalent CI:
-  - [ ] format check
-  - [ ] clippy
-  - [ ] unit tests
-  - [ ] integration tests without FUSE
-- [ ] Add `README.md` with one-paragraph project summary and warning that it is experimental.
-- [ ] Add `SECURITY.md` with initial secret-handling policy.
+- [x] Add workspace lints:
+  - [x] deny unsafe code by default, except FUSE/platform modules if unavoidable
+  - [x] deny missing `Debug` where useful
+  - [x] enable clippy in CI
+- [x] Add `rustfmt.toml`.
+- [x] Add `justfile` or `Makefile` with:
+  - [x] `just test`
+  - [x] `just clippy`
+  - [x] `just fmt`
+  - [x] `just dev-backend`
+  - [x] `just dev-client`
+- [x] Add GitHub Actions or equivalent CI:
+  - [x] format check
+  - [x] clippy
+  - [x] unit tests
+  - [x] integration tests without FUSE
+- [x] Add `README.md` with one-paragraph project summary and warning that it is experimental.
+- [x] Add `SECURITY.md` with initial secret-handling policy.
 
 Acceptance criteria:
 
-- [ ] `cargo test --workspace` runs with empty placeholder tests.
+- [x] `cargo test --workspace` runs with empty placeholder tests.
 - [ ] CI runs on PRs.
 
 ---
@@ -108,87 +108,87 @@ Acceptance criteria:
 
 ### 2.1 Implement IDs and shared types in `fs2-core`
 
-- [ ] Add typed wrappers:
-  - [ ] `UserId`
-  - [ ] `WorkspaceId`
-  - [ ] `DeviceId`
-  - [ ] `NodeId`
-  - [ ] `RevisionId`
-  - [ ] `OpId`
-  - [ ] `BlobId`
-  - [ ] `Cursor`
-- [ ] Implement serde serialization/deserialization.
-- [ ] Implement display/from-string parsing.
-- [ ] Add property tests for ID round trips.
+- [x] Add typed wrappers:
+  - [x] `UserId`
+  - [x] `WorkspaceId`
+  - [x] `DeviceId`
+  - [x] `NodeId`
+  - [x] `RevisionId`
+  - [x] `OpId`
+  - [x] `BlobId`
+  - [x] `Cursor`
+- [x] Implement serde serialization/deserialization.
+- [x] Implement display/from-string parsing.
+- [x] Add property tests for ID round trips.
 
 Acceptance criteria:
 
-- [ ] IDs do not appear as raw `Uuid` throughout the codebase except at boundaries.
+- [x] IDs do not appear as raw `Uuid` throughout the codebase except at boundaries.
 
 ### 2.2 Implement node and revision types
 
-- [ ] Add `NodeKind` enum:
-  - [ ] `Directory`
-  - [ ] `File`
-  - [ ] `Symlink`
-- [ ] Add `Node` struct.
-- [ ] Add `NodeRevision` struct.
-- [ ] Add `RevisionContent` enum.
-- [ ] Add portable file metadata fields:
-  - [ ] size
-  - [ ] mtime
-  - [ ] POSIX mode
-  - [ ] executable bit
-  - [ ] symlink target
-- [ ] Add serialization tests with JSON snapshots.
+- [x] Add `NodeKind` enum:
+  - [x] `Directory`
+  - [x] `File`
+  - [x] `Symlink`
+- [x] Add `Node` struct.
+- [x] Add `NodeRevision` struct.
+- [x] Add `RevisionContent` enum.
+- [x] Add portable file metadata fields:
+  - [x] size
+  - [x] mtime
+  - [x] POSIX mode
+  - [x] executable bit
+  - [x] symlink target
+- [x] Add serialization tests with JSON snapshots.
 
 Acceptance criteria:
 
-- [ ] A node tree can be serialized by backend and deserialized by client with identical values.
+- [x] A node tree can be serialized by backend and deserialized by client with identical values.
 
 ### 2.3 Implement operations
 
-- [ ] Add `Operation` struct.
-- [ ] Add `OperationKind` enum:
-  - [ ] `CreateNode`
-  - [ ] `PutFileRevision`
-  - [ ] `MoveNode`
-  - [ ] `DeleteNode`
-  - [ ] `RestoreNode`
-  - [ ] `SetRule`
-  - [ ] `SetEnvVar`
-  - [ ] `DeleteEnvVar`
-- [ ] Add idempotency field `op_id`.
-- [ ] Add `base_cursor` and base revision fields.
-- [ ] Add validation helpers for operation shape.
-- [ ] Add snapshot tests for each operation kind.
+- [x] Add `Operation` struct.
+- [x] Add `OperationKind` enum:
+  - [x] `CreateNode`
+  - [x] `PutFileRevision`
+  - [x] `MoveNode`
+  - [x] `DeleteNode`
+  - [x] `RestoreNode`
+  - [x] `SetRule`
+  - [x] `SetEnvVar`
+  - [x] `DeleteEnvVar`
+- [x] Add idempotency field `op_id`.
+- [x] Add `base_cursor` and base revision fields.
+- [x] Add validation helpers for operation shape.
+- [x] Add snapshot tests for each operation kind.
 
 Acceptance criteria:
 
-- [ ] Backend and client can share the same operation JSON contract.
+- [x] Backend and client can share the same operation JSON contract.
 
 ### 2.4 Implement error model
 
-- [ ] Define `Fs2Error` enum with stable codes:
-  - [ ] `Unauthorized`
-  - [ ] `DeviceRevoked`
-  - [ ] `WorkspaceNotFound`
-  - [ ] `NodeNotFound`
-  - [ ] `PathCollision`
-  - [ ] `RevisionConflict`
-  - [ ] `BlobMissing`
-  - [ ] `InvalidOperation`
-  - [ ] `QuotaExceeded`
-  - [ ] `RateLimited`
-  - [ ] `Offline`
-  - [ ] `NotHydrated`
-  - [ ] `SecretUnavailable`
-- [ ] Implement conversion to HTTP error response.
-- [ ] Implement conversion to CLI-friendly messages.
+- [x] Define `Fs2Error` enum with stable codes:
+  - [x] `Unauthorized`
+  - [x] `DeviceRevoked`
+  - [x] `WorkspaceNotFound`
+  - [x] `NodeNotFound`
+  - [x] `PathCollision`
+  - [x] `RevisionConflict`
+  - [x] `BlobMissing`
+  - [x] `InvalidOperation`
+  - [x] `QuotaExceeded`
+  - [x] `RateLimited`
+  - [x] `Offline`
+  - [x] `NotHydrated`
+  - [x] `SecretUnavailable`
+- [x] Implement conversion to HTTP error response.
+- [x] Implement conversion to CLI-friendly messages.
 
 Acceptance criteria:
 
-- [ ] Error responses are structured and machine-readable.
+- [x] Error responses are structured and machine-readable.
 
 ---
 
@@ -1483,8 +1483,8 @@ Acceptance criteria:
 
 A coding agent should implement in this order unless blocked:
 
-1. [ ] Rust workspace scaffolding.
-2. [ ] `fs2-core` IDs/types/operations.
+1. [x] Rust workspace scaffolding.
+2. [x] `fs2-core` IDs/types/operations.
 3. [ ] Backend migrations and workspace creation.
 4. [ ] Backend operation commit/fetch.
 5. [ ] Local SQLite store and operation replay.

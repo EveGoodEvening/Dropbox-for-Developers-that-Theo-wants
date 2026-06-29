@@ -1,0 +1,20 @@
+[package]
+name = "fs2-backend"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Axum backend service with metadata, blob, auth, and env APIs."
+
+[dependencies]
+fs2-core = { path = "../fs2-core" }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+
+[lints]
+workspace = true

@@ -1,0 +1,15 @@
+[package]
+name = "fs2-testkit"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Two-client simulations, fake backend, temp workspaces."
+
+[dependencies]
+fs2-core = { path = "../fs2-core" }
+tempfile = { workspace = true }
+
+[lints]
+workspace = true

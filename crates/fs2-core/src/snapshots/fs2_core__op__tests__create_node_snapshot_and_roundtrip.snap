@@ -1,0 +1,5 @@
+---
+source: crates/fs2-core/src/op.rs
+expression: json
+---
+"{\"op_id\":\"00000000-0000-0000-0000-000000000000\",\"workspace_id\":\"00000000-0000-0000-0000-000000000000\",\"device_id\":\"00000000-0000-0000-0000-000000000000\",\"base_cursor\":0,\"kind\":{\"type\":\"create_node\",\"parent_id\":\"00000000-0000-0000-0000-000000000000\",\"name\":\"app\",\"kind\":\"directory\",\"initial_revision\":null},\"created_at\":\"1970-01-01T00:00:00Z\"}"

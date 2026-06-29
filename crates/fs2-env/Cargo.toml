@@ -1,0 +1,17 @@
+[package]
+name = "fs2-env"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Dotenv parsing, secret store, env injection."
+
+[dependencies]
+fs2-core = { path = "../fs2-core" }
+fs2-crypto = { path = "../fs2-crypto" }
+serde = { workspace = true }
+thiserror = { workspace = true }
+
+[lints]
+workspace = true

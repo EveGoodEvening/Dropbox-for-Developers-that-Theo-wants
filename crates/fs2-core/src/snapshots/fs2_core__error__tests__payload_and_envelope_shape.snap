@@ -1,0 +1,5 @@
+---
+source: crates/fs2-core/src/error.rs
+expression: json
+---
+"{\"error\":{\"code\":\"revision_conflict\",\"message\":\"revision conflict: base rev stale\"}}"

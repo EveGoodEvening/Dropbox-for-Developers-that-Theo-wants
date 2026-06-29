@@ -1,0 +1,5 @@
+---
+source: crates/fs2-core/src/node.rs
+expression: json
+---
+"{\"node_id\":\"00000000-0000-0000-0000-000000000000\",\"workspace_id\":\"00000000-0000-0000-0000-000000000000\",\"parent_id\":null,\"name\":\"root\",\"kind\":\"directory\",\"current_rev\":\"00000000-0000-0000-0000-000000000000\",\"created_at\":\"1970-01-01T00:00:00Z\",\"updated_at\":\"1970-01-01T00:00:00Z\",\"deleted_at\":null,\"tombstone_version\":null}"

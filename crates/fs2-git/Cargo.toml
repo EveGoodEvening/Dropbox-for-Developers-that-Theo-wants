@@ -1,0 +1,16 @@
+[package]
+name = "fs2-git"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Git detection and materialization helpers."
+
+[dependencies]
+fs2-core = { path = "../fs2-core" }
+serde = { workspace = true }
+thiserror = { workspace = true }
+
+[lints]
+workspace = true

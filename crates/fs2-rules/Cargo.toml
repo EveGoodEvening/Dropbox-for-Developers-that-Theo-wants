@@ -1,0 +1,21 @@
+[package]
+name = "fs2-rules"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = ".fs2ignore and .fs2/config.toml rule engine."
+
+[dependencies]
+fs2-core = { path = "../fs2-core" }
+serde = { workspace = true }
+serde_json = { workspace = true }
+toml = { workspace = true }
+thiserror = { workspace = true }
+
+[dev-dependencies]
+insta = { workspace = true }
+
+[lints]
+workspace = true
