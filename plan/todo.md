@@ -310,37 +310,37 @@ Acceptance criteria:
 
 ### 5.1 Create `fs2-backend` service
 
-- [ ] Add Axum server.
-- [ ] Add config loader:
-  - [ ] bind address
-  - [ ] database URL
-  - [ ] object store config
-  - [ ] JWT/session secrets
-- [ ] Add health endpoint:
+- [x] Add Axum server.
+- [x] Add config loader:
+  - [x] bind address
+  - [x] database URL
+  - [x] object store config
+  - [x] JWT/session secrets
+- [x] Add health endpoint:
 
 ```http
 GET /healthz
 ```
 
-- [ ] Add structured logging.
-- [ ] Add graceful shutdown.
+- [x] Add structured logging.
+- [x] Add graceful shutdown.
 
 Acceptance criteria:
 
-- [ ] `just dev-backend` starts a backend and `GET /healthz` returns OK.
+- [x] `just dev-backend` starts a backend and `GET /healthz` returns OK.
 
 ### 5.2 Add Postgres migrations
 
-- [ ] Create users table.
-- [ ] Create devices table.
-- [ ] Create workspaces table.
-- [ ] Create nodes table.
-- [ ] Create node_revisions table.
-- [ ] Create operations table.
-- [ ] Create blobs table.
-- [ ] Create env_vars table.
-- [ ] Create key_envelopes table.
-- [ ] Add indexes from `design.md`.
+- [x] Create users table.
+- [x] Create devices table.
+- [x] Create workspaces table.
+- [x] Create nodes table.
+- [x] Create node_revisions table.
+- [x] Create operations table.
+- [x] Create blobs table.
+- [x] Create env_vars table.
+- [x] Create key_envelopes table.
+- [x] Add indexes from `design.md`.
 - [ ] Add migration test that runs migrations on an empty DB.
 
 Acceptance criteria:
@@ -349,27 +349,27 @@ Acceptance criteria:
 
 ### 5.3 Implement auth stub for local development
 
-- [ ] Add dev-only login endpoint that creates a test user.
-- [ ] Issue signed access token.
+- [x] Add dev-only login endpoint that creates a test user.
+- [x] Issue signed access token.
 - [ ] Add middleware that extracts user/device claims.
-- [ ] Mark dev auth clearly as non-production.
+- [x] Mark dev auth clearly as non-production.
 
 Acceptance criteria:
 
-- [ ] CLI can obtain a token from local backend in development.
+- [x] CLI can obtain a token from local backend in development.
 
 ### 5.4 Implement device enrollment
 
-- [ ] Add device registration endpoint.
-- [ ] Store device name, platform, public key.
-- [ ] Return `DeviceId`.
-- [ ] Add device list endpoint.
-- [ ] Add revoke endpoint.
-- [ ] Add tests for revoked devices being rejected.
+- [x] Add device registration endpoint.
+- [x] Store device name, platform, public key.
+- [x] Return `DeviceId`.
+- [x] Add device list endpoint.
+- [x] Add revoke endpoint.
+- [x] Add tests for revoked devices being rejected.
 
 Acceptance criteria:
 
-- [ ] A user can register two devices and list both.
+- [x] A user can register two devices and list both.
 
 ---
 
@@ -377,70 +377,70 @@ Acceptance criteria:
 
 ### 6.1 Workspace creation
 
-- [ ] Implement `POST /v1/workspaces`.
-- [ ] Create root node transactionally.
-- [ ] Create initial cursor.
-- [ ] Return workspace ID and root node ID.
-- [ ] Add tests.
+- [x] Implement `POST /v1/workspaces`.
+- [x] Create root node transactionally.
+- [x] Create initial cursor.
+- [x] Return workspace ID and root node ID.
+- [x] Add tests.
 
 Acceptance criteria:
 
-- [ ] New workspace always has exactly one live root directory node.
+- [x] New workspace always has exactly one live root directory node.
 
 ### 6.2 Operation commit transaction
 
-- [ ] Implement `POST /v1/workspaces/{id}/ops`.
-- [ ] Lock workspace row or use advisory lock.
+- [x] Implement `POST /v1/workspaces/{id}/ops`.
+- [x] Lock workspace row or use advisory lock.
 - [ ] Validate device belongs to workspace owner.
-- [ ] Check idempotency by `(workspace_id, op_id)`.
-- [ ] Increment cursor transactionally.
-- [ ] Apply operation to nodes/revisions/env/rules.
-- [ ] Insert operation row with assigned cursor.
-- [ ] Return committed operation and cursor.
+- [x] Check idempotency by `(workspace_id, op_id)`.
+- [x] Increment cursor transactionally.
+- [x] Apply operation to nodes/revisions/env/rules.
+- [x] Insert operation row with assigned cursor.
+- [x] Return committed operation and cursor.
 
 Acceptance criteria:
 
-- [ ] Duplicate operation submission returns the original committed cursor without applying twice.
+- [x] Duplicate operation submission returns the original committed cursor without applying twice.
 
 ### 6.3 Implement operation validators
 
-- [ ] `CreateNode`:
-  - [ ] parent exists
-  - [ ] parent is directory
+- [x] `CreateNode`:
+  - [x] parent exists
+  - [x] parent is directory
   - [ ] name valid
-  - [ ] no live sibling collision
-- [ ] `PutFileRevision`:
-  - [ ] node exists
-  - [ ] node is file
-  - [ ] base revision equals current revision, unless initial creation
+  - [x] no live sibling collision
+- [x] `PutFileRevision`:
+  - [x] node exists
+  - [x] node is file
+  - [x] base revision equals current revision, unless initial creation
   - [ ] blob exists or upload reservation exists
-- [ ] `MoveNode`:
-  - [ ] node exists
-  - [ ] new parent exists
-  - [ ] no cycle
-  - [ ] no path collision
-- [ ] `DeleteNode`:
-  - [ ] node exists
-  - [ ] recursive flag required for non-empty directory
-- [ ] `RestoreNode`:
-  - [ ] tombstoned node exists
-  - [ ] target parent exists
-  - [ ] no collision
+- [x] `MoveNode`:
+  - [x] node exists
+  - [x] new parent exists
+  - [x] no cycle
+  - [x] no path collision
+- [x] `DeleteNode`:
+  - [x] node exists
+  - [x] recursive flag required for non-empty directory
+- [x] `RestoreNode`:
+  - [x] tombstoned node exists
+  - [x] target parent exists
+  - [x] no collision
 
 Acceptance criteria:
 
-- [ ] Invalid operations fail with stable structured error codes.
+- [x] Invalid operations fail with stable structured error codes.
 
 ### 6.4 Implement operation fetch
 
-- [ ] Implement `GET /v1/workspaces/{id}/ops?since=&limit=`.
-- [ ] Return operations sorted by cursor.
-- [ ] Include `has_more` and `next_cursor`.
-- [ ] Add tests for pagination.
+- [x] Implement `GET /v1/workspaces/{id}/ops?since=&limit=`.
+- [x] Return operations sorted by cursor.
+- [x] Include `has_more` and `next_cursor`.
+- [x] Add tests for pagination.
 
 Acceptance criteria:
 
-- [ ] Client can reconstruct state by replaying all operations from cursor 0.
+- [x] Client can reconstruct state by replaying all operations from cursor 0.
 
 ### 6.5 Implement manifest fetch
 
@@ -536,9 +536,9 @@ MVP note:
 
 ### 8.1 Implement workspace key model
 
-- [ ] Add `WorkspaceContentKey` type.
-- [ ] Add `WorkspaceSecretKey` type.
-- [ ] Generate keys with CSPRNG.
+- [x] Add `WorkspaceContentKey` type.
+- [x] Add `WorkspaceSecretKey` type.
+- [x] Generate keys with CSPRNG.
 - [ ] Store keys locally through OS keychain abstraction.
 - [ ] For development, allow encrypted file fallback with explicit warning.
 
@@ -548,31 +548,31 @@ Acceptance criteria:
 
 ### 8.2 Implement blob encryption
 
-- [ ] Choose high-level AEAD primitive.
-- [ ] Encrypt bytes before upload.
-- [ ] Decrypt bytes after download.
-- [ ] Include versioned encryption header.
-- [ ] Verify authenticated decryption failure on tampering.
-- [ ] Add tests for round trips and tamper detection.
+- [x] Choose high-level AEAD primitive.
+- [x] Encrypt bytes before upload.
+- [x] Decrypt bytes after download.
+- [x] Include versioned encryption header.
+- [x] Verify authenticated decryption failure on tampering.
+- [x] Add tests for round trips and tamper detection.
 
 Acceptance criteria:
 
-- [ ] Object store never receives plaintext file content in normal mode.
+- [x] Object store never receives plaintext file content in normal mode.
 
 ### 8.3 Implement secret encryption
 
-- [ ] Encrypt env values with workspace secret key.
-- [ ] Include associated data:
-  - [ ] workspace ID
-  - [ ] env var ID
-  - [ ] env var name
-  - [ ] environment
-- [ ] Add decrypt tests.
-- [ ] Add wrong-key failure tests.
+- [x] Encrypt env values with workspace secret key.
+- [x] Include associated data:
+  - [x] workspace ID
+  - [x] env var ID
+  - [x] env var name
+  - [x] environment
+- [x] Add decrypt tests.
+- [x] Add wrong-key failure tests.
 
 Acceptance criteria:
 
-- [ ] Backend can store env records but cannot decrypt values.
+- [x] Backend can store env records but cannot decrypt values.
 
 ### 8.4 Redaction tests
 
@@ -591,52 +591,52 @@ Acceptance criteria:
 
 ### 9.1 SQLite migrations
 
-- [ ] Create local workspace table.
-- [ ] Create local nodes table.
-- [ ] Create local revisions table.
-- [ ] Create local state table.
-- [ ] Create pending ops table.
-- [ ] Create blob cache table.
-- [ ] Create rules table.
-- [ ] Create conflicts table.
-- [ ] Add indexes for path and parent lookup.
+- [x] Create local workspace table.
+- [x] Create local nodes table.
+- [x] Create local revisions table.
+- [x] Create local state table.
+- [x] Create pending ops table.
+- [x] Create blob cache table.
+- [x] Create rules table.
+- [x] Create conflicts table.
+- [x] Add indexes for path and parent lookup.
 
 Acceptance criteria:
 
-- [ ] A new daemon can initialize local state root and DB.
+- [x] A new daemon can initialize local state root and DB.
 
 ### 9.2 Implement local store API
 
-- [ ] `get_node_by_path`
-- [ ] `get_node_by_id`
-- [ ] `list_children`
-- [ ] `apply_operation`
-- [ ] `put_pending_op`
-- [ ] `list_pending_ops`
-- [ ] `mark_blob_cached`
-- [ ] `set_hydration_state`
+- [x] `get_node_by_path`
+- [x] `get_node_by_id`
+- [x] `list_children`
+- [x] `apply_operation`
+- [x] `put_pending_op`
+- [x] `list_pending_ops`
+- [x] `mark_blob_cached`
+- [x] `set_hydration_state`
 - [ ] `get_effective_rule`
-- [ ] Add transactional helpers.
+- [x] Add transactional helpers.
 
 Acceptance criteria:
 
-- [ ] All metadata mutations happen inside explicit transactions.
+- [x] All metadata mutations happen inside explicit transactions.
 
 ### 9.3 Implement operation replay locally
 
-- [ ] Apply `CreateNode`.
-- [ ] Apply `PutFileRevision`.
-- [ ] Apply `MoveNode`.
-- [ ] Apply `DeleteNode` with tombstones.
-- [ ] Apply `RestoreNode`.
-- [ ] Apply rule ops.
-- [ ] Apply env ops.
-- [ ] Update cursor only after successful apply.
-- [ ] Add replay-from-zero test.
+- [x] Apply `CreateNode`.
+- [x] Apply `PutFileRevision`.
+- [x] Apply `MoveNode`.
+- [x] Apply `DeleteNode` with tombstones.
+- [x] Apply `RestoreNode`.
+- [x] Apply rule ops.
+- [x] Apply env ops.
+- [x] Update cursor only after successful apply.
+- [x] Add replay-from-zero test.
 
 Acceptance criteria:
 
-- [ ] Local state reconstructed from backend ops matches backend manifest.
+- [x] Local state reconstructed from backend ops matches backend manifest.
 
 ---
 
@@ -1485,9 +1485,9 @@ A coding agent should implement in this order unless blocked:
 
 1. [x] Rust workspace scaffolding.
 2. [x] `fs2-core` IDs/types/operations.
-3. [ ] Backend migrations and workspace creation.
-4. [ ] Backend operation commit/fetch.
-5. [ ] Local SQLite store and operation replay.
+3. [x] Backend migrations and workspace creation.
+4. [x] Backend operation commit/fetch.
+5. [x] Local SQLite store and operation replay.
 6. [ ] Blob store abstraction with local filesystem backend.
 7. [ ] API client.
 8. [ ] Two-client materialized sync test.

@@ -9,7 +9,7 @@ pub mod node;
 pub mod op;
 pub mod path;
 
-pub use error::{Fs2Error, Fs2ErrorCode, Fs2Result};
+pub use error::{Fs2Error, Fs2ErrorCode, Fs2ErrorResponse, Fs2Result};
 pub use id::{BlobId, Cursor, DeviceId, NodeId, OpId, RevisionId, UserId, WorkspaceId};
 pub use node::{Node, NodeKind, NodeRevision, RevisionContent};
 pub use op::{Operation, OperationKind};
