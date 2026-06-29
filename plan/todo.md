@@ -9,16 +9,16 @@
 
 ## 0. Working rules for the coding agent
 
-- [ ] Treat `design.md` as the source of truth for architecture and semantics.
-- [ ] Prefer a working vertical slice over broad incomplete scaffolding.
-- [ ] Do not implement blind `.git` directory sync in MVP.
-- [ ] Do not log secrets, tokens, decrypted env values, or private keys.
-- [ ] Do not silently overwrite local dirty data.
-- [ ] Add tests with every feature; sync software without tests is unsafe.
-- [ ] Keep all protocol and data-model types in shared crates so backend and client cannot drift.
-- [ ] Every network mutation must be idempotent using stable IDs.
-- [ ] Every file-write path must preserve a local recoverable copy until the backend acknowledges it.
-- [ ] Keep user-facing commands boring and predictable.
+- [x] Treat `design.md` as the source of truth for architecture and semantics.
+- [x] Prefer a working vertical slice over broad incomplete scaffolding.
+- [x] Do not implement blind `.git` directory sync in MVP.
+- [x] Do not log secrets, tokens, decrypted env values, or private keys.
+- [x] Do not silently overwrite local dirty data.
+- [x] Add tests with every feature; sync software without tests is unsafe.
+- [x] Keep all protocol and data-model types in shared crates so backend and client cannot drift.
+- [x] Every network mutation must be idempotent using stable IDs.
+- [x] Every file-write path must preserve a local recoverable copy until the backend acknowledges it.
+- [x] Keep user-facing commands boring and predictable.
 
 ---
 
@@ -26,34 +26,34 @@
 
 ### 1.1 Confirm MVP boundaries
 
-- [ ] Create `docs/mvp.md` with the following MVP decisions:
-  - [ ] single-user account model
-  - [ ] macOS and Linux only
-  - [ ] FUSE mount required for desktop client
-  - [ ] materialized checkout mode allowed for tests/agents
-  - [ ] Postgres metadata backend
-  - [ ] S3-compatible blob store
-  - [ ] local SQLite cache
-  - [ ] encrypted file blobs preferred
-  - [ ] encrypted env var sync required
-  - [ ] `.git` internals excluded by default
-  - [ ] no team sharing in MVP
-  - [ ] no Windows support in MVP
-- [ ] Create `docs/non-goals.md` and explicitly list deferred work:
-  - [ ] Git replacement
-  - [ ] automatic code merge
-  - [ ] E2EE metadata
-  - [ ] artifact cache
-  - [ ] web dashboard
-  - [ ] editor integrations
+- [x] Create `docs/mvp.md` with the following MVP decisions:
+  - [x] single-user account model
+  - [x] macOS and Linux only
+  - [x] FUSE mount required for desktop client
+  - [x] materialized checkout mode allowed for tests/agents
+  - [x] Postgres metadata backend
+  - [x] S3-compatible blob store
+  - [x] local SQLite cache
+  - [x] encrypted file blobs preferred
+  - [x] encrypted env var sync required
+  - [x] `.git` internals excluded by default
+  - [x] no team sharing in MVP
+  - [x] no Windows support in MVP
+- [x] Create `docs/non-goals.md` and explicitly list deferred work:
+  - [x] Git replacement
+  - [x] automatic code merge
+  - [x] E2EE metadata
+  - [x] artifact cache
+  - [x] web dashboard
+  - [x] editor integrations
 
 Acceptance criteria:
 
-- [ ] A new contributor can read `docs/mvp.md` and know exactly what not to build.
+- [x] A new contributor can read `docs/mvp.md` and know exactly what not to build.
 
 ### 1.2 Initialize repository
 
-- [ ] Create Rust workspace:
+- [x] Create Rust workspace:
 
 ```text
 fs2-devsync/
@@ -78,29 +78,29 @@ fs2-devsync/
   scripts/
 ```
 
-- [ ] Add workspace lints:
-  - [ ] deny unsafe code by default, except FUSE/platform modules if unavoidable
-  - [ ] deny missing `Debug` where useful
-  - [ ] enable clippy in CI
-- [ ] Add `rustfmt.toml`.
-- [ ] Add `justfile` or `Makefile` with:
-  - [ ] `just test`
-  - [ ] `just clippy`
-  - [ ] `just fmt`
-  - [ ] `just dev-backend`
-  - [ ] `just dev-client`
-- [ ] Add GitHub Actions or equivalent CI:
-  - [ ] format check
-  - [ ] clippy
-  - [ ] unit tests
-  - [ ] integration tests without FUSE
-- [ ] Add `README.md` with one-paragraph project summary and warning that it is experimental.
-- [ ] Add `SECURITY.md` with initial secret-handling policy.
+- [x] Add workspace lints:
+  - [x] deny unsafe code by default, except FUSE/platform modules if unavoidable
+  - [x] deny missing `Debug` where useful
+  - [x] enable clippy in CI
+- [x] Add `rustfmt.toml`.
+- [x] Add `justfile` or `Makefile` with:
+  - [x] `just test`
+  - [x] `just clippy`
+  - [x] `just fmt`
+  - [x] `just dev-backend`
+  - [x] `just dev-client`
+- [x] Add GitHub Actions or equivalent CI:
+  - [x] format check
+  - [x] clippy
+  - [x] unit tests
+  - [x] integration tests without FUSE
+- [x] Add `README.md` with one-paragraph project summary and warning that it is experimental.
+- [x] Add `SECURITY.md` with initial secret-handling policy.
 
 Acceptance criteria:
 
-- [ ] `cargo test --workspace` runs with empty placeholder tests.
-- [ ] CI runs on PRs.
+- [x] `cargo test --workspace` runs with empty placeholder tests.
+- [x] CI runs on PRs.
 
 ---
 
@@ -108,87 +108,87 @@ Acceptance criteria:
 
 ### 2.1 Implement IDs and shared types in `fs2-core`
 
-- [ ] Add typed wrappers:
-  - [ ] `UserId`
-  - [ ] `WorkspaceId`
-  - [ ] `DeviceId`
-  - [ ] `NodeId`
-  - [ ] `RevisionId`
-  - [ ] `OpId`
-  - [ ] `BlobId`
-  - [ ] `Cursor`
-- [ ] Implement serde serialization/deserialization.
-- [ ] Implement display/from-string parsing.
-- [ ] Add property tests for ID round trips.
+- [x] Add typed wrappers:
+  - [x] `UserId`
+  - [x] `WorkspaceId`
+  - [x] `DeviceId`
+  - [x] `NodeId`
+  - [x] `RevisionId`
+  - [x] `OpId`
+  - [x] `BlobId`
+  - [x] `Cursor`
+- [x] Implement serde serialization/deserialization.
+- [x] Implement display/from-string parsing.
+- [x] Add property tests for ID round trips.
 
 Acceptance criteria:
 
-- [ ] IDs do not appear as raw `Uuid` throughout the codebase except at boundaries.
+- [x] IDs do not appear as raw `Uuid` throughout the codebase except at boundaries.
 
 ### 2.2 Implement node and revision types
 
-- [ ] Add `NodeKind` enum:
-  - [ ] `Directory`
-  - [ ] `File`
-  - [ ] `Symlink`
-- [ ] Add `Node` struct.
-- [ ] Add `NodeRevision` struct.
-- [ ] Add `RevisionContent` enum.
-- [ ] Add portable file metadata fields:
-  - [ ] size
-  - [ ] mtime
-  - [ ] POSIX mode
-  - [ ] executable bit
-  - [ ] symlink target
-- [ ] Add serialization tests with JSON snapshots.
+- [x] Add `NodeKind` enum:
+  - [x] `Directory`
+  - [x] `File`
+  - [x] `Symlink`
+- [x] Add `Node` struct.
+- [x] Add `NodeRevision` struct.
+- [x] Add `RevisionContent` enum.
+- [x] Add portable file metadata fields:
+  - [x] size
+  - [x] mtime
+  - [x] POSIX mode
+  - [x] executable bit
+  - [x] symlink target
+- [x] Add serialization tests with JSON snapshots.
 
 Acceptance criteria:
 
-- [ ] A node tree can be serialized by backend and deserialized by client with identical values.
+- [x] A node tree can be serialized by backend and deserialized by client with identical values.
 
 ### 2.3 Implement operations
 
-- [ ] Add `Operation` struct.
-- [ ] Add `OperationKind` enum:
-  - [ ] `CreateNode`
-  - [ ] `PutFileRevision`
-  - [ ] `MoveNode`
-  - [ ] `DeleteNode`
-  - [ ] `RestoreNode`
-  - [ ] `SetRule`
-  - [ ] `SetEnvVar`
-  - [ ] `DeleteEnvVar`
-- [ ] Add idempotency field `op_id`.
-- [ ] Add `base_cursor` and base revision fields.
-- [ ] Add validation helpers for operation shape.
-- [ ] Add snapshot tests for each operation kind.
+- [x] Add `Operation` struct.
+- [x] Add `OperationKind` enum:
+  - [x] `CreateNode`
+  - [x] `PutFileRevision`
+  - [x] `MoveNode`
+  - [x] `DeleteNode`
+  - [x] `RestoreNode`
+  - [x] `SetRule`
+  - [x] `SetEnvVar`
+  - [x] `DeleteEnvVar`
+- [x] Add idempotency field `op_id`.
+- [x] Add `base_cursor` and base revision fields.
+- [x] Add validation helpers for operation shape.
+- [x] Add snapshot tests for each operation kind.
 
 Acceptance criteria:
 
-- [ ] Backend and client can share the same operation JSON contract.
+- [x] Backend and client can share the same operation JSON contract.
 
 ### 2.4 Implement error model
 
-- [ ] Define `Fs2Error` enum with stable codes:
-  - [ ] `Unauthorized`
-  - [ ] `DeviceRevoked`
-  - [ ] `WorkspaceNotFound`
-  - [ ] `NodeNotFound`
-  - [ ] `PathCollision`
-  - [ ] `RevisionConflict`
-  - [ ] `BlobMissing`
-  - [ ] `InvalidOperation`
-  - [ ] `QuotaExceeded`
-  - [ ] `RateLimited`
-  - [ ] `Offline`
-  - [ ] `NotHydrated`
-  - [ ] `SecretUnavailable`
-- [ ] Implement conversion to HTTP error response.
-- [ ] Implement conversion to CLI-friendly messages.
+- [x] Define `Fs2Error` enum with stable codes:
+  - [x] `Unauthorized`
+  - [x] `DeviceRevoked`
+  - [x] `WorkspaceNotFound`
+  - [x] `NodeNotFound`
+  - [x] `PathCollision`
+  - [x] `RevisionConflict`
+  - [x] `BlobMissing`
+  - [x] `InvalidOperation`
+  - [x] `QuotaExceeded`
+  - [x] `RateLimited`
+  - [x] `Offline`
+  - [x] `NotHydrated`
+  - [x] `SecretUnavailable`
+- [x] Implement conversion to HTTP error response.
+- [x] Implement conversion to CLI-friendly messages.
 
 Acceptance criteria:
 
-- [ ] Error responses are structured and machine-readable.
+- [x] Error responses are structured and machine-readable.
 
 ---
 
@@ -196,33 +196,33 @@ Acceptance criteria:
 
 ### 3.1 Implement path utilities
 
-- [ ] Add workspace-relative path type.
-- [ ] Reject:
-  - [ ] absolute paths
-  - [ ] `..` traversal
-  - [ ] null bytes
-  - [ ] empty path segments except root
-- [ ] Normalize separators to `/` internally.
-- [ ] Preserve original filename display string.
-- [ ] Add tests for malicious paths.
+- [x] Add workspace-relative path type.
+- [x] Reject:
+  - [x] absolute paths
+  - [x] `..` traversal
+  - [x] null bytes
+  - [x] empty path segments except root
+- [x] Normalize separators to `/` internally.
+- [x] Preserve original filename display string.
+- [x] Add tests for malicious paths.
 
 Acceptance criteria:
 
-- [ ] No API accepts a path that can escape the workspace root.
+- [x] No API accepts a path that can escape the workspace root.
 
 ### 3.2 Implement portable collision key
 
-- [ ] Add Unicode normalization helper.
-- [ ] Add case-folding helper.
-- [ ] Compute `normalized_name` for portable workspaces.
-- [ ] Add tests:
-  - [ ] `Foo.ts` vs `foo.ts`
-  - [ ] Unicode composed vs decomposed names
-  - [ ] names valid on Linux but unsafe on macOS
+- [x] Add Unicode normalization helper.
+- [x] Add case-folding helper.
+- [x] Compute `normalized_name` for portable workspaces.
+- [x] Add tests:
+  - [x] `Foo.ts` vs `foo.ts`
+  - [x] Unicode composed vs decomposed names
+  - [x] names valid on Linux but unsafe on macOS
 
 Acceptance criteria:
 
-- [ ] Portable workspaces block known macOS/Linux collision hazards.
+- [x] Portable workspaces block known macOS/Linux collision hazards.
 
 ---
 
@@ -230,79 +230,79 @@ Acceptance criteria:
 
 ### 4.1 Implement `.fs2ignore` parser in `fs2-rules`
 
-- [ ] Support comments.
-- [ ] Support blank lines.
-- [ ] Support gitignore-style globs.
-- [ ] Support action prefixes:
-  - [ ] `:ignore`
-  - [ ] `:local-only`
-  - [ ] `:generated`
-  - [ ] `:lazy`
-  - [ ] `:pin`
-  - [ ] `:normal`
-  - [ ] `:secret`
-  - [ ] `:dependency-cache`
-- [ ] Make no-prefix default to `ignore`.
-- [ ] Implement last-match-wins behavior.
-- [ ] Add parser error reporting with line numbers.
+- [x] Support comments.
+- [x] Support blank lines.
+- [x] Support gitignore-style globs.
+- [x] Support action prefixes:
+  - [x] `:ignore`
+  - [x] `:local-only`
+  - [x] `:generated`
+  - [x] `:lazy`
+  - [x] `:pin`
+  - [x] `:normal`
+  - [x] `:secret`
+  - [x] `:dependency-cache`
+- [x] Make no-prefix default to `ignore`.
+- [x] Implement last-match-wins behavior.
+- [x] Add parser error reporting with line numbers.
 
 Acceptance criteria:
 
-- [ ] A `.fs2ignore` file can be parsed into deterministic ordered rules.
+- [x] A `.fs2ignore` file can be parsed into deterministic ordered rules.
 
 ### 4.2 Implement `.fs2/config.toml` parser
 
-- [ ] Define config schema.
-- [ ] Parse cache config.
-- [ ] Parse Git config.
-- [ ] Parse env config.
-- [ ] Parse structured rules.
-- [ ] Validate action names.
-- [ ] Validate cache size strings.
-- [ ] Add config snapshot tests.
+- [x] Define config schema.
+- [x] Parse cache config.
+- [x] Parse Git config.
+- [x] Parse env config.
+- [x] Parse structured rules.
+- [x] Validate action names.
+- [x] Validate cache size strings.
+- [x] Add config snapshot tests.
 
 Acceptance criteria:
 
-- [ ] Invalid config fails fast with useful CLI messages.
+- [x] Invalid config fails fast with useful CLI messages.
 
 ### 4.3 Implement rule precedence
 
-- [ ] Implement precedence order:
-  - [ ] explicit CLI override
-  - [ ] `.fs2/config.toml` most-specific rule
-  - [ ] `.fs2ignore` last match
-  - [ ] built-in profile
-  - [ ] workspace default
-- [ ] Add tests for precedence conflicts.
+- [x] Implement precedence order:
+  - [x] explicit CLI override
+  - [x] `.fs2/config.toml` most-specific rule
+  - [x] `.fs2ignore` last match
+  - [x] built-in profile
+  - [x] workspace default
+- [x] Add tests for precedence conflicts.
 
 Acceptance criteria:
 
-- [ ] Given a path, the rule engine returns exactly one effective action and explanation.
+- [x] Given a path, the rule engine returns exactly one effective action and explanation.
 
 ### 4.4 Built-in profiles
 
-- [ ] Add Node profile:
-  - [ ] `node_modules/` as `dependency-cache`
-  - [ ] `.next/` as `generated`
-  - [ ] `.nuxt/` as `generated`
-  - [ ] `.turbo/` as `generated`
-  - [ ] `coverage/` as `generated`
-  - [ ] lockfiles as `pin` or `normal`
-- [ ] Add Rust profile:
-  - [ ] `target/` as `generated`
-  - [ ] `Cargo.lock` as `normal` or `pin`
-- [ ] Add Python profile:
-  - [ ] `.venv/` as `generated`
-  - [ ] `venv/` as `generated`
-  - [ ] `__pycache__/` as `generated`
-  - [ ] lockfiles as `normal` or `pin`
-- [ ] Add Go profile:
-  - [ ] `go.sum` as `normal` or `pin`
-- [ ] Do not globally mark `dist/` generated without a prompt or project-specific rule.
+- [x] Add Node profile:
+  - [x] `node_modules/` as `dependency-cache`
+  - [x] `.next/` as `generated`
+  - [x] `.nuxt/` as `generated`
+  - [x] `.turbo/` as `generated`
+  - [x] `coverage/` as `generated`
+  - [x] lockfiles as `pin` or `normal`
+- [x] Add Rust profile:
+  - [x] `target/` as `generated`
+  - [x] `Cargo.lock` as `normal` or `pin`
+- [x] Add Python profile:
+  - [x] `.venv/` as `generated`
+  - [x] `venv/` as `generated`
+  - [x] `__pycache__/` as `generated`
+  - [x] lockfiles as `normal` or `pin`
+- [x] Add Go profile:
+  - [x] `go.sum` as `normal` or `pin`
+- [x] Do not globally mark `dist/` generated without a prompt or project-specific rule.
 
 Acceptance criteria:
 
-- [ ] Creating `node_modules` does not enqueue sync operations under default Node profile.
+- [x] Creating `node_modules` does not enqueue sync operations under default Node profile.
 
 ---
 
@@ -1483,8 +1483,8 @@ Acceptance criteria:
 
 A coding agent should implement in this order unless blocked:
 
-1. [ ] Rust workspace scaffolding.
-2. [ ] `fs2-core` IDs/types/operations.
+1. [x] Rust workspace scaffolding.
+2. [x] `fs2-core` IDs/types/operations.
 3. [ ] Backend migrations and workspace creation.
 4. [ ] Backend operation commit/fetch.
 5. [ ] Local SQLite store and operation replay.
@@ -1495,7 +1495,7 @@ A coding agent should implement in this order unless blocked:
 10. [ ] FUSE read-only mount showing metadata.
 11. [ ] Lazy hydration on read.
 12. [ ] FUSE file creation/write/upload.
-13. [ ] Rule engine default suppressing `node_modules`.
+13. [x] Rule engine default suppressing `node_modules`.
 14. [ ] Conflict detection/preservation.
 15. [ ] Offline queue/replay.
 16. [ ] Env secret sync.

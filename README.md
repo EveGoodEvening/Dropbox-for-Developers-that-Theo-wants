@@ -1,27 +1,23 @@
-# Dropbox for Developers that Theo wants
+# fs2-devsync — Dropbox for Developers
 
-Idea from Theo (https://x.com/theo/status/2069621429189161350 / https://www.youtube.com/watch?v=wEAb0x3wTRc). Note that Theo has no endorsement on this project (yet).
+**Experimental.** A developer-focused sync layer that makes a `~/code` directory behave like Dropbox across machines while respecting the realities of software projects: Git repositories, secrets, generated directories, platform-specific dependency folders, large workspaces, and offline edits.
 
-## Rationale - **Dropbox for Developers (Cross-Machine Code Sync)**
+> Idea from [Theo](https://x.com/theo/status/2069621429189161350). Theo has no endorsement on this project.
 
-### Pain Point
-Theo develops on multiple machines (Mac Mini × 2, GMK Tech Box Linux), and managing code synchronization is a nightmare:
+## Warning
 
--  Forget to run `git pull` on one machine, and the worktree gets stale
--  Environment variables are set on one machine but not on another
--  Project directory structures are inconsistent across machines
--  Git submodule hell — nobody wants to deal with it
+This is an experimental project. Do not use it with sensitive production data. See [SECURITY.md](SECURITY.md) and [docs/mvp.md](docs/mvp.md).
 
-**Dropbox doesn’t have these problems** — the structure is exactly the same on every machine, and everything syncs automatically.
+## What it does
 
-### Theo wants:
+- Same project tree everywhere, synced metadata-first.
+- On-demand file hydration: read a file and its bytes download on first access.
+- Developer-specific ignore semantics via `.fs2ignore` and `.fs2/config.toml`.
+- Environment variable sync with client-side encryption.
+- Special handling for generated/platform-specific directories (`node_modules`, `target`, `.venv`, ...).
+- Safe conflict handling with explicit conflict artifacts and tombstoned deletes.
+- Git-aware: syncs the working tree, never `.git` internals.
 
--  Code folders that sync automatically, like Dropbox
--  Environment variable synchronization
--  On-demand downloading: sync the structure first, and only fetch file contents when a specific file is accessed
--  `node_modules` and other platform-specific things need special handling
--  Something like Google Drive/Dropbox’s own equivalent of `.gitignore`
--  Theo has started a project called **FS2** (File System 2), but it’s nowhere near enough
+## Status
 
-> “Building something like this doesn’t require your ability or knowledge. It requires your **token budget and patience**.”
-
+Early implementation. See `plan/design.md` for the detailed design and `plan/todo.md` for the implementation tracker.

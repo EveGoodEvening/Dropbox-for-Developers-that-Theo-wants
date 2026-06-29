@@ -1,0 +1,21 @@
+[package]
+name = "fs2-sync"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "Sync engine: API client, outbound/inbound loops, operation replay."
+
+[lints]
+workspace = true
+
+[dependencies]
+tokio = { version = "1", features = ["full"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+reqwest = { version = "0.12", features = ["json", "rustls-tls"], default-features = false }
+anyhow = "1"
+tracing = "0.1"
+fs2-core = { path = "../fs2-core" }

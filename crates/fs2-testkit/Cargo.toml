@@ -1,0 +1,21 @@
+[package]
+name = "fs2-testkit"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "Test harness: fake/local backend, two-client materialized sync."
+
+[lints]
+workspace = true
+
+[dependencies]
+tokio = { version = "1", features = ["full"] }
+serde_json = "1"
+anyhow = "1"
+tempfile = "3"
+fs2-core = { path = "../fs2-core" }
+fs2-sync = { path = "../fs2-sync" }
+fs2-backend = { path = "../fs2-backend" }

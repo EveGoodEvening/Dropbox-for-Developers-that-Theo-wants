@@ -1,0 +1,19 @@
+[package]
+name = "fs2-cli"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "User-facing CLI."
+
+[lints]
+workspace = true
+
+[dependencies]
+clap = { version = "4", features = ["derive"] }
+tokio = { version = "1", features = ["full"] }
+serde_json = "1"
+anyhow = "1"
+fs2-core = { path = "../fs2-core" }

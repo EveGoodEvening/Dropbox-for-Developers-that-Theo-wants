@@ -1,0 +1,19 @@
+[package]
+name = "fs2-crypto"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "Crypto primitives: blob encryption, secret encryption, key model."
+
+[lints]
+workspace = true
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+anyhow = "1"
+rand = "0.8"
+ring = "0.17"
+base64 = "0.22"

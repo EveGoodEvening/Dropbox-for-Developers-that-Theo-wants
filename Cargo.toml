@@ -1,0 +1,43 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/fs2-core",
+    "crates/fs2-cli",
+    "crates/fs2-daemon",
+    "crates/fs2-fuse",
+    "crates/fs2-sync",
+    "crates/fs2-rules",
+    "crates/fs2-env",
+    "crates/fs2-git",
+    "crates/fs2-crypto",
+    "crates/fs2-backend",
+    "crates/fs2-testkit",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.75"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/EveGoodEvening/Dropbox-for-Developers-that-Theo-wants"
+authors = ["FS2 contributors"]
+
+[workspace.lints.rust]
+unsafe_code = "deny"
+missing_docs = "warn"
+
+[workspace.lints.clippy]
+all = { level = "warn", priority = -1 }
+pedantic = { level = "warn", priority = -1 }
+# Allow common ergonomic patterns.
+needless_pass_by_value = "allow"
+must_use_candidate = "allow"
+missing_errors_doc = "allow"
+missing_panics_doc = "allow"
+module_name_repetitions = "allow"
+similar_names = "allow"
+too_many_lines = "allow"
+cast_possible_truncation = "allow"
+cast_precision_loss = "allow"
+cast_sign_loss = "allow"
+cast_possible_wrap = "allow"
