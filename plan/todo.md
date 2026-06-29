@@ -230,79 +230,79 @@ Acceptance criteria:
 
 ### 4.1 Implement `.fs2ignore` parser in `fs2-rules`
 
-- [ ] Support comments.
-- [ ] Support blank lines.
-- [ ] Support gitignore-style globs.
-- [ ] Support action prefixes:
-  - [ ] `:ignore`
-  - [ ] `:local-only`
-  - [ ] `:generated`
-  - [ ] `:lazy`
-  - [ ] `:pin`
-  - [ ] `:normal`
-  - [ ] `:secret`
-  - [ ] `:dependency-cache`
-- [ ] Make no-prefix default to `ignore`.
-- [ ] Implement last-match-wins behavior.
-- [ ] Add parser error reporting with line numbers.
+- [x] Support comments.
+- [x] Support blank lines.
+- [x] Support gitignore-style globs.
+- [x] Support action prefixes:
+  - [x] `:ignore`
+  - [x] `:local-only`
+  - [x] `:generated`
+  - [x] `:lazy`
+  - [x] `:pin`
+  - [x] `:normal`
+  - [x] `:secret`
+  - [x] `:dependency-cache`
+- [x] Make no-prefix default to `ignore`.
+- [x] Implement last-match-wins behavior.
+- [x] Add parser error reporting with line numbers.
 
 Acceptance criteria:
 
-- [ ] A `.fs2ignore` file can be parsed into deterministic ordered rules.
+- [x] A `.fs2ignore` file can be parsed into deterministic ordered rules.
 
 ### 4.2 Implement `.fs2/config.toml` parser
 
-- [ ] Define config schema.
-- [ ] Parse cache config.
-- [ ] Parse Git config.
-- [ ] Parse env config.
-- [ ] Parse structured rules.
-- [ ] Validate action names.
-- [ ] Validate cache size strings.
-- [ ] Add config snapshot tests.
+- [x] Define config schema.
+- [x] Parse cache config.
+- [x] Parse Git config.
+- [x] Parse env config.
+- [x] Parse structured rules.
+- [x] Validate action names.
+- [x] Validate cache size strings.
+- [x] Add config snapshot tests.
 
 Acceptance criteria:
 
-- [ ] Invalid config fails fast with useful CLI messages.
+- [x] Invalid config fails fast with useful CLI messages.
 
 ### 4.3 Implement rule precedence
 
-- [ ] Implement precedence order:
-  - [ ] explicit CLI override
-  - [ ] `.fs2/config.toml` most-specific rule
-  - [ ] `.fs2ignore` last match
-  - [ ] built-in profile
-  - [ ] workspace default
-- [ ] Add tests for precedence conflicts.
+- [x] Implement precedence order:
+  - [x] explicit CLI override
+  - [x] `.fs2/config.toml` most-specific rule
+  - [x] `.fs2ignore` last match
+  - [x] built-in profile
+  - [x] workspace default
+- [x] Add tests for precedence conflicts.
 
 Acceptance criteria:
 
-- [ ] Given a path, the rule engine returns exactly one effective action and explanation.
+- [x] Given a path, the rule engine returns exactly one effective action and explanation.
 
 ### 4.4 Built-in profiles
 
-- [ ] Add Node profile:
-  - [ ] `node_modules/` as `dependency-cache`
-  - [ ] `.next/` as `generated`
-  - [ ] `.nuxt/` as `generated`
-  - [ ] `.turbo/` as `generated`
-  - [ ] `coverage/` as `generated`
-  - [ ] lockfiles as `pin` or `normal`
-- [ ] Add Rust profile:
-  - [ ] `target/` as `generated`
-  - [ ] `Cargo.lock` as `normal` or `pin`
-- [ ] Add Python profile:
-  - [ ] `.venv/` as `generated`
-  - [ ] `venv/` as `generated`
-  - [ ] `__pycache__/` as `generated`
-  - [ ] lockfiles as `normal` or `pin`
-- [ ] Add Go profile:
-  - [ ] `go.sum` as `normal` or `pin`
-- [ ] Do not globally mark `dist/` generated without a prompt or project-specific rule.
+- [x] Add Node profile:
+  - [x] `node_modules/` as `dependency-cache`
+  - [x] `.next/` as `generated`
+  - [x] `.nuxt/` as `generated`
+  - [x] `.turbo/` as `generated`
+  - [x] `coverage/` as `generated`
+  - [x] lockfiles as `pin` or `normal`
+- [x] Add Rust profile:
+  - [x] `target/` as `generated`
+  - [x] `Cargo.lock` as `normal` or `pin`
+- [x] Add Python profile:
+  - [x] `.venv/` as `generated`
+  - [x] `venv/` as `generated`
+  - [x] `__pycache__/` as `generated`
+  - [x] lockfiles as `normal` or `pin`
+- [x] Add Go profile:
+  - [x] `go.sum` as `normal` or `pin`
+- [x] Do not globally mark `dist/` generated without a prompt or project-specific rule.
 
 Acceptance criteria:
 
-- [ ] Creating `node_modules` does not enqueue sync operations under default Node profile.
+- [x] Creating `node_modules` does not enqueue sync operations under default Node profile.
 
 ---
 
