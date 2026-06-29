@@ -391,7 +391,7 @@ Acceptance criteria:
 
 - [x] Implement `POST /v1/workspaces/{id}/ops`.
 - [x] Lock workspace row or use advisory lock.
-- [ ] Validate device belongs to workspace owner.
+- [x] Validate device belongs to workspace owner.
 - [x] Check idempotency by `(workspace_id, op_id)`.
 - [x] Increment cursor transactionally.
 - [x] Apply operation to nodes/revisions/env/rules.
@@ -407,7 +407,7 @@ Acceptance criteria:
 - [x] `CreateNode`:
   - [x] parent exists
   - [x] parent is directory
-  - [ ] name valid
+  - [x] name valid
   - [x] no live sibling collision
 - [x] `PutFileRevision`:
   - [x] node exists
@@ -644,46 +644,46 @@ Acceptance criteria:
 
 ### 10.1 Implement config and login commands
 
-- [ ] `fs2 login --backend <url>`.
-- [ ] Store backend URL.
-- [ ] Store access/refresh token in keychain.
-- [ ] Register device during login.
-- [ ] `fs2 logout` clears local tokens.
-- [ ] `fs2 device list` calls backend.
+- [x] `fs2 login --backend <url>`.
+- [x] Store backend URL.
+- [x] Store access/refresh token in keychain.
+- [x] Register device during login.
+- [x] `fs2 logout` clears local tokens.
+- [x] `fs2 device list` calls backend.
 
 Acceptance criteria:
 
-- [ ] Developer can login against local backend and see current device.
+- [x] Developer can login against local backend and see current device.
 
 ### 10.2 Workspace commands
 
-- [ ] `fs2 workspace create <name>`.
-- [ ] `fs2 workspace list`.
-- [ ] `fs2 workspace init <path> --name <name>`.
-- [ ] `fs2 mount <workspace> <path>` placeholder command.
-- [ ] Write local workspace config.
+- [x] `fs2 workspace create <name>`.
+- [x] `fs2 workspace list`.
+- [x] `fs2 workspace init <path> --name <name>`.
+- [x] `fs2 mount <workspace> <path>` placeholder command.
+- [x] Write local workspace config.
 
 Acceptance criteria:
 
-- [ ] Workspace can be created from CLI and local metadata DB initialized.
+- [x] Workspace can be created from CLI and local metadata DB initialized.
 
 ### 10.3 Status command
 
-- [ ] Implement `fs2 status` with JSON and text output.
-- [ ] Show:
-  - [ ] connection state
-  - [ ] cursor lag
-  - [ ] pending uploads
-  - [ ] pending downloads
-  - [ ] cache size
-  - [ ] conflicts
-  - [ ] env summary
-  - [ ] Git warnings
-- [ ] Add golden output tests.
+- [x] Implement `fs2 status` with JSON and text output.
+- [x] Show:
+  - [x] connection state
+  - [x] cursor lag
+  - [x] pending uploads
+  - [x] pending downloads
+  - [x] cache size
+  - [x] conflicts
+  - [x] env summary
+  - [x] Git warnings
+- [x] Add golden output tests.
 
 Acceptance criteria:
 
-- [ ] `fs2 status --json` is stable enough for tests and editor integrations.
+- [x] `fs2 status --json` is stable enough for tests and editor integrations.
 
 ---
 
@@ -1491,7 +1491,7 @@ A coding agent should implement in this order unless blocked:
 6. [x] Blob store abstraction with local filesystem backend.
 7. [x] API client.
 8. [ ] Two-client materialized sync test.
-9. [ ] Basic CLI login/workspace/status.
+9. [x] Basic CLI login/workspace/status.
 10. [ ] FUSE read-only mount showing metadata.
 11. [ ] Lazy hydration on read.
 12. [ ] FUSE file creation/write/upload.

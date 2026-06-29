@@ -301,6 +301,27 @@ impl MemoryStore {
             )));
         }
 
+        // Validate device belongs to workspace owner.
+        let ws = inner.workspaces.get(&ws_id).unwrap();
+        let device = inner.devices.get(&op.device_id);
+        if let Some(d) = device {
+            if d.revoked {
+                return Err(BackendError::Domain(fs2_core::Fs2Error::new(
+                    fs2_core::Fs2ErrorCode::DeviceRevoked,
+                    "device has been revoked",
+                )));
+            }
+            if d.user_id != ws.user_id {
+                return Err(BackendError::Domain(fs2_core::Fs2Error::new(
+                    fs2_core::Fs2ErrorCode::Unauthorized,
+                    "device does not belong to workspace owner",
+                )));
+            }
+        }
+
+        // Validate operation shape (names non-empty, file revisions target files).
+        fs2_core::op::validate_shape(&op.kind)?;
+
         // Idempotency check.
         let op_id_uuid = op.op_id.as_uuid();
         if let Some(&cursor) = inner.op_index.get(&(ws_id, op_id_uuid)) {

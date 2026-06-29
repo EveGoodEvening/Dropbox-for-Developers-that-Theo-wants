@@ -74,6 +74,17 @@ pub struct FetchOpsResponse {
     pub next_cursor: i64,
 }
 
+/// Response from device list.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DeviceResponse {
+    /// Device id.
+    pub id: uuid::Uuid,
+    /// Device name.
+    pub name: String,
+    /// Whether revoked.
+    pub revoked: bool,
+}
+
 /// Error response from the backend.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ErrorResponse {
@@ -184,6 +195,21 @@ impl ApiClient {
         let resp = self
             .client
             .get(self.url("/v1/workspaces"))
+            .headers(self.build_headers())
+            .query(&[("user_id", user_id.to_string())])
+            .send()
+            .await?;
+        Self::parse_response(resp).await
+    }
+
+    /// List devices for a user.
+    ///
+    /// # Errors
+    /// Returns an error if the request fails.
+    pub async fn list_devices(&self, user_id: uuid::Uuid) -> Result<Vec<DeviceResponse>> {
+        let resp = self
+            .client
+            .get(self.url("/v1/devices"))
             .headers(self.build_headers())
             .query(&[("user_id", user_id.to_string())])
             .send()
