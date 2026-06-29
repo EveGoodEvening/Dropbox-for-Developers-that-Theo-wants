@@ -18,7 +18,7 @@ use chrono::Utc;
 use fs2_core::{
     names_collide, CasePolicy, Cursor, DeviceId, EnvVarId, EnvVarMetadata, FsRule, Node, NodeId,
     NodeKind, NodeName, NodeRevision, OpId, Operation, OperationKind, RevisionContent, RevisionId,
-    UserId, WorkspaceId,
+    UserId, WorkspaceId, WorkspacePath,
 };
 use fs2_core::{ErrorEnvelope, Fs2Error};
 use hmac::{Hmac, Mac};
@@ -484,6 +484,34 @@ pub struct FetchOpsQuery {
     pub limit: Option<u32>,
 }
 
+#[derive(Debug, Deserialize)]
+pub struct ManifestQuery {
+    #[serde(default)]
+    pub path: Option<String>,
+    #[serde(default)]
+    pub depth: Option<u32>,
+    #[serde(default)]
+    pub limit: Option<u32>,
+    #[serde(default)]
+    pub offset: Option<usize>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ManifestEntry {
+    pub path: String,
+    pub depth: u32,
+    pub node: Node,
+    pub current_revision: Option<NodeRevision>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct ManifestResponse {
+    pub workspace_id: WorkspaceId,
+    pub nodes: Vec<ManifestEntry>,
+    pub has_more: bool,
+    pub next_offset: Option<usize>,
+}
+
 #[derive(Debug, Serialize, Deserialize)]
 pub struct FetchOpsResponse {
     pub workspace_id: WorkspaceId,
@@ -658,6 +686,7 @@ pub fn app_with_state(state: AppState) -> Router {
             "/v1/workspaces/:workspace_id/ops",
             get(fetch_operations).post(commit_operation),
         )
+        .route("/v1/workspaces/:workspace_id/manifest", get(fetch_manifest))
         .route("/v1/blobs/dev-upload", post(dev_blob_upload))
         .route("/v1/blobs/dev-download", post(dev_blob_download))
         .route("/v1/blobs/:blob_id/status", get(blob_status))
@@ -1003,8 +1032,125 @@ async fn fetch_operations(
     }))
 }
 
+async fn fetch_manifest(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(workspace_id): Path<WorkspaceId>,
+    Query(query): Query<ManifestQuery>,
+) -> Result<Json<ManifestResponse>, ApiError> {
+    let auth = authenticate(&headers, &state).await?;
+    let requested_path = WorkspacePath::parse(query.path.as_deref().unwrap_or_default())
+        .map_err(|_| ApiError::structured(Fs2Error::InvalidOperation))?;
+    let requested_depth = query.depth.unwrap_or(DEFAULT_MANIFEST_DEPTH);
+    let depth = requested_depth.min(MAX_MANIFEST_DEPTH);
+    let limit = query
+        .limit
+        .unwrap_or(DEFAULT_MANIFEST_PAGE_LIMIT)
+        .clamp(1, MAX_MANIFEST_PAGE_LIMIT) as usize;
+    let offset = query.offset.unwrap_or(0);
+
+    let workspaces = state.workspaces.read().await;
+    let workspace = workspaces
+        .get(&workspace_id)
+        .ok_or_else(|| ApiError::structured(Fs2Error::WorkspaceNotFound))?;
+    if workspace.user_id != auth.user_id {
+        return Err(ApiError::Unauthorized("device does not own this workspace"));
+    }
+    let root_node_id = resolve_workspace_path(workspace, &requested_path)?;
+    let mut entries = Vec::new();
+    collect_manifest_entries(
+        workspace,
+        root_node_id,
+        requested_path.as_str(),
+        0,
+        depth,
+        &mut entries,
+    )?;
+    drop(workspaces);
+
+    let has_more = entries.len().saturating_sub(offset) > limit;
+    let next_offset = has_more.then_some(offset + limit);
+    let nodes = entries.into_iter().skip(offset).take(limit).collect();
+
+    Ok(Json(ManifestResponse {
+        workspace_id,
+        nodes,
+        has_more,
+        next_offset,
+    }))
+}
+
 const DEFAULT_OPS_PAGE_LIMIT: u32 = 100;
 const MAX_OPS_PAGE_LIMIT: u32 = 1000;
+const DEFAULT_MANIFEST_DEPTH: u32 = 1;
+const MAX_MANIFEST_DEPTH: u32 = 32;
+const DEFAULT_MANIFEST_PAGE_LIMIT: u32 = 100;
+const MAX_MANIFEST_PAGE_LIMIT: u32 = 1000;
+fn resolve_workspace_path(
+    workspace: &WorkspaceRecord,
+    path: &WorkspacePath,
+) -> Result<NodeId, ApiError> {
+    let mut current = workspace.root_node_id;
+    for segment in path.segments() {
+        current = workspace
+            .nodes
+            .values()
+            .find(|node| {
+                node.parent_id == Some(current) && node.deleted_at.is_none() && node.name == segment
+            })
+            .map(|node| node.node_id)
+            .ok_or_else(|| ApiError::structured(Fs2Error::NodeNotFound))?;
+    }
+    Ok(current)
+}
+
+fn collect_manifest_entries(
+    workspace: &WorkspaceRecord,
+    node_id: NodeId,
+    path: &str,
+    current_depth: u32,
+    max_depth: u32,
+    entries: &mut Vec<ManifestEntry>,
+) -> Result<(), ApiError> {
+    let node = live_node(workspace, node_id)?.clone();
+    let current_revision = node
+        .current_rev
+        .and_then(|revision_id| workspace.revisions.get(&revision_id).cloned());
+    entries.push(ManifestEntry {
+        path: path.to_owned(),
+        depth: current_depth,
+        node,
+        current_revision,
+    });
+
+    if current_depth >= max_depth {
+        return Ok(());
+    }
+
+    let mut children = workspace
+        .nodes
+        .values()
+        .filter(|child| child.parent_id == Some(node_id) && child.deleted_at.is_none())
+        .collect::<Vec<_>>();
+    children.sort_by(|left, right| left.name.cmp(&right.name));
+
+    for child in children {
+        let child_path = if path.is_empty() {
+            child.name.clone()
+        } else {
+            format!("{path}/{}", child.name)
+        };
+        collect_manifest_entries(
+            workspace,
+            child.node_id,
+            &child_path,
+            current_depth + 1,
+            max_depth,
+            entries,
+        )?;
+    }
+    Ok(())
+}
 
 /// Converts a shared `ErrorEnvelope` from shape validation into a structured `ApiError`.
 fn shape_error_into_api_error(envelope: ErrorEnvelope) -> ApiError {
@@ -2528,6 +2674,144 @@ mod tests {
             .ok_or("created workspace missing")?;
         assert!(stored.env_vars.is_empty());
         drop(workspaces);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn manifest_fetch_returns_metadata_depth_and_pages_without_bytes(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let dir = TempDir::new()?;
+        let state = AppState::dev_with_blob_root(
+            RedactedSecret::new(DEFAULT_DEV_SECRET.to_owned())?,
+            dir.path(),
+        );
+        let app = app_with_state(state);
+        let login = post_json::<DevLoginResponse>(
+            app.clone(),
+            "/v1/auth/dev-login",
+            serde_json::json!({
+                "device_name": "manifest-laptop",
+                "platform": {"os": "linux"},
+                "public_key": "manifest-key"
+            }),
+            None,
+        )
+        .await?;
+        let workspace = post_json::<CreateWorkspaceResponse>(
+            app.clone(),
+            "/v1/workspaces",
+            serde_json::json!({"name": "manifest-ws"}),
+            Some(&login.access_token),
+        )
+        .await?;
+        let ops_uri = format!("/v1/workspaces/{}/ops", workspace.workspace_id);
+        let docs_id = NodeId::new_v4();
+        let src_id = NodeId::new_v4();
+        for (node_id, name) in [(docs_id, "docs"), (src_id, "src")] {
+            post_json::<CommitOperationResponse>(
+                app.clone(),
+                &ops_uri,
+                serde_json::json!({
+                    "op_id": OpId::new_v4(),
+                    "base_cursor": 0,
+                    "kind": {
+                        "type": "create_node",
+                        "node_id": node_id,
+                        "parent_id": workspace.root_node_id,
+                        "name": name,
+                        "kind": "directory",
+                        "initial_revision": null
+                    }
+                }),
+                Some(&login.access_token),
+            )
+            .await?;
+        }
+
+        let file_bytes = b"manifest bytes stay in blob store";
+        let blob_id = format!("sha256:{}", hex_lower(&Sha256::digest(file_bytes)));
+        post_json::<DevBlobUploadResponse>(
+            app.clone(),
+            "/v1/blobs/dev-upload",
+            serde_json::json!({
+                "blob_id": blob_id,
+                "bytes_base64": URL_SAFE_NO_PAD.encode(file_bytes),
+                "size": file_bytes.len(),
+                "encryption_header": "manifest-header"
+            }),
+            Some(&login.access_token),
+        )
+        .await?;
+        let file_node_id = NodeId::new_v4();
+        let initial_revision = file_revision(
+            workspace.workspace_id,
+            login.device_id,
+            file_node_id,
+            &blob_id,
+        )?;
+        post_json::<CommitOperationResponse>(
+            app.clone(),
+            &ops_uri,
+            serde_json::json!({
+                "op_id": OpId::new_v4(),
+                "base_cursor": 2,
+                "kind": {
+                    "type": "create_node",
+                    "node_id": file_node_id,
+                    "parent_id": docs_id,
+                    "name": "readme.md",
+                    "kind": "file",
+                    "initial_revision": initial_revision
+                }
+            }),
+            Some(&login.access_token),
+        )
+        .await?;
+
+        let manifest_uri = format!("/v1/workspaces/{}/manifest", workspace.workspace_id);
+        let root_only: ManifestResponse = get_json(
+            app.clone(),
+            &format!("{manifest_uri}?path=&depth=0"),
+            Some(&login.access_token),
+        )
+        .await?;
+        assert_eq!(root_only.nodes.len(), 1);
+        assert_eq!(root_only.nodes[0].path, "");
+
+        let first_page: ManifestResponse = get_json(
+            app.clone(),
+            &format!("{manifest_uri}?path=&depth=1&limit=2"),
+            Some(&login.access_token),
+        )
+        .await?;
+        assert_eq!(first_page.nodes.len(), 2);
+        assert!(first_page.has_more);
+        assert_eq!(first_page.next_offset, Some(2));
+        let second_page: ManifestResponse = get_json(
+            app.clone(),
+            &format!("{manifest_uri}?path=&depth=1&limit=2&offset=2"),
+            Some(&login.access_token),
+        )
+        .await?;
+        assert_eq!(second_page.nodes.len(), 1);
+        assert!(!second_page.has_more);
+
+        let docs_manifest: ManifestResponse = get_json(
+            app.clone(),
+            &format!("{manifest_uri}?path=docs&depth=1"),
+            Some(&login.access_token),
+        )
+        .await?;
+        assert_eq!(docs_manifest.nodes.len(), 2);
+        let file_entry = docs_manifest
+            .nodes
+            .iter()
+            .find(|entry| entry.path == "docs/readme.md")
+            .ok_or("manifest file entry missing")?;
+        assert!(file_entry.current_revision.is_some());
+        let raw = serde_json::to_string(&docs_manifest)?;
+        assert!(!raw.contains("bytes_base64"));
+        assert!(!raw.contains(&URL_SAFE_NO_PAD.encode(file_bytes)));
         Ok(())
     }
 

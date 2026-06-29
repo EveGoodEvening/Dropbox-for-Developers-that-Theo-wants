@@ -446,14 +446,14 @@ Acceptance criteria:
 
 ### 6.5 Implement manifest fetch
 
-- [ ] Implement `GET /v1/workspaces/{id}/manifest?path=&depth=`.
-- [ ] Return subtree metadata without file bytes.
-- [ ] Support depth 0, 1, and recursive bounded depth.
-- [ ] Add pagination for large directories.
+- [x] Implement `GET /v1/workspaces/{id}/manifest?path=&depth=`.
+- [x] Return subtree metadata without file bytes.
+- [x] Support depth 0, 1, and recursive bounded depth.
+- [x] Add pagination for large directories.
 
 Acceptance criteria:
 
-- [ ] Cold client can fetch workspace tree metadata without downloading content.
+- [x] Cold client can fetch workspace tree metadata without downloading content.
 
 ### 6.6 Implement WebSocket events
 
