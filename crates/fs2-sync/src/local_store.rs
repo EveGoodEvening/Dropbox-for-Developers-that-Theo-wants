@@ -306,6 +306,80 @@ impl LocalStore {
             .ok();
         Ok(result)
     }
+
+    /// Set the pinned flag for a node.
+    pub fn set_pinned(&self, node_id: NodeId, pinned: bool) -> LocalStoreResult<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "UPDATE local_state SET pinned = ?1 WHERE node_id = ?2",
+            rusqlite::params![i32::from(pinned), node_id.to_string()],
+        )?;
+        Ok(())
+    }
+
+    /// Get the total cache size (sum of `blob_cache.size`).
+    pub fn get_cache_size(&self) -> LocalStoreResult<u64> {
+        let conn = self.conn.lock().unwrap();
+        let size: i64 = conn
+            .query_row("SELECT COALESCE(SUM(size), 0) FROM blob_cache", [], |row| {
+                row.get(0)
+            })
+            .unwrap_or(0);
+        Ok(u64::try_from(size).unwrap_or(0))
+    }
+
+    /// Prune the cache to fit within `max_bytes` using LRU eviction.
+    ///
+    /// Never evicts:
+    /// - dirty local files (`hydration_state` = `DirtyLocal`)
+    /// - uploading files (`hydration_state` = `Uploading`)
+    /// - conflict files (`hydration_state` = `Conflict`)
+    /// - pinned files (pinned = 1)
+    ///
+    /// Returns the number of bytes evicted.
+    pub fn prune_cache(&self, max_bytes: u64) -> LocalStoreResult<u64> {
+        let conn = self.conn.lock().unwrap();
+        // Select evictable blobs ordered by last_accessed_at (oldest first).
+        let mut stmt = conn.prepare(
+            "SELECT bc.blob_id, bc.path, bc.size \
+             FROM blob_cache bc \
+             LEFT JOIN local_state ls ON ls.local_blob_path = bc.path \
+             WHERE (ls.hydration_state IS NULL \
+                    OR ls.hydration_state NOT IN ('DirtyLocal', 'Uploading', 'Conflict')) \
+             AND COALESCE(ls.pinned, 0) = 0 \
+             ORDER BY bc.last_accessed_at ASC",
+        )?;
+        let evictable: Vec<(String, String, i64)> = stmt
+            .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))?
+            .filter_map(std::result::Result::ok)
+            .collect();
+        let current_size: i64 = conn
+            .query_row("SELECT COALESCE(SUM(size), 0) FROM blob_cache", [], |row| {
+                row.get(0)
+            })
+            .unwrap_or(0);
+        let current_size = u64::try_from(current_size).unwrap_or(0);
+        if current_size <= max_bytes {
+            return Ok(0);
+        }
+        let mut to_evict = current_size.saturating_sub(max_bytes);
+        let mut evicted: u64 = 0;
+        for (blob_id, path, size) in evictable {
+            if to_evict == 0 {
+                break;
+            }
+            // Delete the blob file.
+            let _ = std::fs::remove_file(&path);
+            // Remove from blob_cache.
+            conn.execute(
+                "DELETE FROM blob_cache WHERE blob_id = ?1",
+                rusqlite::params![blob_id],
+            )?;
+            evicted += u64::try_from(size).unwrap_or(0);
+            to_evict = to_evict.saturating_sub(u64::try_from(size).unwrap_or(0));
+        }
+        Ok(evicted)
+    }
 }
 
 /// A local node record.
@@ -913,5 +987,45 @@ mod tests {
         let children = store.list_children(ws_id, Some(root_node_id)).unwrap();
         assert_eq!(children.len(), 2);
         assert_eq!(store.get_cursor(ws_id).unwrap(), Cursor::from(2));
+    }
+
+    #[test]
+    fn cache_size_accounting() {
+        let (store, _ws_id, _root_id) = setup_store();
+        store
+            .mark_blob_cached("sha256:abc", "/tmp/blob1", 1024)
+            .unwrap();
+        store
+            .mark_blob_cached("sha256:def", "/tmp/blob2", 2048)
+            .unwrap();
+        assert_eq!(store.get_cache_size().unwrap(), 3072);
+    }
+
+    #[test]
+    fn prune_cache_evicts_oldest() {
+        let (store, _ws_id, _root_id) = setup_store();
+        // Add two blobs.
+        store
+            .mark_blob_cached("sha256:old", "/tmp/old_blob", 1024)
+            .unwrap();
+        store
+            .mark_blob_cached("sha256:new", "/tmp/new_blob", 1024)
+            .unwrap();
+        assert_eq!(store.get_cache_size().unwrap(), 2048);
+        // Prune to 1024 bytes — should evict one blob.
+        let evicted = store.prune_cache(1024).unwrap();
+        assert!(evicted >= 1024);
+        assert_eq!(store.get_cache_size().unwrap(), 1024);
+    }
+
+    #[test]
+    fn prune_cache_no_op_when_under_limit() {
+        let (store, _ws_id, _root_id) = setup_store();
+        store
+            .mark_blob_cached("sha256:abc", "/tmp/blob", 100)
+            .unwrap();
+        let evicted = store.prune_cache(1000).unwrap();
+        assert_eq!(evicted, 0);
+        assert_eq!(store.get_cache_size().unwrap(), 100);
     }
 }

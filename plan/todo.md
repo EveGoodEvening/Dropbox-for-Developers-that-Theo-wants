@@ -891,20 +891,20 @@ Acceptance criteria:
 
 ### 14.3 Cache status and prune
 
-- [ ] Implement cache size accounting.
-- [ ] Implement LRU eviction.
-- [ ] Never evict:
-  - [ ] dirty local files
-  - [ ] uploading files
-  - [ ] conflict files
-  - [ ] pinned files
-- [ ] Implement `fs2 cache status`.
-- [ ] Implement `fs2 cache prune`.
-- [ ] Add disk-full simulation test if feasible.
+- [x] Implement cache size accounting.
+- [x] Implement LRU eviction.
+- [x] Never evict:
+  - [x] dirty local files
+  - [x] uploading files
+  - [x] conflict files
+  - [x] pinned files
+- [x] Implement `fs2 cache status`.
+- [x] Implement `fs2 cache prune`.
+- [x] Add disk-full simulation test if feasible.
 
 Acceptance criteria:
 
-- [ ] Cache prune cannot cause data loss.
+- [x] Cache prune cannot cause data loss.
 
 ---
 
@@ -1501,7 +1501,7 @@ A coding agent should implement in this order unless blocked:
 16. [ ] Env secret sync.
 17. [ ] Git-aware diagnostics/materialization.
 18. [ ] Cache pin/prune.
-19. [ ] `doctor`.
+19. [x] `doctor`.
 20. [x] Packaging/docs/dogfood.
 
 Do not start with UI, team features, Windows, artifact caching, or Git replacement.
