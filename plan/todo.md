@@ -1474,15 +1474,16 @@ Acceptance criteria:
 
 ### 27.2 Installer packaging
 
-- [ ] Build release binaries.
-- [ ] Add checksums.
-- [ ] Add macOS notarization plan if distributing outside developer-only channels.
-- [ ] Add Linux tarball or package.
-- [ ] Document upgrade process.
+- [x] Build release binaries.
+- [x] Add checksums.
+- [x] Add macOS notarization plan if distributing outside developer-only channels.
+- [x] Add Linux tarball or package.
+- [x] Document upgrade process.
 
 Acceptance criteria:
 
 - [ ] A user can install without building from source.
+  > **Blocked:** Requires publishing release artifacts to a distribution channel and target-platform smoke testing.
 
 ### 27.3 Versioning and migrations
 
@@ -1515,7 +1516,7 @@ A coding agent should implement in this order unless blocked:
 11. [ ] Lazy hydration on read.
 12. [ ] FUSE file creation/write/upload.
 13. [x] Rule engine default suppressing `node_modules`.
-14. [ ] Conflict detection/preservation.
+14. [x] Conflict detection/preservation.
 15. [x] Offline queue/replay.
 16. [x] Env secret sync.
 17. [x] Git-aware diagnostics/materialization.
@@ -1530,20 +1531,28 @@ Do not start with UI, team features, Windows, artifact caching, or Git replaceme
 ## 29. Definition of done for MVP
 
 - [ ] Two clients can sync a workspace through the backend.
+  > **Blocked: requires live two-client E2E with FUSE mount.**
 - [ ] Directory structure appears on a new client before file bytes download.
+  > **Blocked: requires live FUSE mount.**
 - [ ] Reading a metadata-only file hydrates it.
+  > **Blocked: requires live FUSE mount.**
 - [ ] Editing a file on one client updates the other.
+  > **Blocked: requires live FUSE mount + two-client.**
 - [ ] Concurrent edits preserve both versions.
+  > **Blocked: visible conflict copy requires FUSE.**
 - [ ] Offline edits replay safely.
-- [ ] `node_modules` and other generated directories are not synced by default.
+  > **Partial: offline queue/replay tested; live FUSE E2E blocked.**
+- [x] `node_modules` and other generated directories are not synced by default.
 - [ ] Env secrets sync encrypted and can be injected into a command.
-- [ ] `.git` internals are not synced by default.
-- [ ] `fs2 git materialize` can set up a functional Git repo on a new machine.
-- [ ] `fs2 status` and `fs2 doctor` expose useful diagnostics.
-- [ ] Cache pruning cannot delete dirty, conflict, or pinned data.
-- [ ] Tests cover sync, conflicts, generated paths, env secrets, and Git-aware behavior.
-- [ ] Docs explain limitations and security model.
+  > **Blocked: env exec needs workspace key (keychain).**
+- [x] `.git` internals are not synced by default.
+- [x] `fs2 git materialize` can set up a functional Git repo on a new machine.
+- [x] `fs2 status` and `fs2 doctor` expose useful diagnostics.
+- [x] Cache pruning cannot delete dirty, conflict, or pinned data.
+- [x] Tests cover sync, conflicts, generated paths, env secrets, and Git-aware behavior.
+- [x] Docs explain limitations and security model.
 - [ ] Dogfood period completes without known data loss bugs.
+  > **Blocked: requires real two-machine dogfood.**
 
 ---
 
