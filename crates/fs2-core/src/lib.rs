@@ -6,6 +6,12 @@
 )]
 
 //! Shared FS2 domain model and wire contracts.
+mod path;
+
+pub use path::{
+    names_collide, try_normalized_name, CasePolicy, NodeName, NormalizedName, ParsePathError,
+    WorkspacePath,
+};
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -531,20 +537,22 @@ fn validate_env_metadata(metadata: &EnvVarMetadata) -> Result<(), ValidationErro
     match &metadata.scope {
         EnvScope::Workspace | EnvScope::Machine { .. } => {}
         EnvScope::Project { project_path } | EnvScope::ProjectMachine { project_path, .. } => {
-            require_non_empty(project_path, "metadata.scope.project_path")?;
+            require(
+                WorkspacePath::parse(project_path).is_ok(),
+                "metadata.scope.project_path",
+                "must be a valid workspace-relative path",
+            )?;
         }
     }
     Ok(())
 }
 
 fn validate_node_name(name: &str, field: &'static str) -> Result<(), ValidationError> {
-    require_non_empty(name, field)?;
     require(
-        !name.contains('/'),
+        NodeName::parse(name).is_ok(),
         field,
-        "must be a single path component",
+        "must be a valid node name",
     )?;
-    require(!name.contains('\0'), field, "must not contain NUL")?;
     Ok(())
 }
 
@@ -1072,6 +1080,40 @@ mod tests {
                 node_id: NodeId::from_uuid(uuid_from(4)),
                 base_revision_id: Some(RevisionId::from_uuid(uuid_from(5))),
                 revision,
+            },
+            created_at: sample_time()?,
+        };
+        assert!(operation.validate_shape().is_err());
+        let operation = Operation {
+            op_id: OpId::from_uuid(uuid_from(22)),
+            workspace_id: WorkspaceId::from_uuid(uuid_from(2)),
+            device_id: DeviceId::from_uuid(uuid_from(3)),
+            base_cursor: Cursor::new(0)?,
+            kind: OperationKind::RestoreNode {
+                node_id: NodeId::from_uuid(uuid_from(4)),
+                parent_id: NodeId::from_uuid(uuid_from(5)),
+                name: "..".to_owned(),
+            },
+            created_at: sample_time()?,
+        };
+        assert!(operation.validate_shape().is_err());
+
+        let operation = Operation {
+            op_id: OpId::from_uuid(uuid_from(23)),
+            workspace_id: WorkspaceId::from_uuid(uuid_from(2)),
+            device_id: DeviceId::from_uuid(uuid_from(3)),
+            base_cursor: Cursor::new(0)?,
+            kind: OperationKind::SetEnvVar {
+                env_var_id: EnvVarId::from_uuid(uuid_from(16)),
+                encrypted_payload: "encrypted-envelope".to_owned(),
+                metadata: EnvVarMetadata {
+                    env_name: "STRIPE_SECRET_KEY".to_owned(),
+                    environment: "dev".to_owned(),
+                    scope: EnvScope::Project {
+                        project_path: "../x".to_owned(),
+                    },
+                    secret_kind: SecretKind::Secret,
+                },
             },
             created_at: sample_time()?,
         };

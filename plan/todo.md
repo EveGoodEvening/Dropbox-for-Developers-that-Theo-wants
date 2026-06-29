@@ -196,33 +196,33 @@ Acceptance criteria:
 
 ### 3.1 Implement path utilities
 
-- [ ] Add workspace-relative path type.
-- [ ] Reject:
-  - [ ] absolute paths
-  - [ ] `..` traversal
-  - [ ] null bytes
-  - [ ] empty path segments except root
-- [ ] Normalize separators to `/` internally.
-- [ ] Preserve original filename display string.
-- [ ] Add tests for malicious paths.
+- [x] Add workspace-relative path type.
+- [x] Reject:
+  - [x] absolute paths
+  - [x] `..` traversal
+  - [x] null bytes
+  - [x] empty path segments except root
+- [x] Normalize separators to `/` internally.
+- [x] Preserve original filename display string.
+- [x] Add tests for malicious paths.
 
 Acceptance criteria:
 
-- [ ] No API accepts a path that can escape the workspace root.
+- [x] No API accepts a path that can escape the workspace root.
 
 ### 3.2 Implement portable collision key
 
-- [ ] Add Unicode normalization helper.
-- [ ] Add case-folding helper.
-- [ ] Compute `normalized_name` for portable workspaces.
-- [ ] Add tests:
-  - [ ] `Foo.ts` vs `foo.ts`
-  - [ ] Unicode composed vs decomposed names
-  - [ ] names valid on Linux but unsafe on macOS
+- [x] Add Unicode normalization helper.
+- [x] Add case-folding helper.
+- [x] Compute `normalized_name` for portable workspaces.
+- [x] Add tests:
+  - [x] `Foo.ts` vs `foo.ts`
+  - [x] Unicode composed vs decomposed names
+  - [x] names valid on Linux but unsafe on macOS
 
 Acceptance criteria:
 
-- [ ] Portable workspaces block known macOS/Linux collision hazards.
+- [x] Portable workspaces block known macOS/Linux collision hazards.
 
 ---
 
