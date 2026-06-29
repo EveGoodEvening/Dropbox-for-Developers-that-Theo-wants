@@ -371,11 +371,18 @@ impl LocalStore {
     }
 
     /// Mark a blob as cached.
+    ///
+    /// Uses `INSERT ... ON CONFLICT DO UPDATE` so that re-hydrating a shared
+    /// (content-addressed) blob does NOT reset `pinned_ref_count` — a bare
+    /// `INSERT OR REPLACE` would delete the row and lose the pin ref count,
+    /// allowing pruning to evict a blob still pinned by another node.
     pub fn mark_blob_cached(&self, blob_id: &str, path: &str, size: u64) -> LocalStoreResult<()> {
         let conn = self.conn.lock().unwrap();
         conn.execute(
-            "INSERT OR REPLACE INTO blob_cache (blob_id, path, size, verified, last_accessed_at, pinned_ref_count) \
-             VALUES (?1, ?2, ?3, 1, ?4, 0)",
+            "INSERT INTO blob_cache (blob_id, path, size, verified, last_accessed_at, pinned_ref_count) \
+             VALUES (?1, ?2, ?3, 1, ?4, 0) \
+             ON CONFLICT(blob_id) DO UPDATE SET path = excluded.path, size = excluded.size, \
+             verified = excluded.verified, last_accessed_at = excluded.last_accessed_at",
             rusqlite::params![blob_id, path, size, Utc::now().to_rfc3339()],
         )?;
         Ok(())
@@ -408,6 +415,60 @@ impl LocalStore {
         Ok(())
     }
 
+    /// Mark a node as hydrated with a local blob cache path and optional pin.
+    ///
+    /// Sets `local_blob_path` so that cache pruning can link the blob cache
+    /// row to this node's state and respect the pinned flag (`design.md` §7.3).
+    pub fn set_hydrated(
+        &self,
+        node_id: NodeId,
+        local_blob_path: &str,
+        state: &str,
+        pinned: bool,
+    ) -> LocalStoreResult<()> {
+        let mut conn = self.conn.lock().unwrap();
+        let tx = conn.transaction()?;
+        // Read the previous pinned state and blob path to adjust ref counts.
+        let (was_pinned, prev_blob_path): (i64, Option<String>) = tx
+            .query_row(
+                "SELECT pinned, local_blob_path FROM local_state WHERE node_id = ?1",
+                rusqlite::params![node_id.to_string()],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap_or((0, None));
+        tx.execute(
+            "INSERT INTO local_state (node_id, hydration_state, local_blob_path, dirty_base_revision_id, last_accessed_at, pinned, error_code, error_message) \
+             VALUES (?1, ?2, ?3, NULL, ?4, ?5, NULL, NULL) \
+             ON CONFLICT(node_id) DO UPDATE SET hydration_state = excluded.hydration_state, local_blob_path = excluded.local_blob_path, last_accessed_at = excluded.last_accessed_at, pinned = excluded.pinned",
+            rusqlite::params![
+                node_id.to_string(),
+                state,
+                local_blob_path,
+                Utc::now().to_rfc3339(),
+                i32::from(pinned),
+            ],
+        )?;
+        // Adjust blob_cache.pinned_ref_count for the old and new blob paths
+        // so content-addressed blobs shared across nodes are protected while
+        // any referencing node is pinned.
+        if was_pinned != 0 {
+            if let Some(prev) = &prev_blob_path {
+                tx.execute(
+                    "UPDATE blob_cache SET pinned_ref_count = MAX(pinned_ref_count - 1, 0) WHERE path = ?1",
+                    rusqlite::params![prev],
+                )?;
+            }
+        }
+        if pinned {
+            tx.execute(
+                "UPDATE blob_cache SET pinned_ref_count = pinned_ref_count + 1 WHERE path = ?1",
+                rusqlite::params![local_blob_path],
+            )?;
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
     /// Get the hydration state for a node.
     pub fn get_hydration_state(&self, node_id: NodeId) -> LocalStoreResult<Option<String>> {
         let conn = self.conn.lock().unwrap();
@@ -421,13 +482,47 @@ impl LocalStore {
         Ok(result)
     }
 
-    /// Set the pinned flag for a node.
+    /// Set the pinned flag for a node, upserting the state row so the pin
+    /// sticks even for not-yet-hydrated nodes.
+    ///
+    /// If the node has a `local_blob_path`, the corresponding `blob_cache`
+    /// row's `pinned_ref_count` is incremented (pin) or decremented (unpin),
+    /// so cache pruning protects content-addressed blobs shared across nodes
+    /// as long as any referencing node is pinned (`design.md` §7.3/§7.4).
     pub fn set_pinned(&self, node_id: NodeId, pinned: bool) -> LocalStoreResult<()> {
-        let conn = self.conn.lock().unwrap();
-        conn.execute(
-            "UPDATE local_state SET pinned = ?1 WHERE node_id = ?2",
-            rusqlite::params![i32::from(pinned), node_id.to_string()],
+        let mut conn = self.conn.lock().unwrap();
+        let tx = conn.transaction()?;
+        // Read current pinned state and local_blob_path (if any).
+        let (was_pinned, blob_path): (i64, Option<String>) = tx
+            .query_row(
+                "SELECT pinned, local_blob_path FROM local_state WHERE node_id = ?1",
+                rusqlite::params![node_id.to_string()],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap_or((0, None));
+        // Upsert the state row.
+        tx.execute(
+            "INSERT INTO local_state (node_id, hydration_state, local_blob_path, dirty_base_revision_id, last_accessed_at, pinned, error_code, error_message)              VALUES (?1, 'metadata-only', NULL, NULL, ?2, ?3, NULL, NULL)              ON CONFLICT(node_id) DO UPDATE SET pinned = excluded.pinned",
+            rusqlite::params![node_id.to_string(), Utc::now().to_rfc3339(), i32::from(pinned)],
         )?;
+        // Adjust the blob's pinned_ref_count only when the pin state actually
+        // changes and a blob path is linked.
+        if was_pinned == 0 && pinned {
+            if let Some(path) = blob_path {
+                tx.execute(
+                    "UPDATE blob_cache SET pinned_ref_count = pinned_ref_count + 1 WHERE path = ?1",
+                    rusqlite::params![path],
+                )?;
+            }
+        } else if was_pinned != 0 && !pinned {
+            if let Some(path) = blob_path {
+                tx.execute(
+                    "UPDATE blob_cache SET pinned_ref_count = MAX(pinned_ref_count - 1, 0) WHERE path = ?1",
+                    rusqlite::params![path],
+                )?;
+            }
+        }
+        tx.commit()?;
         Ok(())
     }
 
@@ -448,7 +543,11 @@ impl LocalStore {
     /// - dirty local files (`hydration_state` = `DirtyLocal`)
     /// - uploading files (`hydration_state` = `Uploading`)
     /// - conflict files (`hydration_state` = `Conflict`)
-    /// - pinned files (pinned = 1)
+    /// - pinned files (`blob_cache.pinned_ref_count` > 0)
+    ///
+    /// Pin protection uses a ref count on the blob cache row so that
+    /// content-addressed blobs shared across nodes are protected while any
+    /// referencing node is pinned (`design.md` §7.3/§7.4).
     ///
     /// Returns the number of bytes evicted.
     pub fn prune_cache(&self, max_bytes: u64) -> LocalStoreResult<u64> {
@@ -457,10 +556,12 @@ impl LocalStore {
         let mut stmt = conn.prepare(
             "SELECT bc.blob_id, bc.path, bc.size \
              FROM blob_cache bc \
-             LEFT JOIN local_state ls ON ls.local_blob_path = bc.path \
-             WHERE (ls.hydration_state IS NULL \
-                    OR ls.hydration_state NOT IN ('DirtyLocal', 'Uploading', 'Conflict')) \
-             AND COALESCE(ls.pinned, 0) = 0 \
+             WHERE bc.pinned_ref_count = 0 \
+             AND NOT EXISTS ( \
+                 SELECT 1 FROM local_state ls \
+                 WHERE ls.local_blob_path = bc.path \
+                 AND ls.hydration_state IN ('DirtyLocal', 'Uploading', 'Conflict') \
+             ) \
              ORDER BY bc.last_accessed_at ASC",
         )?;
         let evictable: Vec<(String, String, i64)> = stmt

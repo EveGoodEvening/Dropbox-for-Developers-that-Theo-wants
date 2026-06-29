@@ -868,27 +868,27 @@ Acceptance criteria:
 
 ### 14.1 Hydration command
 
-- [ ] Implement `fs2 hydrate <path>`.
-- [ ] Add `--recursive`.
-- [ ] Add `--pin`.
-- [ ] Show progress.
-- [ ] Retry failed downloads.
-- [ ] Respect generated/local-only rules.
+- [x] Implement `fs2 hydrate <path>`.
+- [x] Add `--recursive`.
+- [x] Add `--pin`.
+- [x] Show progress.
+- [x] Retry failed downloads.
+- [x] Respect generated/local-only rules.
 
 Acceptance criteria:
 
-- [ ] User can hydrate a project before going offline.
+- [x] User can hydrate a project before going offline.
 
 ### 14.2 Pin/unpin commands
 
-- [ ] Implement `fs2 pin <path> --recursive`.
-- [ ] Implement `fs2 unpin <path> --recursive`.
-- [ ] Store pin state in local DB and/or remote rule if it should apply across devices.
-- [ ] Decide MVP behavior: local pin by default; optional `--sync-rule` for workspace rule.
+- [x] Implement `fs2 pin <path> --recursive`.
+- [x] Implement `fs2 unpin <path> --recursive`.
+- [x] Store pin state in local DB and/or remote rule if it should apply across devices.
+- [x] Decide MVP behavior: local pin by default; optional `--sync-rule` for workspace rule.
 
 Acceptance criteria:
 
-- [ ] Pinned files are skipped by cache pruning.
+- [x] Pinned files are skipped by cache pruning.
 
 ### 14.3 Cache status and prune
 

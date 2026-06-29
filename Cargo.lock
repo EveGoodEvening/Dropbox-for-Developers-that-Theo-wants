@@ -451,15 +451,19 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "base64",
+ "chrono",
  "clap",
  "fs2-core",
+ "fs2-crypto",
  "fs2-env",
  "fs2-git",
+ "fs2-rules",
  "fs2-sync",
  "hostname",
  "serde",
  "serde_json",
  "tokio",
+ "tracing",
  "uuid",
 ]
 

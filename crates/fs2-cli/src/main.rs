@@ -4,6 +4,7 @@
 
 mod config;
 mod doctor;
+mod hydrate;
 
 use clap::{Parser, Subcommand};
 use std::io::{self, Write};
@@ -45,6 +46,34 @@ enum Commands {
         #[command(subcommand)]
         action: WorkspaceCommands,
     },
+    /// Hydrate file content for a path (download blobs into the local cache).
+    Hydrate {
+        /// Workspace-relative path to hydrate.
+        path: String,
+        /// Recursively hydrate directories.
+        #[arg(long)]
+        recursive: bool,
+        /// Pin hydrated files so they are not evicted.
+        #[arg(long)]
+        pin: bool,
+    },
+    /// Pin a path so its content is not evicted by cache pruning.
+    Pin {
+        /// Workspace-relative path to pin.
+        path: String,
+        /// Recursively pin directories.
+        #[arg(long)]
+        recursive: bool,
+    },
+    /// Unpin a path, allowing cache pruning to evict its content.
+    Unpin {
+        /// Workspace-relative path to unpin.
+        path: String,
+        /// Recursively unpin directories.
+        #[arg(long)]
+        recursive: bool,
+    },
+
     /// Show sync and workspace status.
     Status {
         /// Output JSON.
@@ -298,6 +327,68 @@ async fn main() -> anyhow::Result<()> {
                 }
             }
         },
+        Some(Commands::Hydrate { path, recursive, pin }) => {
+            let cfg = config::CliConfig::load()?;
+            let client = ApiClient::new(&cfg.backend_url).with_token(cfg.token);
+            let workspaces = client
+                .list_workspaces(cfg.user_id)
+                .await
+                .map_err(|e| anyhow::anyhow!("failed to list workspaces: {e}"))?;
+            if workspaces.is_empty() {
+                anyhow::bail!("no workspaces found. Create one with `fs2 workspace create <name>`");
+            }
+            let ws_id = fs2_core::WorkspaceId::from_uuid(workspaces[0].id);
+            let root_node_id = fs2_core::NodeId::from_uuid(workspaces[0].root_node_id);
+            let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".to_owned());
+            let db_path = format!("{home}/.fs2/state.sqlite");
+            if let Some(parent) = std::path::Path::new(&db_path).parent() {
+                std::fs::create_dir_all(parent).ok();
+            }
+            let store = fs2_sync::LocalStore::open(std::path::Path::new(&db_path))?;
+            hydrate::hydrate_path(&client, &store, ws_id, root_node_id, &path, recursive, pin)
+                .await?;
+        }
+        Some(Commands::Pin { path, recursive }) => {
+            let cfg = config::CliConfig::load()?;
+            let client = ApiClient::new(&cfg.backend_url).with_token(cfg.token);
+            let workspaces = client
+                .list_workspaces(cfg.user_id)
+                .await
+                .map_err(|e| anyhow::anyhow!("failed to list workspaces: {e}"))?;
+            if workspaces.is_empty() {
+                anyhow::bail!("no workspaces found. Create one with `fs2 workspace create <name>`");
+            }
+            let ws_id = fs2_core::WorkspaceId::from_uuid(workspaces[0].id);
+            let root_node_id = fs2_core::NodeId::from_uuid(workspaces[0].root_node_id);
+            let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".to_owned());
+            let db_path = format!("{home}/.fs2/state.sqlite");
+            if let Some(parent) = std::path::Path::new(&db_path).parent() {
+                std::fs::create_dir_all(parent).ok();
+            }
+            let store = fs2_sync::LocalStore::open(std::path::Path::new(&db_path))?;
+            hydrate::set_pin(&store, ws_id, root_node_id, &path, recursive, true)?;
+        }
+        Some(Commands::Unpin { path, recursive }) => {
+            let cfg = config::CliConfig::load()?;
+            let client = ApiClient::new(&cfg.backend_url).with_token(cfg.token);
+            let workspaces = client
+                .list_workspaces(cfg.user_id)
+                .await
+                .map_err(|e| anyhow::anyhow!("failed to list workspaces: {e}"))?;
+            if workspaces.is_empty() {
+                anyhow::bail!("no workspaces found. Create one with `fs2 workspace create <name>`");
+            }
+            let ws_id = fs2_core::WorkspaceId::from_uuid(workspaces[0].id);
+            let root_node_id = fs2_core::NodeId::from_uuid(workspaces[0].root_node_id);
+            let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".to_owned());
+            let db_path = format!("{home}/.fs2/state.sqlite");
+            if let Some(parent) = std::path::Path::new(&db_path).parent() {
+                std::fs::create_dir_all(parent).ok();
+            }
+            let store = fs2_sync::LocalStore::open(std::path::Path::new(&db_path))?;
+            hydrate::set_pin(&store, ws_id, root_node_id, &path, recursive, false)?;
+        }
+
         Some(Commands::Status { json }) => {
             let cfg = config::CliConfig::load();
             if cfg.is_err() {
