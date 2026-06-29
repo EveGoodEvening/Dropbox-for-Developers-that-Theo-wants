@@ -5,6 +5,7 @@
 mod config;
 mod doctor;
 mod hydrate;
+mod service;
 
 use clap::{Parser, Subcommand};
 use std::io::{self, Write};
@@ -105,6 +106,11 @@ enum Commands {
     Conflicts {
         #[command(subcommand)]
         action: ConflictCommands,
+    },
+    /// Service management (install/uninstall daemon service).
+    Service {
+        #[command(subcommand)]
+        action: ServiceCommands,
     },
     /// Debug and diagnostics.
     Debug {
@@ -279,6 +285,16 @@ enum ConflictCommands {
         /// Path to the manual resolution file.
         path: String,
     },
+}
+
+#[derive(Debug, Subcommand)]
+enum ServiceCommands {
+    /// Install the daemon service for the current platform.
+    Install,
+    /// Uninstall the daemon service.
+    Uninstall,
+    /// Show whether the daemon service is installed.
+    Status,
 }
 
 #[tokio::main]
@@ -815,6 +831,12 @@ async fn main() -> anyhow::Result<()> {
                     println!("Resolved conflict {id} using manual file {path}.");
                 }
             }
+        }
+
+        Some(Commands::Service { action }) => match action {
+            ServiceCommands::Install => service::install()?,
+            ServiceCommands::Uninstall => service::uninstall()?,
+            ServiceCommands::Status => service::status()?,
         }
 
         Some(Commands::Debug { action }) => match action {

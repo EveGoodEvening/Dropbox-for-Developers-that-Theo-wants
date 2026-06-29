@@ -1199,25 +1199,27 @@ Acceptance criteria:
 
 ### 21.2 macOS LaunchAgent
 
-- [ ] Generate LaunchAgent plist.
-- [ ] Implement `fs2 service install`.
-- [ ] Implement `fs2 service uninstall`.
-- [ ] Implement `fs2 service status`.
-- [ ] Document macFUSE requirement.
+- [x] Generate LaunchAgent plist.
+- [x] Implement `fs2 service install`.
+- [x] Implement `fs2 service uninstall`.
+- [x] Implement `fs2 service status`.
+- [x] Document macFUSE requirement.
 
 Acceptance criteria:
 
 - [ ] Daemon starts automatically after login on macOS.
+  > **Blocked:** Requires a real macOS LaunchAgent + macFUSE environment to verify auto-start.
 
 ### 21.3 Linux systemd user service
 
-- [ ] Generate systemd user unit.
-- [ ] Implement install/uninstall/status commands.
-- [ ] Document FUSE3 requirement.
+- [x] Generate systemd user unit.
+- [x] Implement install/uninstall/status commands.
+- [x] Document FUSE3 requirement.
 
 Acceptance criteria:
 
 - [ ] Daemon starts automatically under systemd user session.
+  > **Blocked:** Requires a real Linux systemd user session + FUSE3 to verify auto-start.
 
 ---
 
@@ -1411,7 +1413,7 @@ Acceptance criteria:
 
 Acceptance criteria:
 
-- [ ] User can make an informed decision about storing private code.
+- [x] User can make an informed decision about storing private code.
 
 ---
 
