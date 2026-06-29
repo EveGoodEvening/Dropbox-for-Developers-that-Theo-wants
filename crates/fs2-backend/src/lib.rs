@@ -6,7 +6,7 @@
 //! Backend HTTP server skeleton with development-only auth/device endpoints.
 
 use axum::{
-    extract::{Path, State},
+    extract::{Path, Query, State},
     http::{HeaderMap, StatusCode},
     response::{IntoResponse, Response},
     routing::{get, post},
@@ -15,7 +15,12 @@ use axum::{
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
 use bytes::Bytes;
 use chrono::Utc;
-use fs2_core::{Cursor, DeviceId, Node, NodeId, NodeKind, UserId, WorkspaceId};
+use fs2_core::{
+    names_collide, CasePolicy, Cursor, DeviceId, EnvVarId, EnvVarMetadata, FsRule, Node, NodeId,
+    NodeKind, NodeName, NodeRevision, OpId, Operation, OperationKind, RevisionContent, RevisionId,
+    UserId, WorkspaceId,
+};
+use fs2_core::{ErrorEnvelope, Fs2Error};
 use hmac::{Hmac, Mac};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -325,6 +330,10 @@ pub struct AppState {
     blob_store: Arc<LocalFilesystemBlobStore>,
     blob_metadata: Arc<RwLock<HashMap<String, BlobMetadata>>>,
     workspaces: Arc<RwLock<HashMap<WorkspaceId, WorkspaceRecord>>>,
+    /// Committed operations per workspace, sorted ascending by assigned cursor.
+    operations: Arc<RwLock<HashMap<WorkspaceId, Vec<CommittedOperation>>>>,
+    /// Idempotency index mapping `(workspace_id, op_id)` to the assigned cursor.
+    idempotency: Arc<RwLock<HashMap<(WorkspaceId, OpId), Cursor>>>,
 }
 
 impl AppState {
@@ -340,6 +349,8 @@ impl AppState {
             blob_store: Arc::new(LocalFilesystemBlobStore::new(blob_root)),
             blob_metadata: Arc::new(RwLock::new(HashMap::new())),
             workspaces: Arc::new(RwLock::new(HashMap::new())),
+            operations: Arc::new(RwLock::new(HashMap::new())),
+            idempotency: Arc::new(RwLock::new(HashMap::new())),
         }
     }
 }
@@ -404,6 +415,25 @@ pub struct WorkspaceRecord {
     pub root_node_id: NodeId,
     pub current_cursor: Cursor,
     pub root_node: Node,
+    /// All live and tombstoned nodes in the workspace keyed by `node_id`.
+    #[serde(default)]
+    pub nodes: HashMap<NodeId, Node>,
+    /// Revisions keyed by `revision_id`, used for conflict checks and replay.
+    #[serde(default)]
+    pub revisions: HashMap<RevisionId, NodeRevision>,
+    /// Workspace rule state keyed by path pattern.
+    #[serde(default)]
+    pub rules: HashMap<String, FsRule>,
+    /// Encrypted environment records keyed by env var id.
+    #[serde(default)]
+    pub env_vars: HashMap<EnvVarId, EnvRecord>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EnvRecord {
+    pub env_var_id: EnvVarId,
+    pub encrypted_payload: String,
+    pub metadata: EnvVarMetadata,
 }
 
 #[derive(Debug, Deserialize)]
@@ -416,6 +446,50 @@ pub struct CreateWorkspaceResponse {
     pub workspace_id: WorkspaceId,
     pub root_node_id: NodeId,
     pub current_cursor: Cursor,
+}
+
+/// An operation committed to the workspace log with its assigned cursor.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CommittedOperation {
+    pub operation: Operation,
+    pub cursor: Cursor,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct CommitOperationRequest {
+    pub op_id: OpId,
+    pub base_cursor: Cursor,
+    pub kind: OperationKind,
+    #[serde(default = "default_operation_created_at")]
+    pub created_at: chrono::DateTime<Utc>,
+}
+
+fn default_operation_created_at() -> chrono::DateTime<Utc> {
+    Utc::now()
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct CommitOperationResponse {
+    pub workspace_id: WorkspaceId,
+    pub op_id: OpId,
+    pub cursor: Cursor,
+    pub committed: CommittedOperation,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct FetchOpsQuery {
+    #[serde(default)]
+    pub since: Option<i64>,
+    #[serde(default)]
+    pub limit: Option<u32>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct FetchOpsResponse {
+    pub workspace_id: WorkspaceId,
+    pub operations: Vec<CommittedOperation>,
+    pub has_more: bool,
+    pub next_cursor: Option<Cursor>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -483,40 +557,85 @@ pub enum ApiError {
     DeviceRevoked,
     InvalidRequest(&'static str),
     BlobMissing,
+    /// Stable structured error backed by the shared `Fs2Error` code table.
+    Structured {
+        error: Fs2Error,
+        details: serde_json::Map<String, serde_json::Value>,
+    },
     Internal(String),
+}
+
+impl ApiError {
+    /// Builds a structured error with no extra details.
+    fn structured(error: Fs2Error) -> Self {
+        Self::Structured {
+            error,
+            details: serde_json::Map::new(),
+        }
+    }
+
+    /// Builds a structured error carrying a single string detail field.
+    fn structured_with(error: Fs2Error, field: &str, value: impl Into<String>) -> Self {
+        let mut details = serde_json::Map::new();
+        details.insert(field.to_owned(), serde_json::Value::String(value.into()));
+        Self::Structured { error, details }
+    }
+}
+
+impl From<Fs2Error> for ApiError {
+    fn from(error: Fs2Error) -> Self {
+        Self::structured(error)
+    }
 }
 
 impl IntoResponse for ApiError {
     fn into_response(self) -> Response {
-        let (status, code, message) = match self {
-            Self::Unauthorized(message) => {
-                (StatusCode::UNAUTHORIZED, "unauthorized", message.to_owned())
+        match self {
+            Self::Structured { error, details } => {
+                let status = StatusCode::from_u16(error.http_status())
+                    .unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
+                let envelope = ErrorEnvelope {
+                    error: fs2_core::ErrorBody {
+                        code: error,
+                        message: error.default_message().to_owned(),
+                        details,
+                    },
+                };
+                (status, Json(envelope)).into_response()
             }
-            Self::DeviceRevoked => (
+            Self::Unauthorized(message) => {
+                structured_legacy(StatusCode::UNAUTHORIZED, "unauthorized", message.to_owned())
+            }
+            Self::DeviceRevoked => structured_legacy(
                 StatusCode::UNAUTHORIZED,
                 "device_revoked",
                 "device token has been revoked".to_owned(),
             ),
-            Self::InvalidRequest(message) => (
+            Self::InvalidRequest(message) => structured_legacy(
                 StatusCode::BAD_REQUEST,
                 "invalid_request",
                 message.to_owned(),
             ),
-            Self::BlobMissing => (
+            Self::BlobMissing => structured_legacy(
                 StatusCode::NOT_FOUND,
                 "blob_missing",
                 "blob does not exist".to_owned(),
             ),
-            Self::Internal(message) => (StatusCode::INTERNAL_SERVER_ERROR, "internal", message),
-        };
-        (
-            status,
-            Json(ErrorResponse {
-                error: ErrorBody { code, message },
-            }),
-        )
-            .into_response()
+            Self::Internal(message) => {
+                structured_legacy(StatusCode::INTERNAL_SERVER_ERROR, "internal", message)
+            }
+        }
     }
+}
+
+fn structured_legacy(status: StatusCode, code: &'static str, message: String) -> Response {
+    (
+        status,
+        Json(ErrorResponse {
+            error: ErrorBody { code, message },
+        }),
+    )
+        .into_response()
 }
 
 pub fn app() -> Router {
@@ -535,6 +654,10 @@ pub fn app_with_state(state: AppState) -> Router {
         .route("/v1/devices", get(list_devices).post(enroll_device))
         .route("/v1/devices/:device_id/revoke", post(revoke_device))
         .route("/v1/workspaces", post(create_workspace))
+        .route(
+            "/v1/workspaces/:workspace_id/ops",
+            get(fetch_operations).post(commit_operation),
+        )
         .route("/v1/blobs/dev-upload", post(dev_blob_upload))
         .route("/v1/blobs/dev-download", post(dev_blob_download))
         .route("/v1/blobs/:blob_id/status", get(blob_status))
@@ -696,6 +819,8 @@ async fn create_workspace(
         deleted_at: None,
         tombstone_version: None,
     };
+    let mut nodes = HashMap::new();
+    nodes.insert(root_node_id, root_node.clone());
     let record = WorkspaceRecord {
         workspace_id,
         user_id: auth.user_id,
@@ -703,6 +828,10 @@ async fn create_workspace(
         root_node_id,
         current_cursor,
         root_node,
+        nodes,
+        revisions: HashMap::new(),
+        rules: HashMap::new(),
+        env_vars: HashMap::new(),
     };
 
     state.workspaces.write().await.insert(workspace_id, record);
@@ -712,6 +841,629 @@ async fn create_workspace(
         root_node_id,
         current_cursor,
     }))
+}
+
+async fn commit_operation(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(workspace_id): Path<WorkspaceId>,
+    Json(request): Json<CommitOperationRequest>,
+) -> Result<Json<CommitOperationResponse>, ApiError> {
+    let auth = authenticate(&headers, &state).await?;
+    let operation = Operation {
+        op_id: request.op_id,
+        workspace_id,
+        device_id: auth.device_id,
+        base_cursor: request.base_cursor,
+        kind: request.kind,
+        created_at: request.created_at,
+    };
+    operation
+        .validate_shape()
+        .map_err(shape_error_into_api_error)?;
+
+    // Snapshot known blob ids so the blob-existence check runs without holding the
+    // blob metadata lock while we mutate the workspace tree. Lock order stays
+    // idempotency -> workspaces -> operations; blob_metadata is read beforehand.
+    let known_blobs: std::collections::HashSet<String> =
+        state.blob_metadata.read().await.keys().cloned().collect();
+    let blob_exists = |blob_id: &str| known_blobs.contains(blob_id);
+
+    // Lock order: idempotency -> workspaces -> operations (acquired consistently).
+    let mut idempotency = state.idempotency.write().await;
+    if let Some(existing_cursor) = idempotency.get(&(workspace_id, operation.op_id)) {
+        let workspaces = state.workspaces.read().await;
+        let workspace = workspaces
+            .get(&workspace_id)
+            .ok_or_else(|| ApiError::structured(Fs2Error::WorkspaceNotFound))?;
+        let owns_workspace = workspace.user_id == auth.user_id;
+        drop(workspaces);
+        if !owns_workspace {
+            return Err(ApiError::Unauthorized("device does not own this workspace"));
+        }
+        let operations = state.operations.read().await;
+        let committed = operations
+            .get(&workspace_id)
+            .and_then(|log| {
+                log.iter()
+                    .find(|committed| {
+                        committed.cursor == *existing_cursor
+                            && committed.operation.op_id == operation.op_id
+                    })
+                    .cloned()
+            })
+            .ok_or_else(|| ApiError::Internal("idempotency log entry missing".to_owned()))?;
+        drop(operations);
+        return Ok(Json(CommitOperationResponse {
+            workspace_id,
+            op_id: operation.op_id,
+            cursor: *existing_cursor,
+            committed,
+        }));
+    }
+
+    let mut workspaces = state.workspaces.write().await;
+    let workspace = workspaces
+        .get_mut(&workspace_id)
+        .ok_or_else(|| ApiError::structured(Fs2Error::WorkspaceNotFound))?;
+    if workspace.user_id != auth.user_id {
+        return Err(ApiError::Unauthorized("device does not own this workspace"));
+    }
+
+    // Apply the operation to the in-memory node tree before allocating the cursor.
+    apply_operation(workspace, &operation, &blob_exists)?;
+
+    // Allocate the next cursor atomically under the workspace lock.
+    let next_value = workspace
+        .current_cursor
+        .value()
+        .checked_add(1)
+        .ok_or_else(|| ApiError::Internal("cursor overflow".to_owned()))?;
+    let assigned_cursor =
+        Cursor::new(next_value).map_err(|error| ApiError::Internal(error.to_string()))?;
+    workspace.current_cursor = assigned_cursor;
+
+    let op_id = operation.op_id;
+    let committed = CommittedOperation {
+        operation,
+        cursor: assigned_cursor,
+    };
+    drop(workspaces);
+
+    let mut operations = state.operations.write().await;
+    let log = operations.entry(workspace_id).or_default();
+    log.push(committed.clone());
+    drop(operations);
+
+    idempotency.insert((workspace_id, op_id), assigned_cursor);
+    drop(idempotency);
+
+    Ok(Json(CommitOperationResponse {
+        workspace_id,
+        op_id,
+        cursor: assigned_cursor,
+        committed,
+    }))
+}
+
+async fn fetch_operations(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(workspace_id): Path<WorkspaceId>,
+    Query(query): Query<FetchOpsQuery>,
+) -> Result<Json<FetchOpsResponse>, ApiError> {
+    let auth = authenticate(&headers, &state).await?;
+    {
+        let workspaces = state.workspaces.read().await;
+        let workspace = workspaces
+            .get(&workspace_id)
+            .ok_or_else(|| ApiError::structured(Fs2Error::WorkspaceNotFound))?;
+        if workspace.user_id != auth.user_id {
+            return Err(ApiError::Unauthorized("device does not own this workspace"));
+        }
+        drop(workspaces);
+    }
+
+    let since = query.since.unwrap_or(0);
+    if since < 0 {
+        return Err(ApiError::InvalidRequest("since must not be negative"));
+    }
+    let limit = query
+        .limit
+        .unwrap_or(DEFAULT_OPS_PAGE_LIMIT)
+        .clamp(1, MAX_OPS_PAGE_LIMIT);
+
+    let operations = state.operations.read().await;
+    let log = operations.get(&workspace_id);
+    let filtered: Vec<CommittedOperation> = log
+        .map(|log| {
+            log.iter()
+                .filter(|committed| committed.cursor.value() > since)
+                .cloned()
+                .collect()
+        })
+        .unwrap_or_default();
+    drop(operations);
+
+    let has_more = filtered.len() > limit as usize;
+    let next_cursor = if has_more {
+        filtered
+            .get(limit as usize - 1)
+            .map(|committed| committed.cursor)
+    } else {
+        None
+    };
+    let page: Vec<CommittedOperation> = filtered.into_iter().take(limit as usize).collect();
+
+    Ok(Json(FetchOpsResponse {
+        workspace_id,
+        operations: page,
+        has_more,
+        next_cursor,
+    }))
+}
+
+const DEFAULT_OPS_PAGE_LIMIT: u32 = 100;
+const MAX_OPS_PAGE_LIMIT: u32 = 1000;
+
+/// Converts a shared `ErrorEnvelope` from shape validation into a structured `ApiError`.
+fn shape_error_into_api_error(envelope: ErrorEnvelope) -> ApiError {
+    ApiError::Structured {
+        error: Fs2Error::InvalidOperation,
+        details: envelope.error.details,
+    }
+}
+
+/// Validates an operation against the live workspace tree and applies it in place.
+///
+/// Supports all shared operation variants in the in-memory development backend.
+fn apply_operation(
+    workspace: &mut WorkspaceRecord,
+    operation: &Operation,
+    blob_exists: &dyn Fn(&str) -> bool,
+) -> Result<(), ApiError> {
+    let now = operation.created_at;
+    match &operation.kind {
+        OperationKind::CreateNode {
+            node_id,
+            parent_id,
+            name,
+            kind,
+            initial_revision,
+        } => apply_create_node(
+            workspace,
+            CreateNodeInput {
+                node_id: *node_id,
+                parent_id: *parent_id,
+                name,
+                kind: *kind,
+                initial_revision: initial_revision.as_ref(),
+            },
+            now,
+            blob_exists,
+        ),
+        OperationKind::PutFileRevision {
+            node_id,
+            base_revision_id,
+            revision,
+        } => apply_put_file_revision(
+            workspace,
+            *node_id,
+            *base_revision_id,
+            revision,
+            now,
+            blob_exists,
+        ),
+        OperationKind::MoveNode {
+            node_id,
+            old_parent_id,
+            old_name,
+            new_parent_id,
+            new_name,
+        } => apply_move_node(
+            workspace,
+            *node_id,
+            *old_parent_id,
+            old_name,
+            *new_parent_id,
+            new_name,
+            now,
+        ),
+        OperationKind::DeleteNode { node_id, recursive } => {
+            apply_delete_node(workspace, *node_id, *recursive, now)
+        }
+        OperationKind::RestoreNode {
+            node_id,
+            parent_id,
+            name,
+        } => apply_restore_node(workspace, *node_id, *parent_id, name, now),
+        OperationKind::SetRule { path_pattern, rule } => {
+            workspace.rules.insert(path_pattern.clone(), rule.clone());
+            Ok(())
+        }
+        OperationKind::SetEnvVar {
+            env_var_id,
+            encrypted_payload,
+            metadata,
+        } => {
+            workspace.env_vars.insert(
+                *env_var_id,
+                EnvRecord {
+                    env_var_id: *env_var_id,
+                    encrypted_payload: encrypted_payload.clone(),
+                    metadata: metadata.clone(),
+                },
+            );
+            Ok(())
+        }
+        OperationKind::DeleteEnvVar { env_var_id } => {
+            workspace
+                .env_vars
+                .remove(env_var_id)
+                .ok_or_else(|| ApiError::structured(Fs2Error::InvalidOperation))?;
+            Ok(())
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+struct CreateNodeInput<'a> {
+    node_id: NodeId,
+    parent_id: NodeId,
+    name: &'a str,
+    kind: NodeKind,
+    initial_revision: Option<&'a NodeRevision>,
+}
+
+fn apply_create_node(
+    workspace: &mut WorkspaceRecord,
+    input: CreateNodeInput<'_>,
+    now: chrono::DateTime<Utc>,
+    blob_exists: &dyn Fn(&str) -> bool,
+) -> Result<(), ApiError> {
+    let CreateNodeInput {
+        node_id,
+        parent_id,
+        name,
+        kind,
+        initial_revision,
+    } = input;
+    if workspace.nodes.contains_key(&node_id) {
+        return Err(ApiError::structured_with(
+            Fs2Error::PathCollision,
+            "node_id",
+            node_id.to_string(),
+        ));
+    }
+    {
+        let parent = live_node(workspace, parent_id)?;
+        if parent.kind != NodeKind::Directory {
+            return Err(ApiError::structured_with(
+                Fs2Error::InvalidOperation,
+                "parent_id",
+                "parent must be a directory",
+            ));
+        }
+    }
+    let candidate_name = NodeName::parse(name).map_err(|_| {
+        ApiError::structured_with(Fs2Error::InvalidOperation, "name", name.to_owned())
+    })?;
+    if has_live_sibling_collision(workspace, parent_id, &candidate_name) {
+        return Err(ApiError::structured(Fs2Error::PathCollision));
+    }
+
+    if let Some(revision) = initial_revision {
+        validate_new_revision(workspace, revision, blob_exists)?;
+    }
+
+    let current_rev = initial_revision.map(|revision| {
+        workspace
+            .revisions
+            .insert(revision.revision_id, revision.clone());
+        revision.revision_id
+    });
+    let node = Node {
+        node_id,
+        workspace_id: workspace.workspace_id,
+        parent_id: Some(parent_id),
+        name: name.to_owned(),
+        kind,
+        current_rev,
+        created_at: now,
+        updated_at: now,
+        deleted_at: None,
+        tombstone_version: None,
+    };
+    workspace.nodes.insert(node_id, node);
+    Ok(())
+}
+
+fn apply_put_file_revision(
+    workspace: &mut WorkspaceRecord,
+    node_id: NodeId,
+    base_revision_id: Option<RevisionId>,
+    revision: &NodeRevision,
+    now: chrono::DateTime<Utc>,
+    blob_exists: &dyn Fn(&str) -> bool,
+) -> Result<(), ApiError> {
+    // Validate with an immutable borrow first, then mutate.
+    {
+        let node = live_node(workspace, node_id)?;
+        if node.kind != NodeKind::File {
+            return Err(ApiError::structured_with(
+                Fs2Error::InvalidOperation,
+                "node_id",
+                "node must be a file",
+            ));
+        }
+        // Conflict rule: base_revision_id must equal the node's current revision.
+        if node.current_rev != base_revision_id {
+            return Err(ApiError::structured(Fs2Error::RevisionConflict));
+        }
+    }
+    validate_new_revision(workspace, revision, blob_exists)?;
+
+    workspace
+        .revisions
+        .insert(revision.revision_id, revision.clone());
+    let node = live_node_mut(workspace, node_id)?;
+    node.current_rev = Some(revision.revision_id);
+    node.updated_at = now;
+    Ok(())
+}
+
+fn validate_new_revision(
+    workspace: &WorkspaceRecord,
+    revision: &NodeRevision,
+    blob_exists: &dyn Fn(&str) -> bool,
+) -> Result<(), ApiError> {
+    if workspace.revisions.contains_key(&revision.revision_id) {
+        return Err(ApiError::structured_with(
+            Fs2Error::InvalidOperation,
+            "revision_id",
+            "revision id already exists",
+        ));
+    }
+    if let RevisionContent::File { blob_id, .. } = &revision.content {
+        if !blob_exists(blob_id.as_str()) {
+            return Err(ApiError::structured_with(
+                Fs2Error::BlobMissing,
+                "blob_id",
+                blob_id.to_string(),
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn apply_move_node(
+    workspace: &mut WorkspaceRecord,
+    node_id: NodeId,
+    old_parent_id: NodeId,
+    old_name: &str,
+    new_parent_id: NodeId,
+    new_name: &str,
+    now: chrono::DateTime<Utc>,
+) -> Result<(), ApiError> {
+    // Validate with immutable borrows first, then mutate.
+    {
+        let node = live_node(workspace, node_id)?;
+        if node.parent_id != Some(old_parent_id) || node.name != old_name {
+            return Err(ApiError::structured_with(
+                Fs2Error::InvalidOperation,
+                "node_id",
+                "old_parent_id/old_name do not match node location",
+            ));
+        }
+    }
+    if node_id == new_parent_id || is_descendant_of(workspace, new_parent_id, node_id) {
+        return Err(ApiError::structured_with(
+            Fs2Error::InvalidOperation,
+            "new_parent_id",
+            "move would create a cycle",
+        ));
+    }
+    let new_parent = live_node(workspace, new_parent_id)?;
+    if new_parent.kind != NodeKind::Directory {
+        return Err(ApiError::structured_with(
+            Fs2Error::InvalidOperation,
+            "new_parent_id",
+            "new parent must be a directory",
+        ));
+    }
+    let candidate_name = NodeName::parse(new_name).map_err(|_| {
+        ApiError::structured_with(Fs2Error::InvalidOperation, "new_name", new_name.to_owned())
+    })?;
+    if has_live_sibling_collision_excluding(
+        workspace,
+        new_parent_id,
+        &candidate_name,
+        Some(node_id),
+    ) {
+        return Err(ApiError::structured(Fs2Error::PathCollision));
+    }
+    let node = live_node_mut(workspace, node_id)?;
+    node.parent_id = Some(new_parent_id);
+    new_name.clone_into(&mut node.name);
+    node.updated_at = now;
+    Ok(())
+}
+
+fn apply_delete_node(
+    workspace: &mut WorkspaceRecord,
+    node_id: NodeId,
+    recursive: bool,
+    now: chrono::DateTime<Utc>,
+) -> Result<(), ApiError> {
+    // Validate with immutable borrows first, then mutate.
+    {
+        let node = live_node(workspace, node_id)?;
+        if node.parent_id.is_none() {
+            return Err(ApiError::structured_with(
+                Fs2Error::InvalidOperation,
+                "node_id",
+                "cannot delete the workspace root",
+            ));
+        }
+    }
+    let has_live_children = workspace
+        .nodes
+        .values()
+        .any(|child| child.parent_id == Some(node_id) && child.deleted_at.is_none());
+    if has_live_children && !recursive {
+        return Err(ApiError::structured_with(
+            Fs2Error::InvalidOperation,
+            "recursive",
+            "recursive flag required to delete a non-empty directory",
+        ));
+    }
+    let tombstone_version = Some(workspace.current_cursor.value() + 1);
+    {
+        let node = live_node_mut(workspace, node_id)?;
+        node.deleted_at = Some(now);
+        node.updated_at = now;
+        node.tombstone_version = tombstone_version;
+    }
+    if recursive {
+        delete_descendants(workspace, node_id, now, tombstone_version);
+    }
+    Ok(())
+}
+
+fn apply_restore_node(
+    workspace: &mut WorkspaceRecord,
+    node_id: NodeId,
+    parent_id: NodeId,
+    name: &str,
+    now: chrono::DateTime<Utc>,
+) -> Result<(), ApiError> {
+    // Validate with immutable borrows first, then mutate.
+    let is_tombstoned = {
+        let node = workspace
+            .nodes
+            .get(&node_id)
+            .ok_or_else(|| ApiError::structured(Fs2Error::NodeNotFound))?;
+        if node.deleted_at.is_none() {
+            return Err(ApiError::structured_with(
+                Fs2Error::InvalidOperation,
+                "node_id",
+                "node is not tombstoned",
+            ));
+        }
+        true
+    };
+    let _ = is_tombstoned;
+    let parent = live_node(workspace, parent_id)?;
+    if parent.kind != NodeKind::Directory {
+        return Err(ApiError::structured_with(
+            Fs2Error::InvalidOperation,
+            "parent_id",
+            "parent must be a directory",
+        ));
+    }
+    let candidate_name = NodeName::parse(name).map_err(|_| {
+        ApiError::structured_with(Fs2Error::InvalidOperation, "name", name.to_owned())
+    })?;
+    if has_live_sibling_collision_excluding(workspace, parent_id, &candidate_name, Some(node_id)) {
+        return Err(ApiError::structured(Fs2Error::PathCollision));
+    }
+    let node = workspace
+        .nodes
+        .get_mut(&node_id)
+        .ok_or_else(|| ApiError::structured(Fs2Error::NodeNotFound))?;
+    node.parent_id = Some(parent_id);
+    name.clone_into(&mut node.name);
+    node.deleted_at = None;
+    node.tombstone_version = None;
+    node.updated_at = now;
+    Ok(())
+}
+
+/// Returns a live (non-tombstoned) node or a structured `node_not_found` error.
+fn live_node(workspace: &WorkspaceRecord, node_id: NodeId) -> Result<&Node, ApiError> {
+    let node = workspace
+        .nodes
+        .get(&node_id)
+        .ok_or_else(|| ApiError::structured(Fs2Error::NodeNotFound))?;
+    if node.deleted_at.is_some() {
+        return Err(ApiError::structured(Fs2Error::NodeNotFound));
+    }
+    Ok(node)
+}
+
+fn live_node_mut(workspace: &mut WorkspaceRecord, node_id: NodeId) -> Result<&mut Node, ApiError> {
+    let node = workspace
+        .nodes
+        .get_mut(&node_id)
+        .ok_or_else(|| ApiError::structured(Fs2Error::NodeNotFound))?;
+    if node.deleted_at.is_some() {
+        return Err(ApiError::structured(Fs2Error::NodeNotFound));
+    }
+    Ok(node)
+}
+
+/// Checks whether a candidate name collides with any live sibling under `parent_id`.
+fn has_live_sibling_collision(
+    workspace: &WorkspaceRecord,
+    parent_id: NodeId,
+    name: &NodeName,
+) -> bool {
+    has_live_sibling_collision_excluding(workspace, parent_id, name, None)
+}
+
+/// Checks sibling collisions, optionally excluding one node (the mover/restorer itself).
+fn has_live_sibling_collision_excluding(
+    workspace: &WorkspaceRecord,
+    parent_id: NodeId,
+    name: &NodeName,
+    exclude: Option<NodeId>,
+) -> bool {
+    workspace.nodes.values().any(|sibling| {
+        sibling.parent_id == Some(parent_id)
+            && sibling.deleted_at.is_none()
+            && exclude != Some(sibling.node_id)
+            && names_collide(
+                name,
+                &NodeName::parse(sibling.name.as_str()).unwrap_or_else(|_| name.clone()),
+                CasePolicy::Portable,
+            )
+    })
+}
+
+/// Returns true if `candidate` is a descendant of `ancestor` in the live tree.
+fn is_descendant_of(workspace: &WorkspaceRecord, candidate: NodeId, ancestor: NodeId) -> bool {
+    let mut current = candidate;
+    while let Some(node) = workspace.nodes.get(&current) {
+        match node.parent_id {
+            Some(parent) if parent == ancestor => return true,
+            Some(parent) => current = parent,
+            None => return false,
+        }
+    }
+    false
+}
+
+/// Recursively tombstones all descendants of `node_id`.
+fn delete_descendants(
+    workspace: &mut WorkspaceRecord,
+    node_id: NodeId,
+    now: chrono::DateTime<Utc>,
+    tombstone_version: Option<i64>,
+) {
+    let children: Vec<NodeId> = workspace
+        .nodes
+        .values()
+        .filter(|child| child.parent_id == Some(node_id))
+        .map(|child| child.node_id)
+        .collect();
+    for child_id in children {
+        if let Some(child) = workspace.nodes.get_mut(&child_id) {
+            child.deleted_at = Some(now);
+            child.updated_at = now;
+            child.tombstone_version = tombstone_version;
+        }
+        delete_descendants(workspace, child_id, now, tombstone_version);
+    }
 }
 
 async fn dev_blob_upload(
@@ -1311,6 +2063,740 @@ mod tests {
         assert!(store.get("/absolute").await.is_err());
         assert!(store.put("sha256/ab//cdef", Bytes::new()).await.is_err());
         assert!(store.put("sha256/ab/./cdef", Bytes::new()).await.is_err());
+        Ok(())
+    }
+
+    async fn post_json_raw(
+        app: Router,
+        uri: &str,
+        body: serde_json::Value,
+        bearer: Option<&str>,
+    ) -> Result<Response, Box<dyn std::error::Error>> {
+        let mut builder = Request::builder()
+            .method("POST")
+            .uri(uri)
+            .header("content-type", "application/json");
+        if let Some(token) = bearer {
+            builder = builder.header("authorization", format!("Bearer {token}"));
+        }
+        Ok(app
+            .oneshot(builder.body(Body::from(body.to_string()))?)
+            .await?)
+    }
+
+    async fn error_code(response: Response) -> Result<String, Box<dyn std::error::Error>> {
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX).await?;
+        let value: serde_json::Value = serde_json::from_slice(&bytes)?;
+        Ok(value
+            .get("error")
+            .and_then(|error| error.get("code"))
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("unknown")
+            .to_owned())
+    }
+
+    /// Builds a minimal file revision for a freshly created file node.
+    fn file_revision(
+        workspace_id: WorkspaceId,
+        device_id: DeviceId,
+        node_id: NodeId,
+        blob_id: &str,
+    ) -> Result<NodeRevision, Box<dyn std::error::Error>> {
+        Ok(NodeRevision {
+            revision_id: RevisionId::new_v4(),
+            node_id,
+            workspace_id,
+            device_id,
+            base_revision_id: None,
+            content: RevisionContent::File {
+                blob_id: fs2_core::BlobId::new(blob_id)?,
+                chunk_ids: Vec::new(),
+                content_hash: "hash".to_owned(),
+                encryption_header: None,
+            },
+            posix_mode: 0o644,
+            mtime: Utc::now(),
+            size: 0,
+            executable: false,
+            created_at: Utc::now(),
+        })
+    }
+
+    #[tokio::test]
+    async fn commit_op_idempotency_returns_same_cursor_without_double_apply(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let state = AppState::dev(RedactedSecret::new(DEFAULT_DEV_SECRET.to_owned())?);
+        let app = app_with_state(state.clone());
+        let login = post_json::<DevLoginResponse>(
+            app.clone(),
+            "/v1/auth/dev-login",
+            serde_json::json!({
+                "device_name": "ops-laptop",
+                "platform": {"os": "linux"},
+                "public_key": "ops-key"
+            }),
+            None,
+        )
+        .await?;
+        let workspace = post_json::<CreateWorkspaceResponse>(
+            app.clone(),
+            "/v1/workspaces",
+            serde_json::json!({"name": "ops-ws"}),
+            Some(&login.access_token),
+        )
+        .await?;
+
+        let op_id = OpId::new_v4();
+        let node_id = NodeId::new_v4();
+        let body = serde_json::json!({
+            "op_id": op_id,
+            "base_cursor": 0,
+            "kind": {
+                "type": "create_node",
+                "node_id": node_id,
+                "parent_id": workspace.root_node_id,
+                "name": "docs",
+                "kind": "directory",
+                "initial_revision": null
+            }
+        });
+        let uri = format!("/v1/workspaces/{}/ops", workspace.workspace_id);
+
+        let first = post_json::<CommitOperationResponse>(
+            app.clone(),
+            &uri,
+            body.clone(),
+            Some(&login.access_token),
+        )
+        .await?;
+        assert_eq!(first.cursor.value(), 1);
+        assert_eq!(first.committed.cursor, first.cursor);
+        assert_eq!(first.committed.operation.op_id, op_id);
+
+        // Duplicate submission returns the same cursor.
+        let duplicate = post_json::<CommitOperationResponse>(
+            app.clone(),
+            &uri,
+            body.clone(),
+            Some(&login.access_token),
+        )
+        .await?;
+        assert_eq!(duplicate.cursor, first.cursor);
+        assert_eq!(duplicate.op_id, op_id);
+        assert_eq!(duplicate.committed, first.committed);
+
+        {
+            let mut workspaces = state.workspaces.write().await;
+            let ws = workspaces
+                .get_mut(&workspace.workspace_id)
+                .ok_or("workspace missing after commit")?;
+            ws.user_id = UserId::new_v4();
+            drop(workspaces);
+        }
+        let unauthorized_duplicate =
+            post_json_raw(app.clone(), &uri, body, Some(&login.access_token)).await?;
+        assert_eq!(unauthorized_duplicate.status(), StatusCode::UNAUTHORIZED);
+
+        // The node was applied exactly once.
+        let workspaces = state.workspaces.read().await;
+        let ws = workspaces
+            .get(&workspace.workspace_id)
+            .ok_or("workspace missing after commit")?;
+        assert_eq!(ws.nodes.len(), 2);
+        assert!(ws.nodes.contains_key(&node_id));
+        drop(workspaces);
+
+        // The operation log has exactly one entry.
+        let operations = state.operations.read().await;
+        let log = operations
+            .get(&workspace.workspace_id)
+            .ok_or("operation log missing after commit")?;
+        assert_eq!(log.len(), 1);
+        drop(operations);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn commit_op_invalid_operation_returns_structured_error(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let state = AppState::dev(RedactedSecret::new(DEFAULT_DEV_SECRET.to_owned())?);
+        let app = app_with_state(state);
+        let login = post_json::<DevLoginResponse>(
+            app.clone(),
+            "/v1/auth/dev-login",
+            serde_json::json!({
+                "device_name": "err-laptop",
+                "platform": {"os": "linux"},
+                "public_key": "err-key"
+            }),
+            None,
+        )
+        .await?;
+        let workspace = post_json::<CreateWorkspaceResponse>(
+            app.clone(),
+            "/v1/workspaces",
+            serde_json::json!({"name": "err-ws"}),
+            Some(&login.access_token),
+        )
+        .await?;
+
+        // CreateNode with a non-existent parent -> node_not_found.
+        let missing_parent = NodeId::new_v4();
+        let body = serde_json::json!({
+            "op_id": OpId::new_v4(),
+            "base_cursor": 0,
+            "kind": {
+                "type": "create_node",
+                "node_id": NodeId::new_v4(),
+                "parent_id": missing_parent,
+                "name": "docs",
+                "kind": "directory",
+                "initial_revision": null
+            }
+        });
+        let uri = format!("/v1/workspaces/{}/ops", workspace.workspace_id);
+        let response = post_json_raw(app.clone(), &uri, body, Some(&login.access_token)).await?;
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+        assert_eq!(error_code(response).await?, "node_not_found");
+
+        // CreateNode with invalid name -> invalid_operation.
+        let body = serde_json::json!({
+            "op_id": OpId::new_v4(),
+            "base_cursor": 0,
+            "kind": {
+                "type": "create_node",
+                "node_id": NodeId::new_v4(),
+                "parent_id": workspace.root_node_id,
+                "name": "../bad",
+                "kind": "directory",
+                "initial_revision": null
+            }
+        });
+        let response = post_json_raw(app.clone(), &uri, body, Some(&login.access_token)).await?;
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        assert_eq!(error_code(response).await?, "invalid_operation");
+
+        // Workspace not found -> workspace_not_found.
+        let body = serde_json::json!({
+            "op_id": OpId::new_v4(),
+            "base_cursor": 0,
+            "kind": {
+                "type": "create_node",
+                "node_id": NodeId::new_v4(),
+                "parent_id": workspace.root_node_id,
+                "name": "ok",
+                "kind": "directory",
+                "initial_revision": null
+            }
+        });
+        let bad_uri = format!("/v1/workspaces/{}/ops", WorkspaceId::new_v4());
+        let response = post_json_raw(app, &bad_uri, body, Some(&login.access_token)).await?;
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+        assert_eq!(error_code(response).await?, "workspace_not_found");
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn commit_rejects_missing_initial_blob_and_duplicate_revision_id(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let dir = TempDir::new()?;
+        let state = AppState::dev_with_blob_root(
+            RedactedSecret::new(DEFAULT_DEV_SECRET.to_owned())?,
+            dir.path(),
+        );
+        let app = app_with_state(state);
+        let login = post_json::<DevLoginResponse>(
+            app.clone(),
+            "/v1/auth/dev-login",
+            serde_json::json!({
+                "device_name": "rev-laptop",
+                "platform": {"os": "linux"},
+                "public_key": "rev-key"
+            }),
+            None,
+        )
+        .await?;
+        let workspace = post_json::<CreateWorkspaceResponse>(
+            app.clone(),
+            "/v1/workspaces",
+            serde_json::json!({"name": "rev-ws"}),
+            Some(&login.access_token),
+        )
+        .await?;
+        let uri = format!("/v1/workspaces/{}/ops", workspace.workspace_id);
+
+        let missing_node_id = NodeId::new_v4();
+        let missing_revision = file_revision(
+            workspace.workspace_id,
+            login.device_id,
+            missing_node_id,
+            "sha256:missing",
+        )?;
+        let response = post_json_raw(
+            app.clone(),
+            &uri,
+            serde_json::json!({
+                "op_id": OpId::new_v4(),
+                "base_cursor": 0,
+                "kind": {
+                    "type": "create_node",
+                    "node_id": missing_node_id,
+                    "parent_id": workspace.root_node_id,
+                    "name": "missing.txt",
+                    "kind": "file",
+                    "initial_revision": missing_revision
+                }
+            }),
+            Some(&login.access_token),
+        )
+        .await?;
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+        assert_eq!(error_code(response).await?, "blob_missing");
+
+        let file_bytes = b"revision bytes";
+        let blob_id = format!("sha256:{}", hex_lower(&Sha256::digest(file_bytes)));
+        post_json::<DevBlobUploadResponse>(
+            app.clone(),
+            "/v1/blobs/dev-upload",
+            serde_json::json!({
+                "blob_id": blob_id,
+                "bytes_base64": URL_SAFE_NO_PAD.encode(file_bytes),
+                "size": file_bytes.len(),
+                "encryption_header": null
+            }),
+            Some(&login.access_token),
+        )
+        .await?;
+
+        let file_node_id = NodeId::new_v4();
+        post_json::<CommitOperationResponse>(
+            app.clone(),
+            &uri,
+            serde_json::json!({
+                "op_id": OpId::new_v4(),
+                "base_cursor": 0,
+                "kind": {
+                    "type": "create_node",
+                    "node_id": file_node_id,
+                    "parent_id": workspace.root_node_id,
+                    "name": "ok.txt",
+                    "kind": "file",
+                    "initial_revision": null
+                }
+            }),
+            Some(&login.access_token),
+        )
+        .await?;
+        let revision = file_revision(
+            workspace.workspace_id,
+            login.device_id,
+            file_node_id,
+            &blob_id,
+        )?;
+        post_json::<CommitOperationResponse>(
+            app.clone(),
+            &uri,
+            serde_json::json!({
+                "op_id": OpId::new_v4(),
+                "base_cursor": 1,
+                "kind": {
+                    "type": "put_file_revision",
+                    "node_id": file_node_id,
+                    "base_revision_id": null,
+                    "revision": revision
+                }
+            }),
+            Some(&login.access_token),
+        )
+        .await?;
+
+        let mut duplicate_revision = revision.clone();
+        duplicate_revision.base_revision_id = Some(revision.revision_id);
+        let response = post_json_raw(
+            app,
+            &uri,
+            serde_json::json!({
+                "op_id": OpId::new_v4(),
+                "base_cursor": 2,
+                "kind": {
+                    "type": "put_file_revision",
+                    "node_id": file_node_id,
+                    "base_revision_id": revision.revision_id,
+                    "revision": duplicate_revision
+                }
+            }),
+            Some(&login.access_token),
+        )
+        .await?;
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        assert_eq!(error_code(response).await?, "invalid_operation");
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn commit_ops_apply_rules_and_env_records() -> Result<(), Box<dyn std::error::Error>> {
+        let state = AppState::dev(RedactedSecret::new(DEFAULT_DEV_SECRET.to_owned())?);
+        let app = app_with_state(state.clone());
+        let login = post_json::<DevLoginResponse>(
+            app.clone(),
+            "/v1/auth/dev-login",
+            serde_json::json!({
+                "device_name": "env-laptop",
+                "platform": {"os": "linux"},
+                "public_key": "env-key"
+            }),
+            None,
+        )
+        .await?;
+        let workspace = post_json::<CreateWorkspaceResponse>(
+            app.clone(),
+            "/v1/workspaces",
+            serde_json::json!({"name": "env-ws"}),
+            Some(&login.access_token),
+        )
+        .await?;
+        let uri = format!("/v1/workspaces/{}/ops", workspace.workspace_id);
+        let env_var_id = EnvVarId::new_v4();
+
+        post_json::<CommitOperationResponse>(
+            app.clone(),
+            &uri,
+            serde_json::json!({
+                "op_id": OpId::new_v4(),
+                "base_cursor": 0,
+                "kind": {
+                    "type": "set_rule",
+                    "path_pattern": "node_modules/**",
+                    "rule": {"action": "dependency-cache", "manager": "node", "scope": null}
+                }
+            }),
+            Some(&login.access_token),
+        )
+        .await?;
+        post_json::<CommitOperationResponse>(
+            app.clone(),
+            &uri,
+            serde_json::json!({
+                "op_id": OpId::new_v4(),
+                "base_cursor": 1,
+                "kind": {
+                    "type": "set_env_var",
+                    "env_var_id": env_var_id,
+                    "encrypted_payload": "ciphertext-envelope",
+                    "metadata": {
+                        "env_name": "API_KEY",
+                        "environment": "dev",
+                        "scope": {"type": "workspace"},
+                        "secret_kind": "secret"
+                    }
+                }
+            }),
+            Some(&login.access_token),
+        )
+        .await?;
+
+        let workspaces = state.workspaces.read().await;
+        let stored = workspaces
+            .get(&workspace.workspace_id)
+            .ok_or("created workspace missing")?;
+        assert_eq!(stored.rules.len(), 1);
+        assert_eq!(stored.env_vars.len(), 1);
+        assert_eq!(
+            stored
+                .env_vars
+                .get(&env_var_id)
+                .ok_or("env record missing")?
+                .encrypted_payload,
+            "ciphertext-envelope"
+        );
+        drop(workspaces);
+
+        post_json::<CommitOperationResponse>(
+            app,
+            &uri,
+            serde_json::json!({
+                "op_id": OpId::new_v4(),
+                "base_cursor": 2,
+                "kind": {"type": "delete_env_var", "env_var_id": env_var_id}
+            }),
+            Some(&login.access_token),
+        )
+        .await?;
+        let workspaces = state.workspaces.read().await;
+        let stored = workspaces
+            .get(&workspace.workspace_id)
+            .ok_or("created workspace missing")?;
+        assert!(stored.env_vars.is_empty());
+        drop(workspaces);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn fetch_ops_pagination_has_more_and_next_cursor(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let state = AppState::dev(RedactedSecret::new(DEFAULT_DEV_SECRET.to_owned())?);
+        let app = app_with_state(state);
+        let login = post_json::<DevLoginResponse>(
+            app.clone(),
+            "/v1/auth/dev-login",
+            serde_json::json!({
+                "device_name": "page-laptop",
+                "platform": {"os": "linux"},
+                "public_key": "page-key"
+            }),
+            None,
+        )
+        .await?;
+        let workspace = post_json::<CreateWorkspaceResponse>(
+            app.clone(),
+            "/v1/workspaces",
+            serde_json::json!({"name": "page-ws"}),
+            Some(&login.access_token),
+        )
+        .await?;
+        let uri = format!("/v1/workspaces/{}/ops", workspace.workspace_id);
+
+        // Commit three CreateNode operations.
+        for idx in 0..3u32 {
+            let body = serde_json::json!({
+                "op_id": OpId::new_v4(),
+                "base_cursor": 0,
+                "kind": {
+                    "type": "create_node",
+                    "node_id": NodeId::new_v4(),
+                    "parent_id": workspace.root_node_id,
+                    "name": format!("dir{idx}"),
+                    "kind": "directory",
+                    "initial_revision": null
+                }
+            });
+            post_json::<CommitOperationResponse>(
+                app.clone(),
+                &uri,
+                body,
+                Some(&login.access_token),
+            )
+            .await?;
+        }
+
+        // Page with limit=2 from since=0.
+        let page: FetchOpsResponse = get_json(
+            app.clone(),
+            &format!("{uri}?since=0&limit=2"),
+            Some(&login.access_token),
+        )
+        .await?;
+        assert_eq!(page.operations.len(), 2);
+        assert!(page.has_more);
+        assert_eq!(page.next_cursor, Some(page.operations[1].cursor));
+        // Cursors are ascending.
+        assert!(page.operations[0].cursor < page.operations[1].cursor);
+
+        // Next page from the next_cursor.
+        let since = page.next_cursor.ok_or("next cursor missing")?.value();
+        let page2: FetchOpsResponse = get_json(
+            app,
+            &format!("{uri}?since={since}&limit=2"),
+            Some(&login.access_token),
+        )
+        .await?;
+        assert_eq!(page2.operations.len(), 1);
+        assert!(!page2.has_more);
+        assert_eq!(page2.next_cursor, None);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn replay_from_cursor_zero_reconstructs_metadata_in_order(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let dir = TempDir::new()?;
+        let state = AppState::dev_with_blob_root(
+            RedactedSecret::new(DEFAULT_DEV_SECRET.to_owned())?,
+            dir.path(),
+        );
+        let app = app_with_state(state.clone());
+        let login = post_json::<DevLoginResponse>(
+            app.clone(),
+            "/v1/auth/dev-login",
+            serde_json::json!({
+                "device_name": "replay-laptop",
+                "platform": {"os": "linux"},
+                "public_key": "replay-key"
+            }),
+            None,
+        )
+        .await?;
+        let workspace = post_json::<CreateWorkspaceResponse>(
+            app.clone(),
+            "/v1/workspaces",
+            serde_json::json!({"name": "replay-ws"}),
+            Some(&login.access_token),
+        )
+        .await?;
+        let uri = format!("/v1/workspaces/{}/ops", workspace.workspace_id);
+
+        // Upload a blob so PutFileRevision can reference it.
+        let file_bytes = b"hello replay";
+        let blob_id = format!("sha256:{}", hex_lower(&Sha256::digest(file_bytes)));
+        post_json::<DevBlobUploadResponse>(
+            app.clone(),
+            "/v1/blobs/dev-upload",
+            serde_json::json!({
+                "blob_id": blob_id,
+                "bytes_base64": URL_SAFE_NO_PAD.encode(file_bytes),
+                "size": file_bytes.len(),
+                "encryption_header": null
+            }),
+            Some(&login.access_token),
+        )
+        .await?;
+
+        // 1. Create a file node.
+        let file_node_id = NodeId::new_v4();
+        let create_body = serde_json::json!({
+            "op_id": OpId::new_v4(),
+            "base_cursor": 0,
+            "kind": {
+                "type": "create_node",
+                "node_id": file_node_id,
+                "parent_id": workspace.root_node_id,
+                "name": "notes.txt",
+                "kind": "file",
+                "initial_revision": null
+            }
+        });
+        let created = post_json::<CommitOperationResponse>(
+            app.clone(),
+            &uri,
+            create_body,
+            Some(&login.access_token),
+        )
+        .await?;
+        assert_eq!(created.cursor.value(), 1);
+
+        // 2. Put a file revision.
+        let revision = file_revision(
+            workspace.workspace_id,
+            login.device_id,
+            file_node_id,
+            &blob_id,
+        )?;
+        let put_body = serde_json::json!({
+            "op_id": OpId::new_v4(),
+            "base_cursor": created.cursor.value(),
+            "kind": {
+                "type": "put_file_revision",
+                "node_id": file_node_id,
+                "base_revision_id": null,
+                "revision": revision
+            }
+        });
+        let put = post_json::<CommitOperationResponse>(
+            app.clone(),
+            &uri,
+            put_body,
+            Some(&login.access_token),
+        )
+        .await?;
+        assert_eq!(put.cursor.value(), 2);
+
+        // 3. Move the file.
+        let move_body = serde_json::json!({
+            "op_id": OpId::new_v4(),
+            "base_cursor": put.cursor.value(),
+            "kind": {
+                "type": "move_node",
+                "node_id": file_node_id,
+                "old_parent_id": workspace.root_node_id,
+                "old_name": "notes.txt",
+                "new_parent_id": workspace.root_node_id,
+                "new_name": "renamed.txt"
+            }
+        });
+        let moved = post_json::<CommitOperationResponse>(
+            app.clone(),
+            &uri,
+            move_body,
+            Some(&login.access_token),
+        )
+        .await?;
+        assert_eq!(moved.cursor.value(), 3);
+
+        // Fetch all ops from cursor 0 and verify ordering and reconstruction.
+        let all: FetchOpsResponse = get_json(
+            app.clone(),
+            &format!("{uri}?since=0&limit=100"),
+            Some(&login.access_token),
+        )
+        .await?;
+        assert_eq!(all.operations.len(), 3);
+        let cursors: Vec<i64> = all
+            .operations
+            .iter()
+            .map(|committed| committed.cursor.value())
+            .collect();
+        assert_eq!(cursors, vec![1, 2, 3]);
+
+        // Replay from cursor 0: rebuild a fresh in-memory tree by re-applying the
+        // fetched operations in cursor order, seeded with the original root node so
+        // node IDs line up. This proves the op log carries enough metadata to
+        // reconstruct state and that ordering is preserved.
+        let original = state.workspaces.read().await;
+        let orig_ws = original
+            .get(&workspace.workspace_id)
+            .ok_or("original workspace missing")?;
+        let mut replay_nodes = HashMap::new();
+        replay_nodes.insert(orig_ws.root_node_id, orig_ws.root_node.clone());
+        let mut replay_revisions: HashMap<RevisionId, NodeRevision> = HashMap::new();
+        let mut replay_cursor = Cursor::new(0)?;
+        drop(original);
+
+        for committed in &all.operations {
+            let replay_root = replay_nodes
+                .get(&workspace.root_node_id)
+                .ok_or("replay root missing")?
+                .clone();
+            let mut replay_ws = WorkspaceRecord {
+                workspace_id: workspace.workspace_id,
+                user_id: login.user_id,
+                name: String::new(),
+                root_node_id: workspace.root_node_id,
+                current_cursor: replay_cursor,
+                root_node: replay_root,
+                nodes: std::mem::take(&mut replay_nodes),
+                revisions: std::mem::take(&mut replay_revisions),
+                rules: HashMap::new(),
+                env_vars: HashMap::new(),
+            };
+            let known_blob = blob_id.clone();
+            let blob_exists = move |id: &str| id == known_blob;
+            apply_operation(&mut replay_ws, &committed.operation, &blob_exists)
+                .map_err(|_| std::io::Error::other("replay apply should succeed"))?;
+            replay_cursor = Cursor::new(replay_cursor.value() + 1)?;
+            replay_nodes = std::mem::take(&mut replay_ws.nodes);
+            replay_revisions = std::mem::take(&mut replay_ws.revisions);
+        }
+
+        // The replayed tree must match the backend-applied tree.
+        let original = state.workspaces.read().await;
+        let orig_ws = original
+            .get(&workspace.workspace_id)
+            .ok_or("original workspace missing")?;
+        assert_eq!(&orig_ws.nodes, &replay_nodes);
+        let replay_file = replay_nodes
+            .get(&file_node_id)
+            .ok_or("replay file missing")?;
+        assert_eq!(replay_file.name, "renamed.txt");
+        assert_eq!(
+            replay_file.current_rev,
+            orig_ws
+                .nodes
+                .get(&file_node_id)
+                .ok_or("original file missing")?
+                .current_rev
+        );
+        assert_eq!(replay_revisions.len(), orig_ws.revisions.len());
+        drop(original);
         Ok(())
     }
 

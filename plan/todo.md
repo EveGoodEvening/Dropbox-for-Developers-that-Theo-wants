@@ -391,58 +391,58 @@ Acceptance criteria:
 
 ### 6.2 Operation commit transaction
 
-- [ ] Implement `POST /v1/workspaces/{id}/ops`.
-- [ ] Lock workspace row or use advisory lock.
-- [ ] Validate device belongs to workspace owner.
-- [ ] Check idempotency by `(workspace_id, op_id)`.
-- [ ] Increment cursor transactionally.
-- [ ] Apply operation to nodes/revisions/env/rules.
-- [ ] Insert operation row with assigned cursor.
-- [ ] Return committed operation and cursor.
+- [x] Implement `POST /v1/workspaces/{id}/ops`.
+- [x] Lock workspace row or use advisory lock.
+- [x] Validate device belongs to workspace owner.
+- [x] Check idempotency by `(workspace_id, op_id)`.
+- [x] Increment cursor transactionally.
+- [x] Apply operation to nodes/revisions/env/rules.
+- [x] Insert operation row with assigned cursor.
+- [x] Return committed operation and cursor.
 
 Acceptance criteria:
 
-- [ ] Duplicate operation submission returns the original committed cursor without applying twice.
+- [x] Duplicate operation submission returns the original committed cursor without applying twice.
 
 ### 6.3 Implement operation validators
 
-- [ ] `CreateNode`:
-  - [ ] parent exists
-  - [ ] parent is directory
-  - [ ] name valid
-  - [ ] no live sibling collision
-- [ ] `PutFileRevision`:
-  - [ ] node exists
-  - [ ] node is file
-  - [ ] base revision equals current revision, unless initial creation
-  - [ ] blob exists or upload reservation exists
-- [ ] `MoveNode`:
-  - [ ] node exists
-  - [ ] new parent exists
-  - [ ] no cycle
-  - [ ] no path collision
-- [ ] `DeleteNode`:
-  - [ ] node exists
-  - [ ] recursive flag required for non-empty directory
-- [ ] `RestoreNode`:
-  - [ ] tombstoned node exists
-  - [ ] target parent exists
-  - [ ] no collision
+- [x] `CreateNode`:
+  - [x] parent exists
+  - [x] parent is directory
+  - [x] name valid
+  - [x] no live sibling collision
+- [x] `PutFileRevision`:
+  - [x] node exists
+  - [x] node is file
+  - [x] base revision equals current revision, unless initial creation
+  - [x] blob exists or upload reservation exists
+- [x] `MoveNode`:
+  - [x] node exists
+  - [x] new parent exists
+  - [x] no cycle
+  - [x] no path collision
+- [x] `DeleteNode`:
+  - [x] node exists
+  - [x] recursive flag required for non-empty directory
+- [x] `RestoreNode`:
+  - [x] tombstoned node exists
+  - [x] target parent exists
+  - [x] no collision
 
 Acceptance criteria:
 
-- [ ] Invalid operations fail with stable structured error codes.
+- [x] Invalid operations fail with stable structured error codes.
 
 ### 6.4 Implement operation fetch
 
-- [ ] Implement `GET /v1/workspaces/{id}/ops?since=&limit=`.
-- [ ] Return operations sorted by cursor.
-- [ ] Include `has_more` and `next_cursor`.
-- [ ] Add tests for pagination.
+- [x] Implement `GET /v1/workspaces/{id}/ops?since=&limit=`.
+- [x] Return operations sorted by cursor.
+- [x] Include `has_more` and `next_cursor`.
+- [x] Add tests for pagination.
 
 Acceptance criteria:
 
-- [ ] Client can reconstruct state by replaying all operations from cursor 0.
+- [x] Client can reconstruct state by replaying all operations from cursor 0.
 
 ### 6.5 Implement manifest fetch
 
