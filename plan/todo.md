@@ -341,11 +341,11 @@ Acceptance criteria:
 - [x] Create env_vars table.
 - [x] Create key_envelopes table.
 - [x] Add indexes from `design.md`.
-- [ ] Add migration test that runs migrations on an empty DB.
+- [ ] Add migration test that runs migrations on an empty DB. **Blocked: no Postgres available in sandbox.**
 
 Acceptance criteria:
 
-- [ ] Backend starts with a fresh migrated database.
+- [ ] Backend starts with a fresh migrated database. **Blocked: no Postgres available in sandbox.**
 
 ### 5.3 Implement auth stub for local development
 
@@ -483,8 +483,8 @@ trait BlobStore {
 ```
 
 - [x] Implement local filesystem blob store for tests.
-- [ ] Implement S3-compatible blob store.
-- [ ] Add MinIO or localstack test option.
+- [ ] Implement S3-compatible blob store. **Blocked: no S3 credentials/docker in sandbox.**
+- [ ] Add MinIO or localstack test option. **Blocked: no docker in sandbox.**
 
 Acceptance criteria:
 
@@ -495,7 +495,7 @@ Acceptance criteria:
 - [x] Implement `POST /v1/blobs/presign-upload` or direct dev upload endpoint.
 - [x] Implement `POST /v1/blobs/presign-download` or direct dev download endpoint.
 - [x] Implement `GET /v1/blobs/{id}/status`.
-- [ ] Store blob metadata in Postgres.
+- [ ] Store blob metadata in Postgres. **Blocked: no Postgres available in sandbox.**
 - [x] Validate declared size and hash where possible.
 
 Acceptance criteria:
@@ -516,15 +516,15 @@ Acceptance criteria:
 
 ### 7.4 Chunking, optional after vertical slice
 
-- [ ] Define chunk threshold, e.g. 32 MiB.
-- [ ] Split large files into fixed-size chunks or content-defined chunks.
-- [ ] Upload chunks individually.
-- [ ] Store chunk IDs in revision.
-- [ ] Stream read ranges if feasible.
+- [ ] Define chunk threshold, e.g. 32 MiB. **Deferred: MVP note says whole-file blobs acceptable.**
+- [ ] Split large files into fixed-size chunks or content-defined chunks. **Deferred: MVP note says whole-file blobs acceptable.**
+- [ ] Upload chunks individually. **Deferred: MVP note says whole-file blobs acceptable.**
+- [ ] Store chunk IDs in revision. **Deferred: MVP note says whole-file blobs acceptable.**
+- [ ] Stream read ranges if feasible. **Deferred: MVP note says whole-file blobs acceptable.**
 
 Acceptance criteria:
 
-- [ ] Large files do not require re-uploading all chunks after a tiny change, if chunking is implemented.
+- [ ] Large files do not require re-uploading all chunks after a tiny change, if chunking is implemented. **Deferred: MVP note says whole-file blobs acceptable.**
 
 MVP note:
 
@@ -539,12 +539,12 @@ MVP note:
 - [x] Add `WorkspaceContentKey` type.
 - [x] Add `WorkspaceSecretKey` type.
 - [x] Generate keys with CSPRNG.
-- [ ] Store keys locally through OS keychain abstraction.
-- [ ] For development, allow encrypted file fallback with explicit warning.
+- [ ] Store keys locally through OS keychain abstraction. **Blocked: no OS keychain in sandbox.**
+- [ ] For development, allow encrypted file fallback with explicit warning. **Blocked: needs keychain design decision.**
 
 Acceptance criteria:
 
-- [ ] Keys are never stored in plaintext config files.
+- [ ] Keys are never stored in plaintext config files. **Blocked: depends on keychain/fallback (8.1).**
 
 ### 8.2 Implement blob encryption
 
@@ -1045,7 +1045,7 @@ Acceptance criteria:
 
 Acceptance criteria:
 
-- [ ] User can set a secret on A and run a command using it on B.
+- [ ] User can set a secret on A and run a command using it on B. **Blocked: env exec needs workspace secret key (keychain).**
 
 ### 17.4 Dotenv parser and materializer
 
@@ -1110,7 +1110,7 @@ Acceptance criteria:
 
 Acceptance criteria:
 
-- [ ] Submodule content appears on another machine without requiring immediate submodule commands.
+- [ ] Submodule content appears on another machine without requiring immediate submodule commands. **Blocked: needs two-client + git binary E2E.**
 
 ---
 
@@ -1151,7 +1151,7 @@ Acceptance criteria:
 
 MVP relaxation:
 
-- [ ] Full `deps install` helper can be deferred, but generated suppression cannot.
+- [ ] Full `deps install` helper can be deferred, but generated suppression cannot. **Deferred per MVP relaxation note; generated suppression is done.**
 
 ---
 
@@ -1235,32 +1235,32 @@ Acceptance criteria:
 
 ### 22.1 Two-client happy path
 
-- [ ] Start local backend.
-- [ ] Start client A.
-- [ ] Start client B.
-- [ ] A creates file.
-- [ ] B sees metadata.
-- [ ] B reads file and hydrates content.
-- [ ] B edits file.
-- [ ] A receives update.
+- [ ] Start local backend. **Blocked: needs live two-client FUSE E2E.**
+- [ ] Start client A. **Blocked: needs live two-client FUSE E2E.**
+- [ ] Start client B. **Blocked: needs live two-client FUSE E2E.**
+- [ ] A creates file. **Blocked: needs live two-client FUSE E2E.**
+- [ ] B sees metadata. **Blocked: needs live two-client FUSE E2E.**
+- [ ] B reads file and hydrates content. **Blocked: needs live two-client FUSE E2E.**
+- [ ] B edits file. **Blocked: needs live two-client FUSE E2E.**
+- [ ] A receives update. **Blocked: needs live two-client FUSE E2E.**
 
 Acceptance criteria:
 
-- [ ] Test passes repeatedly without sleeps longer than necessary; use event synchronization.
+- [ ] Test passes repeatedly without sleeps longer than necessary; use event synchronization. **Blocked: needs live two-client FUSE E2E.**
 
 ### 22.2 Conflict path
 
-- [ ] A and B hydrate same file.
-- [ ] Disconnect B.
-- [ ] A edits and syncs.
-- [ ] B edits offline.
-- [ ] Reconnect B.
-- [ ] Assert conflict created.
-- [ ] Assert both versions preserved.
+- [ ] A and B hydrate same file. **Blocked: needs live two-client FUSE E2E.**
+- [ ] Disconnect B. **Blocked: needs live two-client FUSE E2E.**
+- [ ] A edits and syncs. **Blocked: needs live two-client FUSE E2E.**
+- [ ] B edits offline. **Blocked: needs live two-client FUSE E2E.**
+- [ ] Reconnect B. **Blocked: needs live two-client FUSE E2E.**
+- [ ] Assert conflict created. **Blocked: needs live two-client FUSE E2E.**
+- [ ] Assert both versions preserved. **Blocked: needs live two-client FUSE E2E.**
 
 Acceptance criteria:
 
-- [ ] No last-writer-wins data loss.
+- [ ] No last-writer-wins data loss. **Blocked: needs live two-client FUSE E2E.**
 
 ### 22.3 Generated path path
 
@@ -1276,23 +1276,23 @@ Acceptance criteria:
 
 ### 22.4 Env path
 
-- [ ] A sets env secret.
-- [ ] Sync B.
-- [ ] B runs `fs2 env exec -- printenv NAME` in controlled test.
-- [ ] Assert value exists in child process.
-- [ ] Assert value not in logs.
+- [ ] A sets env secret. **Blocked: needs workspace key (keychain).**
+- [ ] Sync B. **Blocked: needs live two-client E2E.**
+- [ ] B runs `fs2 env exec -- printenv NAME` in controlled test. **Blocked: needs workspace key (keychain).**
+- [ ] Assert value exists in child process. **Blocked: needs workspace key (keychain).**
+- [ ] Assert value not in logs. **Blocked: needs workspace key (keychain).**
 
 Acceptance criteria:
 
-- [ ] Secret sync works and redaction holds.
+- [ ] Secret sync works and redaction holds. **Blocked: needs workspace key (keychain).**
 
 ### 22.5 Git path
 
-- [ ] Create test Git repo.
-- [ ] Sync worktree.
+- [ ] Create test Git repo. **Blocked: needs git binary + two-client E2E.**
+- [ ] Sync worktree. **Blocked: needs git binary + two-client E2E.**
 - [x] Assert `.git` internals are not uploaded.
-- [ ] Run `fs2 git status`.
-- [ ] Run materialize on second client against local bare remote.
+- [ ] Run `fs2 git status`. **Blocked: needs git binary + two-client E2E.**
+- [ ] Run materialize on second client against local bare remote. **Blocked: needs git binary + two-client E2E.**
 
 Acceptance criteria:
 
@@ -1305,29 +1305,29 @@ Acceptance criteria:
 
 ### 23.1 Metadata scale
 
-- [ ] Generate workspace with 100k files.
-- [ ] Measure cold manifest sync.
-- [ ] Measure `readdir` latency.
-- [ ] Add indexes if needed.
-- [ ] Avoid loading all nodes into memory in daemon.
+- [ ] Generate workspace with 100k files. **Deferred: requires scale/performance testing infrastructure.**
+- [ ] Measure cold manifest sync. **Deferred: requires performance measurement.**
+- [ ] Measure `readdir` latency. **Deferred: requires performance measurement.**
+- [ ] Add indexes if needed. **Deferred: requires performance measurement.**
+- [ ] Avoid loading all nodes into memory in daemon. **Deferred: requires scale testing.**
 
 Targets:
 
-- [ ] Listing a directory with 1k children should feel interactive.
-- [ ] Cold metadata sync should be paginated and resumable.
+- [ ] Listing a directory with 1k children should feel interactive. **Deferred: requires performance measurement.**
+- [ ] Cold metadata sync should be paginated and resumable. **Deferred: requires scale testing.**
 
 ### 23.2 Hydration performance
 
-- [ ] Measure first-read latency for small files.
-- [ ] Measure throughput for large files.
-- [ ] Add concurrent download limit.
-- [ ] Add per-host backoff.
-- [ ] Add progress reporting for explicit hydration.
+- [ ] Measure first-read latency for small files. **Deferred: requires performance measurement.**
+- [ ] Measure throughput for large files. **Deferred: requires performance measurement.**
+- [ ] Add concurrent download limit. **Deferred: requires hydration scale testing.**
+- [ ] Add per-host backoff. **Deferred: requires network scale testing.**
+- [ ] Add progress reporting for explicit hydration. **Deferred: requires hydration scale testing.**
 
 Targets:
 
-- [ ] Small files hydrate with low overhead after connection is warm.
-- [ ] Large files stream or download without blocking unrelated reads.
+- [ ] Small files hydrate with low overhead after connection is warm. **Deferred: requires performance measurement.**
+- [ ] Large files stream or download without blocking unrelated reads. **Deferred: requires performance measurement.**
 
 ### 23.3 Upload storms
 
@@ -1347,10 +1347,10 @@ Acceptance criteria:
 
 ### 24.1 Token handling
 
-- [ ] Store tokens only in keychain.
+- [ ] Store tokens only in keychain. **Blocked: no OS keychain in sandbox.**
   > **Blocked (sandbox):** No OS keychain available; tokens currently stored in `~/.fs2/config.json` for dev. Requires `keyring` crate + platform keychain.
 - [x] Redact tokens in logs.
-- [ ] Refresh tokens automatically.
+- [ ] Refresh tokens automatically. **Deferred: needs refresh-token issuance/rotation design.**
   > **Deferred:** Requires refresh-token issuance/rotation design not specified in MVP; JWT expires in 1h.
 - [x] Reject revoked device tokens.
 - [x] Add logout flow.
@@ -1361,7 +1361,7 @@ Acceptance criteria:
 
 ### 24.2 Key handling
 
-- [ ] Store workspace keys only in keychain or encrypted fallback.
+- [ ] Store workspace keys only in keychain or encrypted fallback. **Blocked: no OS keychain in sandbox.**
   > **Blocked (sandbox):** No OS keychain available; keys are in-memory only for dev. Requires `keyring` crate + encrypted file fallback.
 - [x] Never send private keys to backend.
 - [x] Add device revocation behavior.
@@ -1375,12 +1375,12 @@ Acceptance criteria:
 
 - [x] Materialized secret files mode `0600`.
 - [x] Cache directory not world-readable where platform supports it.
-- [ ] Local RPC socket permissions restricted to user.
+- [ ] Local RPC socket permissions restricted to user. **Blocked: no local RPC socket exists.**
   > **Blocked:** No local RPC socket exists yet; daemon uses direct in-process calls.
 
 Acceptance criteria:
 
-- [ ] Local security checks pass on macOS and Linux.
+- [ ] Local security checks pass on macOS and Linux. **Blocked: needs both macOS and Linux hosts.**
   > **Blocked:** Requires verification on both macOS and Linux hosts.
 
 ---
@@ -1431,32 +1431,32 @@ Acceptance criteria:
 
 ### 26.1 Internal dogfood setup
 
-- [ ] Use FS2 to sync its own repository between two machines/containers.
-- [ ] Use a real Node example project.
-- [ ] Use real generated directories.
-- [ ] Use at least one env secret.
-- [ ] Use Git-aware materialization.
+- [ ] Use FS2 to sync its own repository between two machines/containers. **Blocked: needs real two-machine dogfood.**
+- [ ] Use a real Node example project. **Blocked: needs real two-machine dogfood.**
+- [ ] Use real generated directories. **Blocked: needs real two-machine dogfood.**
+- [ ] Use at least one env secret. **Blocked: needs real two-machine dogfood + keychain.**
+- [ ] Use Git-aware materialization. **Blocked: needs real two-machine dogfood.**
 
 Acceptance criteria:
 
-- [ ] Project maintainers can use FS2 daily for one week without data loss.
+- [ ] Project maintainers can use FS2 daily for one week without data loss. **Blocked: needs week-long two-machine dogfood.**
 
 ### 26.2 Dogfood bug categories to track
 
-- [ ] data loss or suspected data loss
-- [ ] conflict false positives
-- [ ] conflict false negatives
-- [ ] hydration latency
-- [ ] FUSE incompatibility
-- [ ] generated directory upload leakage
-- [ ] env materialization issues
-- [ ] Git confusion
-- [ ] cache eviction bugs
-- [ ] offline replay bugs
+- [ ] data loss or suspected data loss **Blocked: dogfood bug tracking.**
+- [ ] conflict false positives **Blocked: dogfood bug tracking.**
+- [ ] conflict false negatives **Blocked: dogfood bug tracking.**
+- [ ] hydration latency **Blocked: dogfood bug tracking.**
+- [ ] FUSE incompatibility **Blocked: dogfood bug tracking.**
+- [ ] generated directory upload leakage **Blocked: dogfood bug tracking.**
+- [ ] env materialization issues **Blocked: dogfood bug tracking.**
+- [ ] Git confusion **Blocked: dogfood bug tracking.**
+- [ ] cache eviction bugs **Blocked: dogfood bug tracking.**
+- [ ] offline replay bugs **Blocked: dogfood bug tracking.**
 
 Acceptance criteria:
 
-- [ ] No known P0/P1 data safety bugs remain before public MVP.
+- [ ] No known P0/P1 data safety bugs remain before public MVP. **Blocked: needs dogfood completion.**
 
 ---
 
@@ -1484,7 +1484,7 @@ Acceptance criteria:
 
 Acceptance criteria:
 
-- [ ] A user can install without building from source.
+- [ ] A user can install without building from source. **Blocked: needs published release + platform smoke test.**
   > **Blocked:** Requires publishing release artifacts to a distribution channel and target-platform smoke testing.
 
 ### 27.3 Versioning and migrations
@@ -1532,20 +1532,20 @@ Do not start with UI, team features, Windows, artifact caching, or Git replaceme
 
 ## 29. Definition of done for MVP
 
-- [ ] Two clients can sync a workspace through the backend.
+- [ ] Two clients can sync a workspace through the backend. **Blocked: needs live two-client FUSE E2E.**
   > **Blocked: requires live two-client E2E with FUSE mount.**
-- [ ] Directory structure appears on a new client before file bytes download.
+- [ ] Directory structure appears on a new client before file bytes download. **Blocked: needs live FUSE mount.**
   > **Blocked: requires live FUSE mount.**
-- [ ] Reading a metadata-only file hydrates it.
+- [ ] Reading a metadata-only file hydrates it. **Blocked: needs live FUSE mount.**
   > **Blocked: requires live FUSE mount.**
-- [ ] Editing a file on one client updates the other.
+- [ ] Editing a file on one client updates the other. **Blocked: needs live FUSE + two-client.**
   > **Blocked: requires live FUSE mount + two-client.**
-- [ ] Concurrent edits preserve both versions.
+- [ ] Concurrent edits preserve both versions. **Blocked: visible conflict copy requires FUSE.**
   > **Blocked: visible conflict copy requires FUSE.**
-- [ ] Offline edits replay safely.
+- [ ] Offline edits replay safely. **Blocked: live FUSE E2E; offline queue/replay unit-tested.**
   > **Partial: offline queue/replay tested; live FUSE E2E blocked.**
 - [x] `node_modules` and other generated directories are not synced by default.
-- [ ] Env secrets sync encrypted and can be injected into a command.
+- [ ] Env secrets sync encrypted and can be injected into a command. **Blocked: env exec needs workspace key (keychain).**
   > **Blocked: env exec needs workspace key (keychain).**
 - [x] `.git` internals are not synced by default.
 - [x] `fs2 git materialize` can set up a functional Git repo on a new machine.
@@ -1553,7 +1553,7 @@ Do not start with UI, team features, Windows, artifact caching, or Git replaceme
 - [x] Cache pruning cannot delete dirty, conflict, or pinned data.
 - [x] Tests cover sync, conflicts, generated paths, env secrets, and Git-aware behavior.
 - [x] Docs explain limitations and security model.
-- [ ] Dogfood period completes without known data loss bugs.
+- [ ] Dogfood period completes without known data loss bugs. **Blocked: needs real dogfood.**
   > **Blocked: requires real two-machine dogfood.**
 
 ---
