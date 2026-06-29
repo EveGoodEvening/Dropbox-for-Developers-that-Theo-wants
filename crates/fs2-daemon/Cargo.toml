@@ -23,3 +23,6 @@ fs2-sync = { path = "../fs2-sync" }
 fs2-rules = { path = "../fs2-rules" }
 fs2-env = { path = "../fs2-env" }
 fs2-crypto = { path = "../fs2-crypto" }
+uuid = { version = "1", features = ["v4"] }
+chrono = { version = "0.4", features = ["serde"] }
+fs2-cli = { path = "../fs2-cli" }

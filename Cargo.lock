@@ -435,6 +435,8 @@ name = "fs2-daemon"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "chrono",
+ "fs2-cli",
  "fs2-core",
  "fs2-crypto",
  "fs2-env",
@@ -445,6 +447,7 @@ dependencies = [
  "tokio",
  "tracing",
  "tracing-subscriber",
+ "uuid",
 ]
 
 [[package]]

@@ -706,29 +706,29 @@ Acceptance criteria:
 
 ### 11.2 Implement outbound queue
 
-- [ ] Persist pending ops in SQLite.
-- [ ] Upload blobs before submitting file revision ops.
-- [ ] Submit ops idempotently.
-- [ ] Remove pending op only after commit acknowledged.
-- [ ] Retry transient failures.
-- [ ] Surface permanent failures to status.
+- [x] Persist pending ops in SQLite.
+- [x] Upload blobs before submitting file revision ops.
+- [x] Submit ops idempotently.
+- [x] Remove pending op only after commit acknowledged.
+- [x] Retry transient failures.
+- [x] Surface permanent failures to status.
 
 Acceptance criteria:
 
-- [ ] Killing process during upload/commit does not lose pending work.
+- [x] Killing process during upload/commit does not lose pending work.
 
 ### 11.3 Implement inbound sync loop
 
-- [ ] Connect WebSocket.
-- [ ] On notification, fetch ops since local cursor.
-- [ ] On startup, fetch ops since local cursor.
-- [ ] On WebSocket failure, poll periodically.
-- [ ] Apply remote ops locally.
-- [ ] Do not hydrate bytes unless pinned/prefetch.
+- [x] Connect WebSocket.
+- [x] On notification, fetch ops since local cursor.
+- [x] On startup, fetch ops since local cursor.
+- [x] On WebSocket failure, poll periodically.
+- [x] Apply remote ops locally.
+- [x] Do not hydrate bytes unless pinned/prefetch.
 
 Acceptance criteria:
 
-- [ ] Client B sees Client A metadata changes after event.
+- [x] Client B sees Client A metadata changes after event.
 
 ### 11.4 Two-client materialized test harness
 
@@ -954,27 +954,27 @@ MVP relaxation:
 
 ### 16.1 Offline detection
 
-- [ ] Detect backend unreachable.
-- [ ] Mark daemon connection state offline.
-- [ ] Continue serving hydrated files.
-- [ ] Queue writes.
-- [ ] Return clear error for unhydrated reads.
+- [x] Detect backend unreachable.
+- [x] Mark daemon connection state offline.
+- [x] Continue serving hydrated files.
+- [x] Queue writes.
+- [x] Return clear error for unhydrated reads.
 
 Acceptance criteria:
 
-- [ ] Network outage does not prevent editing already hydrated files.
+- [x] Network outage does not prevent editing already hydrated files.
 
 ### 16.2 Pending op replay
 
-- [ ] Persist pending ops before attempting network mutation.
-- [ ] On daemon restart, load pending ops.
-- [ ] Upload missing blobs.
-- [ ] Submit ops in local order.
-- [ ] Handle idempotent duplicate success.
+- [x] Persist pending ops before attempting network mutation.
+- [x] On daemon restart, load pending ops.
+- [x] Upload missing blobs.
+- [x] Submit ops in local order.
+- [x] Handle idempotent duplicate success.
 
 Acceptance criteria:
 
-- [ ] Killing daemon during sync and restarting eventually converges.
+- [x] Killing daemon during sync and restarting eventually converges.
 
 ### 16.3 Rebase after reconnect
 
@@ -1183,16 +1183,16 @@ Acceptance criteria:
 
 ### 21.1 Daemon command
 
-- [ ] Implement `fs2 daemon run`.
-- [ ] Open local RPC socket.
-- [ ] Initialize local DB.
-- [ ] Start sync loops.
-- [ ] Start cache eviction loop.
-- [ ] Handle shutdown gracefully.
+- [x] Implement `fs2 daemon run`.
+- [x] Open local RPC socket.
+- [x] Initialize local DB.
+- [x] Start sync loops.
+- [x] Start cache eviction loop.
+- [x] Handle shutdown gracefully.
 
 Acceptance criteria:
 
-- [ ] Daemon can run independently of CLI command lifetime.
+- [x] Daemon can run independently of CLI command lifetime.
 
 ### 21.2 macOS LaunchAgent
 
@@ -1498,7 +1498,7 @@ A coding agent should implement in this order unless blocked:
 13. [x] Rule engine default suppressing `node_modules`.
 14. [ ] Conflict detection/preservation.
 15. [ ] Offline queue/replay.
-16. [ ] Env secret sync.
+16. [x] Env secret sync.
 17. [ ] Git-aware diagnostics/materialization.
 18. [ ] Cache pin/prune.
 19. [x] `doctor`.
