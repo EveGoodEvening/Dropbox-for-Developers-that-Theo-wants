@@ -9,5 +9,8 @@ license.workspace = true
 name = "fs2"
 path = "src/main.rs"
 
+[dependencies]
+fs2-git = { path = "../fs2-git" }
+
 [lints]
 workspace = true

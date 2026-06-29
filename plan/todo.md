@@ -1056,17 +1056,17 @@ Acceptance criteria:
 
 ### 18.1 Git repository detection
 
-- [ ] Detect `.git` directory or file.
-- [ ] Detect worktrees.
-- [ ] Parse remote URLs.
-- [ ] Detect current branch.
-- [ ] Detect HEAD commit.
-- [ ] Detect dirty status summary.
-- [ ] Detect `.gitmodules`.
+- [x] Detect `.git` directory or file.
+- [x] Detect worktrees.
+- [x] Parse remote URLs.
+- [x] Detect current branch.
+- [x] Detect HEAD commit.
+- [x] Detect dirty status summary.
+- [x] Detect `.gitmodules`.
 
 Acceptance criteria:
 
-- [ ] `fs2 git status` reports useful state for normal repos and submodule repos.
+- [x] `fs2 git status` reports useful state for normal repos and submodule repos.
 
 ### 18.2 Exclude `.git` by default
 
