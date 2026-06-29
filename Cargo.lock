@@ -456,6 +456,7 @@ name = "fs2-env"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "base64",
  "chrono",
  "fs2-core",
  "fs2-crypto",

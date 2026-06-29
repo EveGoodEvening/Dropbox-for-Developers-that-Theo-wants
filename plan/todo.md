@@ -576,14 +576,14 @@ Acceptance criteria:
 
 ### 8.4 Redaction tests
 
-- [ ] Add test logger.
-- [ ] Set a known fake secret.
-- [ ] Exercise env set/list/status/error paths.
-- [ ] Assert fake secret string does not appear in logs or CLI output.
+- [x] Add test logger.
+- [x] Set a known fake secret.
+- [x] Exercise env set/list/status/error paths.
+- [x] Assert fake secret string does not appear in logs or CLI output.
 
 Acceptance criteria:
 
-- [ ] Secret redaction is enforced by tests, not convention.
+- [x] Secret redaction is enforced by tests, not convention.
 
 ---
 

@@ -232,4 +232,108 @@ mod tests {
         assert_eq!(record.value_display, "********");
         assert_eq!(record.name, "STRIPE_SECRET_KEY");
     }
+
+    #[test]
+    fn redaction_secret_value_not_in_record() {
+        let secret_value = "sk_test_12345supersecret";
+        let var = EnvVar {
+            env_var_id: Uuid::new_v4(),
+            workspace_id: WorkspaceId::new(),
+            project_path: Some("apps/web".to_owned()),
+            environment: "dev".to_owned(),
+            name: "STRIPE_SECRET_KEY".to_owned(),
+            scope: EnvScope::Project,
+            secret_kind: SecretKind::Secret,
+            encrypted_value: base64_encode(secret_value),
+            metadata: EnvVarMetadata {
+                name: "STRIPE_SECRET_KEY".to_owned(),
+                environment: "dev".to_owned(),
+                project_path: Some("apps/web".to_owned()),
+                scope: EnvScope::Project,
+                secret_kind: SecretKind::Secret,
+                updated_at: Utc::now(),
+            },
+            deleted: false,
+        };
+        let record = var.to_record();
+        let record_json = serde_json::to_string(&record).unwrap();
+        // The secret value must not appear in the serialized record.
+        assert!(
+            !record_json.contains(secret_value),
+            "secret value leaked in record JSON: {record_json}"
+        );
+        // The encrypted value must not appear in the record.
+        assert!(
+            !record_json.contains(&var.encrypted_value),
+            "encrypted value leaked in record JSON: {record_json}"
+        );
+        // The display value must be redacted.
+        assert_eq!(record.value_display, "********");
+    }
+
+    #[test]
+    fn redaction_plain_config_value_not_in_record() {
+        let config_value = "https://api.example.com";
+        let var = EnvVar {
+            env_var_id: Uuid::new_v4(),
+            workspace_id: WorkspaceId::new(),
+            project_path: None,
+            environment: "dev".to_owned(),
+            name: "API_URL".to_owned(),
+            scope: EnvScope::Workspace,
+            secret_kind: SecretKind::PlainConfig,
+            encrypted_value: base64_encode(config_value),
+            metadata: EnvVarMetadata {
+                name: "API_URL".to_owned(),
+                environment: "dev".to_owned(),
+                project_path: None,
+                scope: EnvScope::Workspace,
+                secret_kind: SecretKind::PlainConfig,
+                updated_at: Utc::now(),
+            },
+            deleted: false,
+        };
+        let record = var.to_record();
+        let record_json = serde_json::to_string(&record).unwrap();
+        assert!(
+            !record_json.contains(config_value),
+            "config value leaked in record JSON: {record_json}"
+        );
+    }
+
+    #[test]
+    fn redaction_debug_does_not_leak_value() {
+        let secret_value = "sk_live_super_secret_12345";
+        let var = EnvVar {
+            env_var_id: Uuid::new_v4(),
+            workspace_id: WorkspaceId::new(),
+            project_path: None,
+            environment: "prod".to_owned(),
+            name: "STRIPE_SECRET_KEY".to_owned(),
+            scope: EnvScope::Workspace,
+            secret_kind: SecretKind::Secret,
+            encrypted_value: base64_encode(secret_value),
+            metadata: EnvVarMetadata {
+                name: "STRIPE_SECRET_KEY".to_owned(),
+                environment: "prod".to_owned(),
+                project_path: None,
+                scope: EnvScope::Workspace,
+                secret_kind: SecretKind::Secret,
+                updated_at: Utc::now(),
+            },
+            deleted: false,
+        };
+        let debug_output = format!("{var:?}");
+        // The Debug output includes encrypted_value, but the plaintext
+        // secret must never appear.
+        assert!(
+            !debug_output.contains(secret_value),
+            "secret value leaked in Debug output: {debug_output}"
+        );
+    }
+
+    fn base64_encode(s: &str) -> String {
+        use base64::Engine;
+        base64::engine::general_purpose::STANDARD.encode(s.as_bytes())
+    }
 }
