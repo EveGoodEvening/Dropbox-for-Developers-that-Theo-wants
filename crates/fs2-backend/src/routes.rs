@@ -410,6 +410,13 @@ async fn download_blob(
         .get(&q.blob_id)
         .await
         .map_err(|e| BackendError::internal(format!("blob download failed: {e}")))?;
+    // Verify blob hash matches the blob ID.
+    if !fs2_crypto::verify_blob_id(&data, &q.blob_id) {
+        return Err(BackendError::Domain(fs2_core::Fs2Error::new(
+            fs2_core::Fs2ErrorCode::BlobMissing,
+            "blob hash verification failed: data does not match blob ID",
+        )));
+    }
     Ok(axum::body::Body::from(data))
 }
 
@@ -609,5 +616,42 @@ mod tests {
         assert_eq!(json["name"], "test-ws");
         assert!(json["root_node_id"].as_str().is_some());
         assert_eq!(json["cursor"], 0);
+    }
+
+    #[tokio::test]
+    async fn blob_upload_download_roundtrip() {
+        let state = test_state();
+        let blob_id = fs2_crypto::compute_blob_id(b"test blob content");
+        // Upload.
+        state
+            .blob_store
+            .put(&blob_id, bytes::Bytes::from(b"test blob content".to_vec()))
+            .await
+            .unwrap();
+        // Download and verify hash.
+        let data = state.blob_store.get(&blob_id).await.unwrap();
+        assert!(fs2_crypto::verify_blob_id(&data, &blob_id));
+        assert_eq!(data.as_ref(), b"test blob content");
+    }
+
+    #[tokio::test]
+    async fn corrupt_blob_rejected() {
+        let state = test_state();
+        let blob_id = fs2_crypto::compute_blob_id(b"original content");
+        // Upload correct blob.
+        state
+            .blob_store
+            .put(&blob_id, bytes::Bytes::from(b"original content".to_vec()))
+            .await
+            .unwrap();
+        // Corrupt the blob by overwriting with different data.
+        state
+            .blob_store
+            .put(&blob_id, bytes::Bytes::from(b"corrupted content".to_vec()))
+            .await
+            .unwrap();
+        // Download should fail hash verification.
+        let data = state.blob_store.get(&blob_id).await.unwrap();
+        assert!(!fs2_crypto::verify_blob_id(&data, &blob_id));
     }
 }

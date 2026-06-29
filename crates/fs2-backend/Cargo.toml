@@ -28,6 +28,7 @@ thiserror = "1"
 async-trait = "0.1"
 bytes = "1"
 fs2-core = { path = "../fs2-core" }
+fs2-crypto = { path = "../fs2-crypto" }
 
 [dev-dependencies]
 http-body-util = "0.1"

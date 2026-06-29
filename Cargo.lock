@@ -375,6 +375,7 @@ dependencies = [
  "bytes",
  "chrono",
  "fs2-core",
+ "fs2-crypto",
  "http-body-util",
  "jsonwebtoken",
  "serde",
@@ -451,10 +452,14 @@ name = "fs2-env"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "chrono",
  "fs2-core",
  "fs2-crypto",
  "serde",
  "serde_json",
+ "tempfile",
+ "thiserror 1.0.69",
+ "uuid",
 ]
 
 [[package]]

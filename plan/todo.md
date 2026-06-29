@@ -507,12 +507,12 @@ Acceptance criteria:
 - [x] Implement hash computation.
 - [x] Decide initial `BlobId` format:
   - [x] `sha256:<ciphertext_hash>` preferred
-- [ ] Verify downloaded blob hash before use.
-- [ ] Add corrupt blob test.
+- [x] Verify downloaded blob hash before use.
+- [x] Add corrupt blob test.
 
 Acceptance criteria:
 
-- [ ] Corrupt object-store bytes are rejected before being served to the user.
+- [x] Corrupt object-store bytes are rejected before being served to the user.
 
 ### 7.4 Chunking, optional after vertical slice
 
@@ -996,18 +996,18 @@ Acceptance criteria:
 
 ### 17.1 Env data model
 
-- [ ] Implement `EnvVar` types in `fs2-core` or `fs2-env`.
-- [ ] Add environment name validation.
-- [ ] Add variable name validation.
-- [ ] Add scope model:
-  - [ ] workspace
-  - [ ] project
-  - [ ] machine
-  - [ ] project-machine
+- [x] Implement `EnvVar` types in `fs2-core` or `fs2-env`.
+- [x] Add environment name validation.
+- [x] Add variable name validation.
+- [x] Add scope model:
+  - [x] workspace
+  - [x] project
+  - [x] machine
+  - [x] project-machine
 
 Acceptance criteria:
 
-- [ ] Env var records have unambiguous precedence.
+- [x] Env var records have unambiguous precedence.
 
 ### 17.2 Backend env endpoints
 
@@ -1038,15 +1038,15 @@ Acceptance criteria:
 
 ### 17.4 Dotenv parser and materializer
 
-- [ ] Parse common dotenv syntax.
-- [ ] Preserve multiline values if supported.
-- [ ] Write materialized file with `0600` permissions.
-- [ ] Add `.env`/materialized file to local-only/secret rule automatically.
-- [ ] Warn if `.env` is Git-tracked.
+- [x] Parse common dotenv syntax.
+- [x] Preserve multiline values if supported.
+- [x] Write materialized file with `0600` permissions.
+- [x] Add `.env`/materialized file to local-only/secret rule automatically.
+- [x] Warn if `.env` is Git-tracked.
 
 Acceptance criteria:
 
-- [ ] `fs2 env import .env` prevents future accidental normal sync of that file.
+- [x] `fs2 env import .env` prevents future accidental normal sync of that file.
 
 ---
 
