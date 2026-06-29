@@ -351,27 +351,27 @@ Blocked as of 2026-06-29: Phase 4.2 completion requires a real Postgres executio
 
 ### 5.3 Implement auth stub for local development
 
-- [ ] Add dev-only login endpoint that creates a test user.
-- [ ] Issue signed access token.
-- [ ] Add middleware that extracts user/device claims.
-- [ ] Mark dev auth clearly as non-production.
+- [x] Add dev-only login endpoint that creates a test user.
+- [x] Issue signed access token.
+- [x] Add middleware that extracts user/device claims.
+- [x] Mark dev auth clearly as non-production.
 
 Acceptance criteria:
 
-- [ ] CLI can obtain a token from local backend in development.
+- [x] CLI can obtain a token from local backend in development.
 
 ### 5.4 Implement device enrollment
 
-- [ ] Add device registration endpoint.
-- [ ] Store device name, platform, public key.
-- [ ] Return `DeviceId`.
-- [ ] Add device list endpoint.
-- [ ] Add revoke endpoint.
-- [ ] Add tests for revoked devices being rejected.
+- [x] Add device registration endpoint.
+- [x] Store device name, platform, public key.
+- [x] Return `DeviceId`.
+- [x] Add device list endpoint.
+- [x] Add revoke endpoint.
+- [x] Add tests for revoked devices being rejected.
 
 Acceptance criteria:
 
-- [ ] A user can register two devices and list both.
+- [x] A user can register two devices and list both.
 
 ---
 

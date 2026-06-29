@@ -3,16 +3,31 @@
     clippy::module_name_repetitions,
     clippy::must_use_candidate
 )]
-//! Backend HTTP server skeleton.
+//! Backend HTTP server skeleton with development-only auth/device endpoints.
 
-use axum::{http::StatusCode, routing::get, Router};
+use axum::{
+    extract::{Path, State},
+    http::{HeaderMap, StatusCode},
+    response::{IntoResponse, Response},
+    routing::{get, post},
+    Json, Router,
+};
+use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
+use fs2_core::{DeviceId, UserId};
+use hmac::{Hmac, Mac};
+use serde::{Deserialize, Serialize};
+use sha2::Sha256;
 use std::{
+    collections::HashMap,
     env, fmt,
     future::Future,
     net::{AddrParseError, SocketAddr},
     path::PathBuf,
+    str::FromStr,
+    sync::Arc,
+    time::{SystemTime, UNIX_EPOCH},
 };
-use tokio::net::TcpListener;
+use tokio::{net::TcpListener, sync::RwLock};
 use tracing::info;
 use tracing_subscriber::{fmt as tracing_fmt, EnvFilter};
 
@@ -20,6 +35,7 @@ pub const DEFAULT_BIND_ADDR: &str = "127.0.0.1:3000";
 pub const DEFAULT_DATABASE_URL: &str = "postgres://fs2:fs2@localhost:5432/fs2";
 pub const DEFAULT_OBJECT_STORE: &str = "local:./.fs2-dev/blobs";
 const DEFAULT_DEV_SECRET: &str = "dev-only-secret-change-before-production";
+const DEV_AUTH_WARNING: &str = "development-only auth; not for production";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BackendConfig {
@@ -147,8 +163,144 @@ impl fmt::Display for ConfigError {
 
 impl std::error::Error for ConfigError {}
 
+#[derive(Debug, Clone)]
+pub struct AppState {
+    jwt_secret: RedactedSecret,
+    dev_user_id: UserId,
+    devices: Arc<RwLock<HashMap<DeviceId, DeviceRecord>>>,
+}
+
+impl AppState {
+    pub fn dev(jwt_secret: RedactedSecret) -> Self {
+        Self {
+            jwt_secret,
+            dev_user_id: UserId::new_v4(),
+            devices: Arc::new(RwLock::new(HashMap::new())),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DeviceRecord {
+    pub device_id: DeviceId,
+    pub user_id: UserId,
+    pub name: String,
+    pub platform: serde_json::Value,
+    pub public_key: String,
+    pub revoked: bool,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct DevLoginRequest {
+    pub device_name: String,
+    #[serde(default)]
+    pub platform: serde_json::Value,
+    pub public_key: String,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct DevLoginResponse {
+    pub access_token: String,
+    pub token_type: String,
+    pub user_id: UserId,
+    pub device_id: DeviceId,
+    pub warning: String,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct EnrollDeviceRequest {
+    pub name: String,
+    #[serde(default)]
+    pub platform: serde_json::Value,
+    pub public_key: String,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct EnrollDeviceResponse {
+    pub device_id: DeviceId,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct DeviceListResponse {
+    pub devices: Vec<DeviceRecord>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AccessClaims {
+    sub: UserId,
+    device_id: DeviceId,
+    exp: u64,
+}
+
+#[derive(Debug, Clone)]
+pub struct AuthenticatedDevice {
+    pub user_id: UserId,
+    pub device_id: DeviceId,
+}
+
+#[derive(Debug, Serialize)]
+struct ErrorResponse {
+    error: ErrorBody,
+}
+
+#[derive(Debug, Serialize)]
+struct ErrorBody {
+    code: &'static str,
+    message: String,
+}
+
+#[derive(Debug)]
+pub enum ApiError {
+    Unauthorized(&'static str),
+    DeviceRevoked,
+    InvalidRequest(&'static str),
+    Internal(String),
+}
+
+impl IntoResponse for ApiError {
+    fn into_response(self) -> Response {
+        let (status, code, message) = match self {
+            Self::Unauthorized(message) => {
+                (StatusCode::UNAUTHORIZED, "unauthorized", message.to_owned())
+            }
+            Self::DeviceRevoked => (
+                StatusCode::UNAUTHORIZED,
+                "device_revoked",
+                "device token has been revoked".to_owned(),
+            ),
+            Self::InvalidRequest(message) => (
+                StatusCode::BAD_REQUEST,
+                "invalid_request",
+                message.to_owned(),
+            ),
+            Self::Internal(message) => (StatusCode::INTERNAL_SERVER_ERROR, "internal", message),
+        };
+        (
+            status,
+            Json(ErrorResponse {
+                error: ErrorBody { code, message },
+            }),
+        )
+            .into_response()
+    }
+}
+
 pub fn app() -> Router {
-    Router::new().route("/healthz", get(healthz))
+    let state = AppState::dev(
+        RedactedSecret::new(DEFAULT_DEV_SECRET.to_owned())
+            .unwrap_or_else(|_| RedactedSecret("fallback-development-secret".to_owned())),
+    );
+    app_with_state(state)
+}
+
+pub fn app_with_state(state: AppState) -> Router {
+    Router::new()
+        .route("/healthz", get(healthz))
+        .route("/v1/auth/dev-login", post(dev_login))
+        .route("/v1/auth/whoami", get(whoami))
+        .route("/v1/devices", get(list_devices).post(enroll_device))
+        .route("/v1/devices/:device_id/revoke", post(revoke_device))
+        .with_state(state)
 }
 
 pub async fn serve(
@@ -157,7 +309,8 @@ pub async fn serve(
 ) -> Result<(), std::io::Error> {
     let listener = TcpListener::bind(config.bind_addr).await?;
     info!(bind_addr = %config.bind_addr, "fs2-backend listening");
-    axum::serve(listener, app())
+    let state = AppState::dev(config.jwt_secret);
+    axum::serve(listener, app_with_state(state))
         .with_graceful_shutdown(shutdown)
         .await
 }
@@ -172,10 +325,231 @@ async fn healthz() -> (StatusCode, &'static str) {
     (StatusCode::OK, "OK")
 }
 
+async fn dev_login(
+    State(state): State<AppState>,
+    Json(request): Json<DevLoginRequest>,
+) -> Result<Json<DevLoginResponse>, ApiError> {
+    validate_device_fields(&request.device_name, &request.public_key)?;
+    let device = DeviceRecord {
+        device_id: DeviceId::new_v4(),
+        user_id: state.dev_user_id,
+        name: request.device_name,
+        platform: request.platform,
+        public_key: request.public_key,
+        revoked: false,
+    };
+    state
+        .devices
+        .write()
+        .await
+        .insert(device.device_id, device.clone());
+    let access_token = encode_access_token(device.user_id, device.device_id, &state.jwt_secret)?;
+    Ok(Json(DevLoginResponse {
+        access_token,
+        token_type: "Bearer".to_owned(),
+        user_id: device.user_id,
+        device_id: device.device_id,
+        warning: DEV_AUTH_WARNING.to_owned(),
+    }))
+}
+
+async fn whoami(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<AuthenticatedDeviceResponse>, ApiError> {
+    let auth = authenticate(&headers, &state).await?;
+    Ok(Json(AuthenticatedDeviceResponse {
+        user_id: auth.user_id,
+        device_id: auth.device_id,
+    }))
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct AuthenticatedDeviceResponse {
+    pub user_id: UserId,
+    pub device_id: DeviceId,
+}
+
+async fn enroll_device(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(request): Json<EnrollDeviceRequest>,
+) -> Result<Json<EnrollDeviceResponse>, ApiError> {
+    let auth = authenticate(&headers, &state).await?;
+    validate_device_fields(&request.name, &request.public_key)?;
+    let device = DeviceRecord {
+        device_id: DeviceId::new_v4(),
+        user_id: auth.user_id,
+        name: request.name,
+        platform: request.platform,
+        public_key: request.public_key,
+        revoked: false,
+    };
+    let device_id = device.device_id;
+    state.devices.write().await.insert(device_id, device);
+    Ok(Json(EnrollDeviceResponse { device_id }))
+}
+
+async fn list_devices(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<DeviceListResponse>, ApiError> {
+    let auth = authenticate(&headers, &state).await?;
+    let mut devices = state
+        .devices
+        .read()
+        .await
+        .values()
+        .filter(|device| device.user_id == auth.user_id)
+        .cloned()
+        .collect::<Vec<_>>();
+    devices.sort_by(|left, right| left.name.cmp(&right.name));
+    Ok(Json(DeviceListResponse { devices }))
+}
+
+async fn revoke_device(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(device_id): Path<String>,
+) -> Result<StatusCode, ApiError> {
+    let auth = authenticate(&headers, &state).await?;
+    let device_id = DeviceId::from_str(&device_id)
+        .map_err(|_| ApiError::InvalidRequest("device_id must be a UUID"))?;
+    {
+        let mut devices = state.devices.write().await;
+        let device = devices
+            .get_mut(&device_id)
+            .ok_or(ApiError::InvalidRequest("device not found"))?;
+        if device.user_id != auth.user_id {
+            return Err(ApiError::Unauthorized(
+                "cannot revoke a device owned by another user",
+            ));
+        }
+        device.revoked = true;
+        drop(devices);
+    }
+    Ok(StatusCode::NO_CONTENT)
+}
+
+fn validate_device_fields(name: &str, public_key: &str) -> Result<(), ApiError> {
+    if name.trim().is_empty() {
+        return Err(ApiError::InvalidRequest("device name must not be empty"));
+    }
+    if public_key.trim().is_empty() {
+        return Err(ApiError::InvalidRequest("public key must not be empty"));
+    }
+    Ok(())
+}
+
+async fn authenticate(
+    headers: &HeaderMap,
+    state: &AppState,
+) -> Result<AuthenticatedDevice, ApiError> {
+    let token = bearer_token(headers)?;
+    let claims = decode_access_token(token, &state.jwt_secret)?;
+    let device = {
+        let devices = state.devices.read().await;
+        let device = devices
+            .get(&claims.device_id)
+            .ok_or(ApiError::Unauthorized("token device is not enrolled"))?
+            .clone();
+        drop(devices);
+        device
+    };
+    if device.revoked {
+        return Err(ApiError::DeviceRevoked);
+    }
+    if device.user_id != claims.sub {
+        return Err(ApiError::Unauthorized("token subject does not own device"));
+    }
+    let (user_id, device_id) = (claims.sub, claims.device_id);
+    Ok(AuthenticatedDevice { user_id, device_id })
+}
+
+fn bearer_token(headers: &HeaderMap) -> Result<&str, ApiError> {
+    let header = headers
+        .get(axum::http::header::AUTHORIZATION)
+        .ok_or(ApiError::Unauthorized("missing bearer token"))?
+        .to_str()
+        .map_err(|_| ApiError::Unauthorized("authorization header is not valid UTF-8"))?;
+    header.strip_prefix("Bearer ").ok_or(ApiError::Unauthorized(
+        "authorization header must use Bearer scheme",
+    ))
+}
+
+type HmacSha256 = Hmac<Sha256>;
+
+fn encode_access_token(
+    user_id: UserId,
+    device_id: DeviceId,
+    secret: &RedactedSecret,
+) -> Result<String, ApiError> {
+    let exp = unix_timestamp()?
+        .checked_add(60 * 60)
+        .ok_or_else(|| ApiError::Internal("token expiration overflow".to_owned()))?;
+    let claims = AccessClaims {
+        sub: user_id,
+        device_id,
+        exp,
+    };
+    let payload =
+        serde_json::to_vec(&claims).map_err(|error| ApiError::Internal(error.to_string()))?;
+    let encoded_payload = URL_SAFE_NO_PAD.encode(payload);
+    let signature = sign_token_payload(&encoded_payload, secret)?;
+    Ok(format!("{encoded_payload}.{signature}"))
+}
+
+fn decode_access_token(token: &str, secret: &RedactedSecret) -> Result<AccessClaims, ApiError> {
+    let (encoded_payload, signature) = token
+        .split_once('.')
+        .ok_or(ApiError::Unauthorized("invalid bearer token"))?;
+    verify_token_signature(encoded_payload, signature, secret)?;
+    let payload = URL_SAFE_NO_PAD
+        .decode(encoded_payload)
+        .map_err(|_| ApiError::Unauthorized("invalid bearer token"))?;
+    let claims = serde_json::from_slice::<AccessClaims>(&payload)
+        .map_err(|_| ApiError::Unauthorized("invalid bearer token"))?;
+    let now = unix_timestamp()?;
+    if claims.exp <= now {
+        return Err(ApiError::Unauthorized("bearer token expired"));
+    }
+    Ok(claims)
+}
+
+fn sign_token_payload(payload: &str, secret: &RedactedSecret) -> Result<String, ApiError> {
+    let mut mac = HmacSha256::new_from_slice(secret.expose_for_signing().as_bytes())
+        .map_err(|error| ApiError::Internal(error.to_string()))?;
+    mac.update(payload.as_bytes());
+    Ok(URL_SAFE_NO_PAD.encode(mac.finalize().into_bytes()))
+}
+
+fn verify_token_signature(
+    payload: &str,
+    signature: &str,
+    secret: &RedactedSecret,
+) -> Result<(), ApiError> {
+    let signature = URL_SAFE_NO_PAD
+        .decode(signature)
+        .map_err(|_| ApiError::Unauthorized("invalid bearer token"))?;
+    let mut mac = HmacSha256::new_from_slice(secret.expose_for_signing().as_bytes())
+        .map_err(|error| ApiError::Internal(error.to_string()))?;
+    mac.update(payload.as_bytes());
+    mac.verify_slice(&signature)
+        .map_err(|_| ApiError::Unauthorized("invalid bearer token"))
+}
+
+fn unix_timestamp() -> Result<u64, ApiError> {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_secs())
+        .map_err(|error| ApiError::Internal(error.to_string()))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use axum::{body::Body, http::Request};
+    use serde::de::DeserializeOwned;
     use tower::util::ServiceExt;
 
     #[test]
@@ -209,5 +583,137 @@ mod tests {
 
         assert_eq!(response.status(), StatusCode::OK);
         Ok(())
+    }
+
+    #[tokio::test]
+    async fn dev_login_issues_signed_token_and_whoami_extracts_claims(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let app = app();
+        let login = post_json::<DevLoginResponse>(
+            app.clone(),
+            "/v1/auth/dev-login",
+            serde_json::json!({
+                "device_name": "test laptop",
+                "platform": {"os": "linux"},
+                "public_key": "dev-public-key"
+            }),
+            None,
+        )
+        .await?;
+
+        assert_eq!(login.token_type, "Bearer");
+        assert_eq!(login.warning, DEV_AUTH_WARNING);
+
+        let whoami = get_json::<AuthenticatedDeviceResponse>(
+            app,
+            "/v1/auth/whoami",
+            Some(&login.access_token),
+        )
+        .await?;
+
+        assert_eq!(whoami.user_id, login.user_id);
+        assert_eq!(whoami.device_id, login.device_id);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn device_enrollment_lists_two_devices_and_rejects_revoked_device(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let app = app();
+        let login = post_json::<DevLoginResponse>(
+            app.clone(),
+            "/v1/auth/dev-login",
+            serde_json::json!({
+                "device_name": "first",
+                "platform": {"os": "linux"},
+                "public_key": "first-key"
+            }),
+            None,
+        )
+        .await?;
+
+        let second = post_json::<EnrollDeviceResponse>(
+            app.clone(),
+            "/v1/devices",
+            serde_json::json!({
+                "name": "second",
+                "platform": {"os": "macos"},
+                "public_key": "second-key"
+            }),
+            Some(&login.access_token),
+        )
+        .await?;
+        assert_ne!(second.device_id, login.device_id);
+
+        let devices =
+            get_json::<DeviceListResponse>(app.clone(), "/v1/devices", Some(&login.access_token))
+                .await?;
+        assert_eq!(devices.devices.len(), 2);
+        assert!(devices.devices.iter().any(|device| device.name == "first"));
+        assert!(devices.devices.iter().any(|device| device.name == "second"));
+
+        let revoke_response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/v1/devices/{}/revoke", login.device_id))
+                    .header("authorization", format!("Bearer {}", login.access_token))
+                    .body(Body::empty())?,
+            )
+            .await?;
+        assert_eq!(revoke_response.status(), StatusCode::NO_CONTENT);
+
+        let rejected = app
+            .oneshot(
+                Request::builder()
+                    .uri("/v1/devices")
+                    .header("authorization", format!("Bearer {}", login.access_token))
+                    .body(Body::empty())?,
+            )
+            .await?;
+        assert_eq!(rejected.status(), StatusCode::UNAUTHORIZED);
+        Ok(())
+    }
+
+    async fn post_json<T: DeserializeOwned>(
+        app: Router,
+        uri: &str,
+        body: serde_json::Value,
+        bearer: Option<&str>,
+    ) -> Result<T, Box<dyn std::error::Error>> {
+        let mut builder = Request::builder()
+            .method("POST")
+            .uri(uri)
+            .header("content-type", "application/json");
+        if let Some(token) = bearer {
+            builder = builder.header("authorization", format!("Bearer {token}"));
+        }
+        let response = app
+            .oneshot(builder.body(Body::from(body.to_string()))?)
+            .await?;
+        assert_eq!(response.status(), StatusCode::OK);
+        decode_body(response).await
+    }
+
+    async fn get_json<T: DeserializeOwned>(
+        app: Router,
+        uri: &str,
+        bearer: Option<&str>,
+    ) -> Result<T, Box<dyn std::error::Error>> {
+        let mut builder = Request::builder().uri(uri);
+        if let Some(token) = bearer {
+            builder = builder.header("authorization", format!("Bearer {token}"));
+        }
+        let response = app.oneshot(builder.body(Body::empty())?).await?;
+        assert_eq!(response.status(), StatusCode::OK);
+        decode_body(response).await
+    }
+
+    async fn decode_body<T: DeserializeOwned>(
+        response: Response,
+    ) -> Result<T, Box<dyn std::error::Error>> {
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX).await?;
+        serde_json::from_slice(&bytes).map_err(Into::into)
     }
 }
