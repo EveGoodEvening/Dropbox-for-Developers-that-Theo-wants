@@ -5,5 +5,17 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 
+[dependencies]
+chrono = { version = "0.4", default-features = false, features = ["clock", "serde"] }
+fs2-core = { path = "../fs2-core" }
+fs2-rules = { path = "../fs2-rules" }
+rusqlite = { version = "0.31", features = ["bundled", "chrono"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+uuid = { version = "1", features = ["serde", "v4"] }
+
+[dev-dependencies]
+tempfile = "3"
+
 [lints]
 workspace = true

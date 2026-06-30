@@ -350,6 +350,15 @@ impl RulePattern {
     }
 }
 
+/// Returns whether one rule pattern matches a workspace path with rule-engine semantics.
+pub fn rule_pattern_matches(
+    pattern: &str,
+    path: &WorkspacePath,
+    kind: RulePathKind,
+) -> Result<bool, RuleError> {
+    Ok(RulePattern::compile(pattern, "stored rule pattern")?.is_match(path, kind))
+}
+
 fn has_unclosed_class(pattern: &str) -> bool {
     let mut escaped = false;
     let mut open = false;

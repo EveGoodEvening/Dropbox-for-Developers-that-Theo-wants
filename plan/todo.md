@@ -593,52 +593,52 @@ Acceptance criteria:
 
 ### 9.1 SQLite migrations
 
-- [ ] Create local workspace table.
-- [ ] Create local nodes table.
-- [ ] Create local revisions table.
-- [ ] Create local state table.
-- [ ] Create pending ops table.
-- [ ] Create blob cache table.
-- [ ] Create rules table.
-- [ ] Create conflicts table.
-- [ ] Add indexes for path and parent lookup.
+- [x] Create local workspace table.
+- [x] Create local nodes table.
+- [x] Create local revisions table.
+- [x] Create local state table.
+- [x] Create pending ops table.
+- [x] Create blob cache table.
+- [x] Create rules table.
+- [x] Create conflicts table.
+- [x] Add indexes for path and parent lookup.
 
 Acceptance criteria:
 
-- [ ] A new daemon can initialize local state root and DB.
+- [x] A new daemon can initialize local state root and DB.
 
 ### 9.2 Implement local store API
 
-- [ ] `get_node_by_path`
-- [ ] `get_node_by_id`
-- [ ] `list_children`
-- [ ] `apply_operation`
-- [ ] `put_pending_op`
-- [ ] `list_pending_ops`
-- [ ] `mark_blob_cached`
-- [ ] `set_hydration_state`
-- [ ] `get_effective_rule`
-- [ ] Add transactional helpers.
+- [x] `get_node_by_path`
+- [x] `get_node_by_id`
+- [x] `list_children`
+- [x] `apply_operation`
+- [x] `put_pending_op`
+- [x] `list_pending_ops`
+- [x] `mark_blob_cached`
+- [x] `set_hydration_state`
+- [x] `get_effective_rule`
+- [x] Add transactional helpers.
 
 Acceptance criteria:
 
-- [ ] All metadata mutations happen inside explicit transactions.
+- [x] All metadata mutations happen inside explicit transactions.
 
 ### 9.3 Implement operation replay locally
 
-- [ ] Apply `CreateNode`.
-- [ ] Apply `PutFileRevision`.
-- [ ] Apply `MoveNode`.
-- [ ] Apply `DeleteNode` with tombstones.
-- [ ] Apply `RestoreNode`.
-- [ ] Apply rule ops.
-- [ ] Apply env ops.
-- [ ] Update cursor only after successful apply.
-- [ ] Add replay-from-zero test.
+- [x] Apply `CreateNode`.
+- [x] Apply `PutFileRevision`.
+- [x] Apply `MoveNode`.
+- [x] Apply `DeleteNode` with tombstones.
+- [x] Apply `RestoreNode`.
+- [x] Apply rule ops.
+- [x] Apply env ops.
+- [x] Update cursor only after successful apply.
+- [x] Add replay-from-zero test.
 
 Acceptance criteria:
 
-- [ ] Local state reconstructed from backend ops matches backend manifest.
+- [x] Local state reconstructed from backend ops matches backend manifest.
 
 ---
 
