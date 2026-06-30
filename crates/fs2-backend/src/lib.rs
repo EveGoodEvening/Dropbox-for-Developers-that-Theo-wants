@@ -462,6 +462,9 @@ pub struct AppState {
     /// Idempotency index mapping `(workspace_id, op_id)` to the assigned cursor.
     idempotency: Arc<RwLock<HashMap<(WorkspaceId, OpId), Cursor>>>,
     event_tx: broadcast::Sender<WorkspaceEvent>,
+    /// Live Postgres pool for DB-backed state. `None` keeps the fast in-memory
+    /// development behavior used by unit tests.
+    database: Option<sqlx::PgPool>,
 }
 
 impl AppState {
@@ -488,8 +491,220 @@ impl AppState {
             operations: Arc::new(RwLock::new(HashMap::new())),
             idempotency: Arc::new(RwLock::new(HashMap::new())),
             event_tx,
+            database: None,
         }
     }
+
+    /// Builds DB-backed development state that persists blob metadata (and the
+    /// minimal workspace shell required for the `blobs.workspace_id` foreign
+    /// key) to the supplied Postgres pool. The pool must already have had the
+    /// fs2 migrations applied.
+    pub fn dev_with_blob_store_and_database(
+        jwt_secret: RedactedSecret,
+        blob_store: Arc<dyn BlobStore>,
+        database: sqlx::PgPool,
+    ) -> Self {
+        let mut state = Self::dev_with_blob_store(jwt_secret, blob_store);
+        state.database = Some(database);
+        state
+    }
+}
+
+impl AppState {
+    /// Persists the minimal parent rows (`users`, `workspaces`, root `nodes`)
+    /// required for the `blobs.workspace_id` foreign key when DB-backed.
+    /// No-op for in-memory state.
+    async fn persist_workspace_shell(&self, record: &WorkspaceRecord) -> Result<(), ApiError> {
+        let Some(pool) = self.database.as_ref() else {
+            return Ok(());
+        };
+        let mut tx = pool
+            .begin()
+            .await
+            .map_err(|error| ApiError::Internal(error.to_string()))?;
+        // Dev users have no email; use a stable placeholder derived from the id.
+        sqlx::query(
+            "INSERT INTO users (id, email) VALUES ($1, $2) \
+             ON CONFLICT (id) DO NOTHING",
+        )
+        .bind(record.user_id.into_uuid())
+        .bind(format!("dev-{}@fs2.local", record.user_id))
+        .execute(&mut *tx)
+        .await
+        .map_err(|error| ApiError::Internal(error.to_string()))?;
+        sqlx::query(
+            "INSERT INTO workspaces (id, user_id, name, root_node_id, current_cursor) \
+             VALUES ($1, $2, $3, $4, $5) \
+             ON CONFLICT (id) DO NOTHING",
+        )
+        .bind(record.workspace_id.into_uuid())
+        .bind(record.user_id.into_uuid())
+        .bind(&record.name)
+        .bind(record.root_node_id.into_uuid())
+        .bind(record.current_cursor.value())
+        .execute(&mut *tx)
+        .await
+        .map_err(|error| ApiError::Internal(error.to_string()))?;
+        sqlx::query(
+            "INSERT INTO nodes (id, workspace_id, parent_id, name, normalized_name, kind) \
+             VALUES ($1, $2, NULL, '', '', 'directory') \
+             ON CONFLICT (id) DO NOTHING",
+        )
+        .bind(record.root_node_id.into_uuid())
+        .bind(record.workspace_id.into_uuid())
+        .execute(&mut *tx)
+        .await
+        .map_err(|error| ApiError::Internal(error.to_string()))?;
+        tx.commit()
+            .await
+            .map_err(|error| ApiError::Internal(error.to_string()))?;
+        Ok(())
+    }
+
+    /// Records blob metadata. Idempotent: a duplicate insert with matching
+    /// `size`, `encryption_header`, and `object_key` succeeds silently; a
+    /// duplicate with conflicting metadata returns a stable 400. No-op beyond
+    /// the in-memory map when DB-backed state is absent.
+    async fn record_blob_metadata(&self, metadata: BlobMetadata) -> Result<(), ApiError> {
+        if let Some(pool) = self.database.as_ref() {
+            let size_i64 = i64::try_from(metadata.size)
+                .map_err(|_| ApiError::InvalidRequest("blob size exceeds Postgres BIGINT range"))?;
+            let result = sqlx::query(
+                "INSERT INTO blobs (id, workspace_id, size, encryption_header, object_key, uploaded_at) \
+                 VALUES ($1, $2, $3, $4, $5, now()) \
+                 ON CONFLICT (id) DO NOTHING",
+            )
+            .bind(&metadata.blob_id)
+            .bind(metadata.workspace_id.into_uuid())
+            .bind(size_i64)
+            .bind(&metadata.encryption_header)
+            .bind(&metadata.object_key)
+            .execute(pool)
+            .await
+            .map_err(|error| ApiError::Internal(error.to_string()))?;
+            if result.rows_affected() == 0 {
+                // Existing row: verify it matches to keep content-addressed semantics.
+                let existing: Option<(i64, Option<String>, String)> = sqlx::query_as(
+                    "SELECT size, encryption_header, object_key FROM blobs WHERE id = $1",
+                )
+                .bind(&metadata.blob_id)
+                .fetch_optional(pool)
+                .await
+                .map_err(|error| ApiError::Internal(error.to_string()))?;
+                let Some((existing_size, existing_header, existing_key)) = existing else {
+                    return Err(ApiError::Internal(
+                        "blob metadata disappeared between insert and read".to_owned(),
+                    ));
+                };
+                if existing_size != size_i64
+                    || existing_header != metadata.encryption_header
+                    || existing_key != metadata.object_key
+                {
+                    return Err(ApiError::InvalidRequest(
+                        "blob id already exists with different metadata",
+                    ));
+                }
+            }
+        }
+        self.blob_metadata
+            .write()
+            .await
+            .insert(metadata.blob_id.clone(), metadata);
+        Ok(())
+    }
+
+    /// Loads blob metadata from Postgres when DB-backed, otherwise from the
+    /// in-memory map.
+    async fn load_blob_metadata(&self, blob_id: &str) -> Result<Option<BlobMetadata>, ApiError> {
+        if let Some(pool) = self.database.as_ref() {
+            let row: Option<(uuid::Uuid, i64, Option<String>, String)> = sqlx::query_as(
+                "SELECT workspace_id, size, encryption_header, object_key FROM blobs WHERE id = $1",
+            )
+            .bind(blob_id)
+            .fetch_optional(pool)
+            .await
+            .map_err(|error| ApiError::Internal(error.to_string()))?;
+            let metadata = row
+                .map(|(workspace_id, size, encryption_header, object_key)| {
+                    let size = u64::try_from(size)
+                        .map_err(|error| ApiError::Internal(error.to_string()))?;
+                    Ok::<BlobMetadata, ApiError>(BlobMetadata {
+                        blob_id: blob_id.to_owned(),
+                        workspace_id: WorkspaceId::from_uuid(workspace_id),
+                        size,
+                        encryption_header,
+                        object_key,
+                    })
+                })
+                .transpose()?;
+            return Ok(metadata);
+        }
+        Ok(self.blob_metadata.read().await.get(blob_id).cloned())
+    }
+
+    /// Returns the set of blob ids the in-memory validation path should treat
+    /// as present, restricted to the ids referenced by `kind`. For DB-backed
+    /// state the ids are prefetched from Postgres; for in-memory state the
+    /// full metadata map is snapshotted as before.
+    async fn known_blob_ids_for_operation(
+        &self,
+        kind: &OperationKind,
+    ) -> Result<std::collections::HashSet<String>, ApiError> {
+        let referenced = extract_referenced_blob_ids(kind);
+        if referenced.is_empty() {
+            return Ok(std::collections::HashSet::new());
+        }
+        if let Some(pool) = self.database.as_ref() {
+            let mut set = std::collections::HashSet::new();
+            for blob_id in &referenced {
+                let exists: Option<String> =
+                    sqlx::query_scalar("SELECT id FROM blobs WHERE id = $1")
+                        .bind(blob_id)
+                        .fetch_optional(pool)
+                        .await
+                        .map_err(|error| ApiError::Internal(error.to_string()))?;
+                if let Some(id) = exists {
+                    set.insert(id);
+                }
+            }
+            return Ok(set);
+        }
+        let metadata = self.blob_metadata.read().await;
+        Ok(referenced
+            .into_iter()
+            .filter(|id| metadata.contains_key(id))
+            .collect())
+    }
+}
+
+/// Extracts the blob ids referenced by an operation kind for prefetch.
+fn extract_referenced_blob_ids(kind: &OperationKind) -> Vec<String> {
+    let mut ids = Vec::new();
+    match kind {
+        OperationKind::CreateNode {
+            initial_revision: Some(revision),
+            ..
+        } => {
+            if let RevisionContent::File {
+                blob_id, chunk_ids, ..
+            } = &revision.content
+            {
+                ids.push(blob_id.as_str().to_owned());
+                ids.extend(chunk_ids.iter().map(|chunk| chunk.as_str().to_owned()));
+            }
+        }
+        OperationKind::PutFileRevision { revision, .. } => {
+            if let RevisionContent::File {
+                blob_id, chunk_ids, ..
+            } = &revision.content
+            {
+                ids.push(blob_id.as_str().to_owned());
+                ids.extend(chunk_ids.iter().map(|chunk| chunk.as_str().to_owned()));
+            }
+        }
+        _ => {}
+    }
+    ids
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -536,12 +751,15 @@ pub struct EnrollDeviceResponse {
 pub struct DeviceListResponse {
     pub devices: Vec<DeviceRecord>,
 }
-
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BlobMetadata {
     pub blob_id: String,
+    pub workspace_id: WorkspaceId,
     pub size: u64,
     pub encryption_header: Option<String>,
+    /// Object-store key the blob bytes were written under. For the development
+    /// endpoints this is the blob id itself.
+    pub object_key: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -670,6 +888,7 @@ pub struct FetchOpsResponse {
 #[derive(Debug, Deserialize)]
 pub struct DevBlobUploadRequest {
     pub blob_id: String,
+    pub workspace_id: WorkspaceId,
     pub bytes_base64: String,
     pub size: u64,
     pub encryption_header: Option<String>,
@@ -844,14 +1063,25 @@ pub fn app_with_state(state: AppState) -> Router {
         .with_state(state)
 }
 
-pub async fn migrate_database(
+/// Connects to Postgres, applies the fs2 migrations, and returns the live pool.
+///
+/// Callers that do not need a persistent connection should prefer
+/// [`migrate_database`], which closes the pool returned here.
+pub async fn connect_database(
     database_url: &str,
-) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+) -> Result<sqlx::PgPool, Box<dyn std::error::Error + Send + Sync>> {
     let pool = sqlx::postgres::PgPoolOptions::new()
         .max_connections(5)
         .connect(database_url)
         .await?;
     POSTGRES_MIGRATOR.run(&pool).await?;
+    Ok(pool)
+}
+
+pub async fn migrate_database(
+    database_url: &str,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let pool = connect_database(database_url).await?;
     pool.close().await;
     Ok(())
 }
@@ -860,13 +1090,13 @@ pub async fn serve(
     config: BackendConfig,
     shutdown: impl Future<Output = ()> + Send + 'static,
 ) -> Result<(), std::io::Error> {
-    migrate_database(&config.database_url)
+    let pool = connect_database(&config.database_url)
         .await
         .map_err(std::io::Error::other)?;
     let listener = TcpListener::bind(config.bind_addr).await?;
     info!(bind_addr = %config.bind_addr, "fs2-backend listening");
     let blob_store = blob_store_for_config(&config.object_store).map_err(std::io::Error::other)?;
-    let state = AppState::dev_with_blob_store(config.jwt_secret, blob_store);
+    let state = AppState::dev_with_blob_store_and_database(config.jwt_secret, blob_store, pool);
     axum::serve(listener, app_with_state(state))
         .with_graceful_shutdown(shutdown)
         .await
@@ -1027,6 +1257,9 @@ async fn create_workspace(
         env_vars: HashMap::new(),
     };
 
+    // Persist the minimal FK parent rows before the in-memory insert so the
+    // `blobs.workspace_id` foreign key is satisfiable for DB-backed state.
+    state.persist_workspace_shell(&record).await?;
     state.workspaces.write().await.insert(workspace_id, record);
 
     Ok(Json(CreateWorkspaceResponse {
@@ -1034,6 +1267,43 @@ async fn create_workspace(
         root_node_id,
         current_cursor,
     }))
+}
+
+async fn idempotent_commit_response(
+    state: &AppState,
+    auth: &AuthenticatedDevice,
+    workspace_id: WorkspaceId,
+    operation: &Operation,
+    existing_cursor: Cursor,
+) -> Result<CommitOperationResponse, ApiError> {
+    let workspaces = state.workspaces.read().await;
+    let workspace = workspaces
+        .get(&workspace_id)
+        .ok_or_else(|| ApiError::structured(Fs2Error::WorkspaceNotFound))?;
+    let owns_workspace = workspace.user_id == auth.user_id;
+    drop(workspaces);
+    if !owns_workspace {
+        return Err(ApiError::Unauthorized("device does not own this workspace"));
+    }
+    let operations = state.operations.read().await;
+    let committed = operations
+        .get(&workspace_id)
+        .and_then(|log| {
+            log.iter()
+                .find(|committed| {
+                    committed.cursor == existing_cursor
+                        && committed.operation.op_id == operation.op_id
+                })
+                .cloned()
+        })
+        .ok_or_else(|| ApiError::Internal("idempotency log entry missing".to_owned()))?;
+    drop(operations);
+    Ok(CommitOperationResponse {
+        workspace_id,
+        op_id: operation.op_id,
+        cursor: existing_cursor,
+        committed,
+    })
 }
 
 async fn commit_operation(
@@ -1055,44 +1325,31 @@ async fn commit_operation(
         .validate_shape()
         .map_err(shape_error_into_api_error)?;
 
-    // Snapshot known blob ids so the blob-existence check runs without holding the
-    // blob metadata lock while we mutate the workspace tree. Lock order stays
-    // idempotency -> workspaces -> operations; blob_metadata is read beforehand.
+    if let Some(existing_cursor) = {
+        let idempotency = state.idempotency.read().await;
+        idempotency.get(&(workspace_id, operation.op_id)).copied()
+    } {
+        return Ok(Json(
+            idempotent_commit_response(&state, &auth, workspace_id, &operation, existing_cursor)
+                .await?,
+        ));
+    }
+
+    // Prefetch only the blob ids referenced by new operations before acquiring
+    // the idempotency/workspace/operations write locks. For DB-backed state this
+    // reads from Postgres; for in-memory state it snapshots the metadata map.
+    // Known duplicate op_ids return above without a fallible blob prefetch.
     let known_blobs: std::collections::HashSet<String> =
-        state.blob_metadata.read().await.keys().cloned().collect();
+        state.known_blob_ids_for_operation(&operation.kind).await?;
     let blob_exists = |blob_id: &str| known_blobs.contains(blob_id);
 
     // Lock order: idempotency -> workspaces -> operations (acquired consistently).
     let mut idempotency = state.idempotency.write().await;
-    if let Some(existing_cursor) = idempotency.get(&(workspace_id, operation.op_id)) {
-        let workspaces = state.workspaces.read().await;
-        let workspace = workspaces
-            .get(&workspace_id)
-            .ok_or_else(|| ApiError::structured(Fs2Error::WorkspaceNotFound))?;
-        let owns_workspace = workspace.user_id == auth.user_id;
-        drop(workspaces);
-        if !owns_workspace {
-            return Err(ApiError::Unauthorized("device does not own this workspace"));
-        }
-        let operations = state.operations.read().await;
-        let committed = operations
-            .get(&workspace_id)
-            .and_then(|log| {
-                log.iter()
-                    .find(|committed| {
-                        committed.cursor == *existing_cursor
-                            && committed.operation.op_id == operation.op_id
-                    })
-                    .cloned()
-            })
-            .ok_or_else(|| ApiError::Internal("idempotency log entry missing".to_owned()))?;
-        drop(operations);
-        return Ok(Json(CommitOperationResponse {
-            workspace_id,
-            op_id: operation.op_id,
-            cursor: *existing_cursor,
-            committed,
-        }));
+    if let Some(existing_cursor) = idempotency.get(&(workspace_id, operation.op_id)).copied() {
+        return Ok(Json(
+            idempotent_commit_response(&state, &auth, workspace_id, &operation, existing_cursor)
+                .await?,
+        ));
     }
 
     let mut workspaces = state.workspaces.write().await;
@@ -1879,7 +2136,21 @@ async fn dev_blob_upload(
     headers: HeaderMap,
     Json(request): Json<DevBlobUploadRequest>,
 ) -> Result<Json<DevBlobUploadResponse>, ApiError> {
-    let _auth = authenticate(&headers, &state).await?;
+    let auth = authenticate(&headers, &state).await?;
+    // Verify the caller owns the workspace so blob metadata is registered
+    // against a workspace the device may write to.
+    let workspace_user_id = {
+        let workspaces = state.workspaces.read().await;
+        let workspace = workspaces
+            .get(&request.workspace_id)
+            .ok_or_else(|| ApiError::structured(Fs2Error::WorkspaceNotFound))?;
+        let workspace_user_id = workspace.user_id;
+        drop(workspaces);
+        workspace_user_id
+    };
+    if workspace_user_id != auth.user_id {
+        return Err(ApiError::Unauthorized("device does not own this workspace"));
+    }
     let bytes = URL_SAFE_NO_PAD
         .decode(&request.bytes_base64)
         .map_err(|_| ApiError::InvalidRequest("bytes_base64 must be URL-safe base64"))?;
@@ -1889,6 +2160,7 @@ async fn dev_blob_upload(
         ));
     }
     validate_blob_hash(&request.blob_id, &bytes)?;
+    // Write object bytes first; metadata is recorded after the bytes exist.
     state
         .blob_store
         .put(&request.blob_id, Bytes::from(bytes))
@@ -1896,14 +2168,12 @@ async fn dev_blob_upload(
         .map_err(blob_store_api_error)?;
     let metadata = BlobMetadata {
         blob_id: request.blob_id.clone(),
+        workspace_id: request.workspace_id,
         size: request.size,
         encryption_header: request.encryption_header,
+        object_key: request.blob_id.clone(),
     };
-    state
-        .blob_metadata
-        .write()
-        .await
-        .insert(metadata.blob_id.clone(), metadata);
+    state.record_blob_metadata(metadata).await?;
     Ok(Json(DevBlobUploadResponse {
         blob_id: request.blob_id,
         size: request.size,
@@ -1922,12 +2192,7 @@ async fn dev_blob_download(
         .await
         .map_err(blob_store_api_error)?;
     validate_blob_hash(&request.blob_id, &bytes)?;
-    let metadata = state
-        .blob_metadata
-        .read()
-        .await
-        .get(&request.blob_id)
-        .cloned();
+    let metadata = state.load_blob_metadata(&request.blob_id).await?;
     Ok(Json(DevBlobDownloadResponse {
         blob_id: request.blob_id,
         bytes_base64: URL_SAFE_NO_PAD.encode(&bytes),
@@ -1947,7 +2212,7 @@ async fn blob_status(
         .exists(&blob_id)
         .await
         .map_err(blob_store_api_error)?;
-    let metadata = state.blob_metadata.read().await.get(&blob_id).cloned();
+    let metadata = state.load_blob_metadata(&blob_id).await?;
     Ok(Json(BlobStatusResponse {
         blob_id,
         exists,
@@ -2448,6 +2713,181 @@ mod tests {
         Ok(())
     }
 
+    #[tokio::test]
+    async fn postgres_blob_metadata_is_persisted_and_used_for_commit(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let postgres = DockerPostgres::start()?;
+        wait_for_postgres(&postgres.database_url)
+            .await
+            .map_err(|error| std::io::Error::other(error.to_string()))?;
+
+        let object_dir = TempDir::new()?;
+        let pool = connect_database(&postgres.database_url)
+            .await
+            .map_err(|error| std::io::Error::other(error.to_string()))?;
+        let state = AppState::dev_with_blob_store_and_database(
+            RedactedSecret::new(DEFAULT_DEV_SECRET.to_owned())?,
+            Arc::new(LocalFilesystemBlobStore::new(
+                object_dir.path().to_path_buf(),
+            )),
+            pool.clone(),
+        );
+        let app = app_with_state(state);
+
+        let login = post_json::<DevLoginResponse>(
+            app.clone(),
+            "/v1/auth/dev-login",
+            serde_json::json!({
+                "device_name": "pg-blob-laptop",
+                "platform": {"os": "linux"},
+                "public_key": "pg-blob-key"
+            }),
+            None,
+        )
+        .await?;
+        let workspace = post_json::<CreateWorkspaceResponse>(
+            app.clone(),
+            "/v1/workspaces",
+            serde_json::json!({"name": "pg-blob-ws"}),
+            Some(&login.access_token),
+        )
+        .await?;
+
+        let file_bytes = b"postgres blob bytes";
+        let blob_id = format!("sha256:{}", hex_lower(&Sha256::digest(file_bytes)));
+        let upload = post_json::<DevBlobUploadResponse>(
+            app.clone(),
+            "/v1/blobs/dev-upload",
+            serde_json::json!({
+                "blob_id": blob_id,
+                "workspace_id": workspace.workspace_id,
+                "bytes_base64": URL_SAFE_NO_PAD.encode(file_bytes),
+                "size": file_bytes.len(),
+                "encryption_header": "pg-header"
+            }),
+            Some(&login.access_token),
+        )
+        .await?;
+        assert_eq!(upload.blob_id, blob_id);
+
+        // The blobs row must be present with the registered metadata.
+        let row: Option<(uuid::Uuid, i64, Option<String>, String)> = sqlx::query_as(
+            "SELECT workspace_id, size, encryption_header, object_key \
+             FROM blobs WHERE id = $1",
+        )
+        .bind(&blob_id)
+        .fetch_optional(&pool)
+        .await?;
+        let (ws_id, size, header, object_key) = row.ok_or("blobs row missing after dev upload")?;
+        assert_eq!(ws_id, workspace.workspace_id.into_uuid());
+        assert_eq!(size, i64::try_from(file_bytes.len())?);
+        assert_eq!(header.as_deref(), Some("pg-header"));
+        assert_eq!(object_key, blob_id);
+        let uploaded_at_present: bool =
+            sqlx::query_scalar("SELECT (uploaded_at IS NOT NULL) FROM blobs WHERE id = $1")
+                .bind(&blob_id)
+                .fetch_one(&pool)
+                .await?;
+        assert!(uploaded_at_present);
+
+        // Status and download must read metadata from Postgres.
+        let status = get_json::<BlobStatusResponse>(
+            app.clone(),
+            &format!("/v1/blobs/{blob_id}/status"),
+            Some(&login.access_token),
+        )
+        .await?;
+        assert!(status.exists);
+        assert_eq!(status.size, Some(file_bytes.len() as u64));
+        assert_eq!(status.encryption_header.as_deref(), Some("pg-header"));
+
+        let download = post_json::<DevBlobDownloadResponse>(
+            app.clone(),
+            "/v1/blobs/dev-download",
+            serde_json::json!({"blob_id": blob_id}),
+            Some(&login.access_token),
+        )
+        .await?;
+        assert_eq!(download.bytes_base64, URL_SAFE_NO_PAD.encode(file_bytes));
+        assert_eq!(download.encryption_header.as_deref(), Some("pg-header"));
+
+        // A duplicate upload with matching metadata is idempotent.
+        let duplicate = post_json::<DevBlobUploadResponse>(
+            app.clone(),
+            "/v1/blobs/dev-upload",
+            serde_json::json!({
+                "blob_id": blob_id,
+                "workspace_id": workspace.workspace_id,
+                "bytes_base64": URL_SAFE_NO_PAD.encode(file_bytes),
+                "size": file_bytes.len(),
+                "encryption_header": "pg-header"
+            }),
+            Some(&login.access_token),
+        )
+        .await?;
+        assert_eq!(duplicate.blob_id, blob_id);
+
+        // A commit referencing the uploaded blob must succeed.
+        let ops_uri = format!("/v1/workspaces/{}/ops", workspace.workspace_id);
+        let file_node_id = NodeId::new_v4();
+        let revision = file_revision(
+            workspace.workspace_id,
+            login.device_id,
+            file_node_id,
+            &blob_id,
+        )?;
+        post_json::<CommitOperationResponse>(
+            app.clone(),
+            &ops_uri,
+            serde_json::json!({
+                "op_id": OpId::new_v4(),
+                "base_cursor": 0,
+                "kind": {
+                    "type": "create_node",
+                    "node_id": file_node_id,
+                    "parent_id": workspace.root_node_id,
+                    "name": "pg-notes.txt",
+                    "kind": "file",
+                    "initial_revision": revision
+                }
+            }),
+            Some(&login.access_token),
+        )
+        .await?;
+
+        // A commit referencing a missing blob must still return blob_missing.
+        let missing_node_id = NodeId::new_v4();
+        let missing_revision = file_revision(
+            workspace.workspace_id,
+            login.device_id,
+            missing_node_id,
+            "sha256:missing-from-postgres",
+        )?;
+        let missing_response = post_json_raw(
+            app.clone(),
+            &ops_uri,
+            serde_json::json!({
+                "op_id": OpId::new_v4(),
+                "base_cursor": 1,
+                "kind": {
+                    "type": "create_node",
+                    "node_id": missing_node_id,
+                    "parent_id": workspace.root_node_id,
+                    "name": "missing.txt",
+                    "kind": "file",
+                    "initial_revision": missing_revision
+                }
+            }),
+            Some(&login.access_token),
+        )
+        .await?;
+        assert_eq!(missing_response.status(), StatusCode::NOT_FOUND);
+        assert_eq!(error_code(missing_response).await?, "blob_missing");
+
+        pool.close().await;
+        Ok(())
+    }
+
     #[test]
     fn config_parses_s3_store_redacts_credentials_and_rejects_bad_values(
     ) -> Result<(), Box<dyn std::error::Error>> {
@@ -2638,6 +3078,13 @@ mod tests {
             None,
         )
         .await?;
+        let workspace = post_json::<CreateWorkspaceResponse>(
+            app.clone(),
+            "/v1/workspaces",
+            serde_json::json!({"name": "blob-ws"}),
+            Some(&login.access_token),
+        )
+        .await?;
         let bytes = b"ciphertext bytes";
         let blob_id = format!("sha256:{}", hex_lower(&Sha256::digest(bytes)));
 
@@ -2646,6 +3093,7 @@ mod tests {
             "/v1/blobs/dev-upload",
             serde_json::json!({
                 "blob_id": blob_id,
+                "workspace_id": workspace.workspace_id,
                 "bytes_base64": URL_SAFE_NO_PAD.encode(bytes),
                 "size": bytes.len(),
                 "encryption_header": "v1-header"
@@ -2685,6 +3133,7 @@ mod tests {
                     .body(Body::from(
                         serde_json::json!({
                             "blob_id": "sha256:0000",
+                            "workspace_id": workspace.workspace_id,
                             "bytes_base64": URL_SAFE_NO_PAD.encode(bytes),
                             "size": bytes.len(),
                             "encryption_header": null
@@ -2705,6 +3154,7 @@ mod tests {
                     .body(Body::from(
                         serde_json::json!({
                             "blob_id": "../escape",
+                            "workspace_id": workspace.workspace_id,
                             "bytes_base64": URL_SAFE_NO_PAD.encode(bytes),
                             "size": bytes.len(),
                             "encryption_header": null
@@ -3128,6 +3578,7 @@ mod tests {
             "/v1/blobs/dev-upload",
             serde_json::json!({
                 "blob_id": blob_id,
+                "workspace_id": workspace.workspace_id,
                 "bytes_base64": URL_SAFE_NO_PAD.encode(file_bytes),
                 "size": file_bytes.len(),
                 "encryption_header": null
@@ -3405,6 +3856,7 @@ mod tests {
             "/v1/blobs/dev-upload",
             serde_json::json!({
                 "blob_id": blob_id,
+                "workspace_id": workspace.workspace_id,
                 "bytes_base64": URL_SAFE_NO_PAD.encode(file_bytes),
                 "size": file_bytes.len(),
                 "encryption_header": "manifest-header"
@@ -3696,6 +4148,7 @@ mod tests {
             "/v1/blobs/dev-upload",
             serde_json::json!({
                 "blob_id": blob_id,
+                "workspace_id": workspace.workspace_id,
                 "bytes_base64": URL_SAFE_NO_PAD.encode(file_bytes),
                 "size": file_bytes.len(),
                 "encryption_header": null
