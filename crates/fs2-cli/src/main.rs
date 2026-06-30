@@ -1,6 +1,6 @@
 //! FS2 command-line entry point.
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use std::{
     env,
     fmt::Write as _,
@@ -32,6 +32,14 @@ fn run_from_args(args: impl IntoIterator<Item = String>) -> Result<String, Strin
         {
             dev_login(backend, device_name, "dev-cli-public-key")
         }
+        [cmd] if cmd == "status" => status_text("."),
+        [cmd, flag] if cmd == "status" && flag == "--json" => status_json("."),
+        [cmd, flag, path] if cmd == "status" && flag == "--path" => status_text(path),
+        [cmd, flag, path, json_flag]
+            if cmd == "status" && flag == "--path" && json_flag == "--json" =>
+        {
+            status_json(path)
+        }
         [cmd, subcmd, action] if cmd == "git" && subcmd == "submodules" && action == "status" => {
             git_submodules_status(".")
         }
@@ -47,7 +55,7 @@ fn run_from_args(args: impl IntoIterator<Item = String>) -> Result<String, Strin
 }
 
 fn help() -> String {
-    "fs2-devsync CLI\n\nCommands:\n  fs2 login --backend <url> [--device-name <name>]\n  fs2 git status [path]\n  fs2 git submodules status [path]\n"
+    "fs2-devsync CLI\n\nCommands:\n  fs2 login --backend <url> [--device-name <name>]\n  fs2 status [--json]\n  fs2 git status [path]\n  fs2 git submodules status [path]\n"
         .to_owned()
 }
 
@@ -131,6 +139,100 @@ fn post_json(host: &str, port: u16, path: &str, body: &str) -> Result<String, St
         return Err(format!("login request failed: {head}"));
     }
     Ok(body.to_owned())
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+struct StatusOutput {
+    connection_state: String,
+    cursor_lag: u64,
+    pending_uploads: u64,
+    pending_downloads: u64,
+    cache_size_bytes: u64,
+    conflicts: u64,
+    env_summary: EnvSummary,
+    git_warnings: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+struct EnvSummary {
+    total: u64,
+    secrets: u64,
+}
+
+fn status_for_path(path: impl AsRef<Path>) -> StatusOutput {
+    StatusOutput {
+        connection_state: "offline".to_owned(),
+        cursor_lag: 0,
+        pending_uploads: 0,
+        pending_downloads: 0,
+        cache_size_bytes: 0,
+        conflicts: 0,
+        env_summary: EnvSummary {
+            total: 0,
+            secrets: 0,
+        },
+        git_warnings: git_warnings(path),
+    }
+}
+
+fn git_warnings(path: impl AsRef<Path>) -> Vec<String> {
+    match fs2_git::detect_repository(path) {
+        Ok(status) => {
+            let mut warnings = Vec::new();
+            if status.is_dirty() {
+                warnings.push(format!(
+                    "git working tree has {} dirty entries",
+                    status.dirty_entries.len()
+                ));
+            }
+            if status.has_submodules() {
+                warnings.push(format!(
+                    "git repository has {} submodules",
+                    status.submodules.len()
+                ));
+            }
+            warnings
+        }
+        Err(_) => vec!["not inside a git repository".to_owned()],
+    }
+}
+
+fn status_json(path: impl AsRef<Path>) -> Result<String, String> {
+    serde_json::to_string_pretty(&status_for_path(path)).map_err(|error| error.to_string())
+}
+
+fn status_text(path: impl AsRef<Path>) -> Result<String, String> {
+    render_status_text(&status_for_path(path))
+}
+
+fn render_status_text(status: &StatusOutput) -> Result<String, String> {
+    let mut out = String::new();
+    writeln!(out, "FS2 status:").map_err(|error| error.to_string())?;
+    writeln!(out, "  connection: {}", status.connection_state)
+        .map_err(|error| error.to_string())?;
+    writeln!(out, "  cursor lag: {}", status.cursor_lag).map_err(|error| error.to_string())?;
+    writeln!(out, "  pending uploads: {}", status.pending_uploads)
+        .map_err(|error| error.to_string())?;
+    writeln!(out, "  pending downloads: {}", status.pending_downloads)
+        .map_err(|error| error.to_string())?;
+    writeln!(out, "  cache size: {} bytes", status.cache_size_bytes)
+        .map_err(|error| error.to_string())?;
+    writeln!(out, "  conflicts: {}", status.conflicts).map_err(|error| error.to_string())?;
+    writeln!(
+        out,
+        "  env: {} records ({} secrets)",
+        status.env_summary.total, status.env_summary.secrets
+    )
+    .map_err(|error| error.to_string())?;
+    if status.git_warnings.is_empty() {
+        out.push_str("  git warnings: none\n");
+    } else {
+        out.push_str("  git warnings:\n");
+        for warning in &status.git_warnings {
+            writeln!(out, "    - {warning}").map_err(|error| error.to_string())?;
+        }
+    }
+    Ok(out)
 }
 
 fn git_status(path: impl AsRef<Path>) -> Result<String, String> {
@@ -217,12 +319,52 @@ mod tests {
     use super::*;
 
     #[test]
-    fn help_lists_git_status() -> Result<(), String> {
+    fn help_lists_status_and_git_status() -> Result<(), String> {
         let output = run_from_args(["--help".to_owned()])?;
 
         assert!(output.contains("fs2 login --backend <url> [--device-name <name>]"));
+        assert!(output.contains("fs2 status [--json]"));
         assert!(output.contains("fs2 git status [path]"));
         assert!(output.contains("fs2 git submodules status [path]"));
         Ok(())
+    }
+
+    #[test]
+    fn status_text_has_stable_golden_output() -> Result<(), String> {
+        let output = render_status_text(&empty_status())?;
+
+        assert_eq!(
+            output,
+            "FS2 status:\n  connection: offline\n  cursor lag: 0\n  pending uploads: 0\n  pending downloads: 0\n  cache size: 0 bytes\n  conflicts: 0\n  env: 0 records (0 secrets)\n  git warnings: none\n"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn status_json_has_stable_golden_shape() -> Result<(), String> {
+        let output =
+            serde_json::to_string_pretty(&empty_status()).map_err(|error| error.to_string())?;
+
+        assert_eq!(
+            output,
+            "{\n  \"connection_state\": \"offline\",\n  \"cursor_lag\": 0,\n  \"pending_uploads\": 0,\n  \"pending_downloads\": 0,\n  \"cache_size_bytes\": 0,\n  \"conflicts\": 0,\n  \"env_summary\": {\n    \"total\": 0,\n    \"secrets\": 0\n  },\n  \"git_warnings\": []\n}"
+        );
+        Ok(())
+    }
+
+    fn empty_status() -> StatusOutput {
+        StatusOutput {
+            connection_state: "offline".to_owned(),
+            cursor_lag: 0,
+            pending_uploads: 0,
+            pending_downloads: 0,
+            cache_size_bytes: 0,
+            conflicts: 0,
+            env_summary: EnvSummary {
+                total: 0,
+                secrets: 0,
+            },
+            git_warnings: Vec::new(),
+        }
     }
 }

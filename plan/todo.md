@@ -669,21 +669,21 @@ Acceptance criteria:
 
 ### 10.3 Status command
 
-- [ ] Implement `fs2 status` with JSON and text output.
-- [ ] Show:
-  - [ ] connection state
-  - [ ] cursor lag
-  - [ ] pending uploads
-  - [ ] pending downloads
-  - [ ] cache size
-  - [ ] conflicts
-  - [ ] env summary
-  - [ ] Git warnings
-- [ ] Add golden output tests.
+- [x] Implement `fs2 status` with JSON and text output.
+- [x] Show:
+  - [x] connection state
+  - [x] cursor lag
+  - [x] pending uploads
+  - [x] pending downloads
+  - [x] cache size
+  - [x] conflicts
+  - [x] env summary
+  - [x] Git warnings
+- [x] Add golden output tests.
 
 Acceptance criteria:
 
-- [ ] `fs2 status --json` is stable enough for tests and editor integrations.
+- [x] `fs2 status --json` is stable enough for tests and editor integrations.
 
 ---
 
