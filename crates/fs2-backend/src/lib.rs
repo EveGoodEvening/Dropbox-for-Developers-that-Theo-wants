@@ -1554,6 +1554,34 @@ fn apply_create_node(
     Ok(())
 }
 
+fn revision_conflict(
+    node_id: NodeId,
+    current_revision_id: Option<RevisionId>,
+    base_revision_id: Option<RevisionId>,
+) -> ApiError {
+    let mut details = serde_json::Map::new();
+    details.insert(
+        "node_id".to_owned(),
+        serde_json::Value::String(node_id.to_string()),
+    );
+    details.insert(
+        "current_revision_id".to_owned(),
+        current_revision_id.map_or(serde_json::Value::Null, |revision_id| {
+            serde_json::Value::String(revision_id.to_string())
+        }),
+    );
+    details.insert(
+        "base_revision_id".to_owned(),
+        base_revision_id.map_or(serde_json::Value::Null, |revision_id| {
+            serde_json::Value::String(revision_id.to_string())
+        }),
+    );
+    ApiError::Structured {
+        error: Fs2Error::RevisionConflict,
+        details,
+    }
+}
+
 fn apply_put_file_revision(
     workspace: &mut WorkspaceRecord,
     node_id: NodeId,
@@ -1574,7 +1602,11 @@ fn apply_put_file_revision(
         }
         // Conflict rule: base_revision_id must equal the node's current revision.
         if node.current_rev != base_revision_id {
-            return Err(ApiError::structured(Fs2Error::RevisionConflict));
+            return Err(revision_conflict(
+                node.node_id,
+                node.current_rev,
+                base_revision_id,
+            ));
         }
     }
     validate_new_revision(workspace, revision, blob_exists)?;
@@ -2814,9 +2846,15 @@ mod tests {
             .await?)
     }
 
-    async fn error_code(response: Response) -> Result<String, Box<dyn std::error::Error>> {
+    async fn error_value(
+        response: Response,
+    ) -> Result<serde_json::Value, Box<dyn std::error::Error>> {
         let bytes = axum::body::to_bytes(response.into_body(), usize::MAX).await?;
-        let value: serde_json::Value = serde_json::from_slice(&bytes)?;
+        serde_json::from_slice(&bytes).map_err(Into::into)
+    }
+
+    async fn error_code(response: Response) -> Result<String, Box<dyn std::error::Error>> {
+        let value = error_value(response).await?;
         Ok(value
             .get("error")
             .and_then(|error| error.get("code"))
@@ -3139,6 +3177,40 @@ mod tests {
             Some(&login.access_token),
         )
         .await?;
+
+        let stale_revision = file_revision(
+            workspace.workspace_id,
+            login.device_id,
+            file_node_id,
+            &blob_id,
+        )?;
+        let response = post_json_raw(
+            app.clone(),
+            &uri,
+            serde_json::json!({
+                "op_id": OpId::new_v4(),
+                "base_cursor": 2,
+                "kind": {
+                    "type": "put_file_revision",
+                    "node_id": file_node_id,
+                    "base_revision_id": null,
+                    "revision": stale_revision
+                }
+            }),
+            Some(&login.access_token),
+        )
+        .await?;
+        assert_eq!(response.status(), StatusCode::CONFLICT);
+        let error = error_value(response).await?;
+        assert_eq!(error["error"]["code"], "revision_conflict");
+        assert_eq!(
+            error["error"]["details"]["current_revision_id"],
+            serde_json::Value::String(revision.revision_id.to_string())
+        );
+        assert_eq!(
+            error["error"]["details"]["base_revision_id"],
+            serde_json::Value::Null
+        );
 
         let mut duplicate_revision = revision.clone();
         duplicate_revision.base_revision_id = Some(revision.revision_id);

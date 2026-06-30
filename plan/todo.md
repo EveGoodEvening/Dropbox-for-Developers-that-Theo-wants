@@ -912,13 +912,13 @@ Acceptance criteria:
 
 ### 15.1 Backend conflict detection
 
-- [ ] Enforce base revision on `PutFileRevision`.
-- [ ] Return `revision_conflict` with current revision.
-- [ ] Add tests for concurrent writes.
+- [x] Enforce base revision on `PutFileRevision`.
+- [x] Return `revision_conflict` with current revision.
+- [x] Add tests for concurrent writes.
 
 Acceptance criteria:
 
-- [ ] Backend rejects stale file update instead of overwriting current content.
+- [x] Backend rejects stale file update instead of overwriting current content.
 
 ### 15.2 Client conflict preservation
 
