@@ -6,7 +6,10 @@
 //! Backend HTTP server skeleton with development-only auth/device endpoints.
 
 use axum::{
-    extract::{Path, Query, State},
+    extract::{
+        ws::{Message, WebSocket, WebSocketUpgrade},
+        Path, Query, State,
+    },
     http::{HeaderMap, StatusCode},
     response::{IntoResponse, Response},
     routing::{get, post},
@@ -36,7 +39,10 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 use tokio::io::AsyncWriteExt;
-use tokio::{net::TcpListener, sync::RwLock};
+use tokio::{
+    net::TcpListener,
+    sync::{broadcast, RwLock},
+};
 use tracing::info;
 use tracing_subscriber::{fmt as tracing_fmt, EnvFilter};
 
@@ -334,6 +340,7 @@ pub struct AppState {
     operations: Arc<RwLock<HashMap<WorkspaceId, Vec<CommittedOperation>>>>,
     /// Idempotency index mapping `(workspace_id, op_id)` to the assigned cursor.
     idempotency: Arc<RwLock<HashMap<(WorkspaceId, OpId), Cursor>>>,
+    event_tx: broadcast::Sender<WorkspaceEvent>,
 }
 
 impl AppState {
@@ -342,6 +349,7 @@ impl AppState {
     }
 
     pub fn dev_with_blob_root(jwt_secret: RedactedSecret, blob_root: impl Into<PathBuf>) -> Self {
+        let (event_tx, _event_rx) = broadcast::channel(1024);
         Self {
             jwt_secret,
             dev_user_id: UserId::new_v4(),
@@ -351,6 +359,7 @@ impl AppState {
             workspaces: Arc::new(RwLock::new(HashMap::new())),
             operations: Arc::new(RwLock::new(HashMap::new())),
             idempotency: Arc::new(RwLock::new(HashMap::new())),
+            event_tx,
         }
     }
 }
@@ -453,6 +462,16 @@ pub struct CreateWorkspaceResponse {
 pub struct CommittedOperation {
     pub operation: Operation,
     pub cursor: Cursor,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum WorkspaceEvent {
+    WorkspaceOpsAvailable {
+        workspace_id: WorkspaceId,
+        from_cursor: Cursor,
+        to_cursor: Cursor,
+    },
 }
 
 #[derive(Debug, Deserialize)]
@@ -687,6 +706,10 @@ pub fn app_with_state(state: AppState) -> Router {
             get(fetch_operations).post(commit_operation),
         )
         .route("/v1/workspaces/:workspace_id/manifest", get(fetch_manifest))
+        .route(
+            "/v1/workspaces/:workspace_id/events/ws",
+            get(workspace_events_ws),
+        )
         .route("/v1/blobs/dev-upload", post(dev_blob_upload))
         .route("/v1/blobs/dev-download", post(dev_blob_download))
         .route("/v1/blobs/:blob_id/status", get(blob_status))
@@ -967,6 +990,12 @@ async fn commit_operation(
     idempotency.insert((workspace_id, op_id), assigned_cursor);
     drop(idempotency);
 
+    let _ = state.event_tx.send(WorkspaceEvent::WorkspaceOpsAvailable {
+        workspace_id,
+        from_cursor: assigned_cursor,
+        to_cursor: assigned_cursor,
+    });
+
     Ok(Json(CommitOperationResponse {
         workspace_id,
         op_id,
@@ -1078,6 +1107,66 @@ async fn fetch_manifest(
         has_more,
         next_offset,
     }))
+}
+
+async fn workspace_events_ws(
+    State(state): State<AppState>,
+    Path(workspace_id): Path<WorkspaceId>,
+    Query(query): Query<HashMap<String, String>>,
+    upgrade: WebSocketUpgrade,
+) -> Result<Response, ApiError> {
+    let token = query
+        .get("access_token")
+        .or_else(|| query.get("token"))
+        .ok_or(ApiError::Unauthorized("missing access token"))?;
+    let auth = authenticate_token(token, &state).await?;
+    {
+        let workspaces = state.workspaces.read().await;
+        let workspace = workspaces
+            .get(&workspace_id)
+            .ok_or_else(|| ApiError::structured(Fs2Error::WorkspaceNotFound))?;
+        if workspace.user_id != auth.user_id {
+            return Err(ApiError::Unauthorized("device does not own this workspace"));
+        }
+        drop(workspaces);
+    }
+
+    let rx = state.event_tx.subscribe();
+    Ok(upgrade.on_upgrade(move |socket| stream_workspace_events(socket, rx, workspace_id)))
+}
+
+async fn stream_workspace_events(
+    mut socket: WebSocket,
+    mut rx: broadcast::Receiver<WorkspaceEvent>,
+    workspace_id: WorkspaceId,
+) {
+    loop {
+        tokio::select! {
+            received = rx.recv() => {
+                let event = match received {
+                    Ok(event) => event,
+                    Err(broadcast::error::RecvError::Lagged(_)
+                    | broadcast::error::RecvError::Closed) => break,
+                };
+                let WorkspaceEvent::WorkspaceOpsAvailable { workspace_id: event_workspace_id, .. } = event;
+                if event_workspace_id != workspace_id {
+                    continue;
+                }
+                let Ok(text) = serde_json::to_string(&event) else {
+                    continue;
+                };
+                if socket.send(Message::Text(text)).await.is_err() {
+                    break;
+                }
+            }
+            message = socket.recv() => {
+                match message {
+                    Some(Ok(Message::Close(_)) | Err(_)) | None => break,
+                    Some(Ok(_)) => {}
+                }
+            }
+        }
+    }
 }
 
 const DEFAULT_OPS_PAGE_LIMIT: u32 = 100;
@@ -1759,6 +1848,13 @@ async fn authenticate(
     state: &AppState,
 ) -> Result<AuthenticatedDevice, ApiError> {
     let token = bearer_token(headers)?;
+    authenticate_token(token, state).await
+}
+
+async fn authenticate_token(
+    token: &str,
+    state: &AppState,
+) -> Result<AuthenticatedDevice, ApiError> {
     let claims = decode_access_token(token, &state.jwt_secret)?;
     let device = {
         let devices = state.devices.read().await;
@@ -1863,8 +1959,11 @@ mod tests {
     #![allow(clippy::too_many_lines)]
     use super::*;
     use axum::{body::Body, http::Request};
+    use futures_util::{Stream, StreamExt};
     use serde::de::DeserializeOwned;
+    use std::time::Duration;
     use tempfile::TempDir;
+    use tokio_tungstenite::{connect_async, tungstenite::Message as TungsteniteMessage};
     use tower::util::ServiceExt;
 
     #[test]
@@ -2816,6 +2915,105 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn websocket_events_notify_and_reconnect_after_commits(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let state = AppState::dev(RedactedSecret::new(DEFAULT_DEV_SECRET.to_owned())?);
+        let app = app_with_state(state.clone());
+        let login = post_json::<DevLoginResponse>(
+            app.clone(),
+            "/v1/auth/dev-login",
+            serde_json::json!({
+                "device_name": "ws-laptop",
+                "platform": {"os": "linux"},
+                "public_key": "ws-key"
+            }),
+            None,
+        )
+        .await?;
+        let workspace = post_json::<CreateWorkspaceResponse>(
+            app.clone(),
+            "/v1/workspaces",
+            serde_json::json!({"name": "ws-ws"}),
+            Some(&login.access_token),
+        )
+        .await?;
+
+        let listener = TcpListener::bind("127.0.0.1:0").await?;
+        let addr = listener.local_addr()?;
+        let server_state = state.clone();
+        let server = tokio::spawn(async move {
+            let _ = axum::serve(listener, app_with_state(server_state)).await;
+        });
+        let ws_uri = format!(
+            "ws://{addr}/v1/workspaces/{}/events/ws?access_token={}",
+            workspace.workspace_id, login.access_token
+        );
+        let (mut socket, _) = connect_async(&ws_uri).await?;
+        let ops_uri = format!("/v1/workspaces/{}/ops", workspace.workspace_id);
+
+        post_json::<CommitOperationResponse>(
+            app.clone(),
+            &ops_uri,
+            serde_json::json!({
+                "op_id": OpId::new_v4(),
+                "base_cursor": 0,
+                "kind": {
+                    "type": "create_node",
+                    "node_id": NodeId::new_v4(),
+                    "parent_id": workspace.root_node_id,
+                    "name": "first",
+                    "kind": "directory",
+                    "initial_revision": null
+                }
+            }),
+            Some(&login.access_token),
+        )
+        .await?;
+        let event = recv_workspace_event(&mut socket).await?;
+        assert_eq!(
+            event,
+            WorkspaceEvent::WorkspaceOpsAvailable {
+                workspace_id: workspace.workspace_id,
+                from_cursor: Cursor::new(1)?,
+                to_cursor: Cursor::new(1)?,
+            }
+        );
+        drop(socket);
+
+        let (mut reconnected, _) = connect_async(&ws_uri).await?;
+        post_json::<CommitOperationResponse>(
+            app,
+            &ops_uri,
+            serde_json::json!({
+                "op_id": OpId::new_v4(),
+                "base_cursor": 1,
+                "kind": {
+                    "type": "create_node",
+                    "node_id": NodeId::new_v4(),
+                    "parent_id": workspace.root_node_id,
+                    "name": "second",
+                    "kind": "directory",
+                    "initial_revision": null
+                }
+            }),
+            Some(&login.access_token),
+        )
+        .await?;
+        let event = recv_workspace_event(&mut reconnected).await?;
+        assert_eq!(
+            event,
+            WorkspaceEvent::WorkspaceOpsAvailable {
+                workspace_id: workspace.workspace_id,
+                from_cursor: Cursor::new(2)?,
+                to_cursor: Cursor::new(2)?,
+            }
+        );
+        drop(reconnected);
+        server.abort();
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn fetch_ops_pagination_has_more_and_next_cursor(
     ) -> Result<(), Box<dyn std::error::Error>> {
         let state = AppState::dev(RedactedSecret::new(DEFAULT_DEV_SECRET.to_owned())?);
@@ -3082,6 +3280,21 @@ mod tests {
         assert_eq!(replay_revisions.len(), orig_ws.revisions.len());
         drop(original);
         Ok(())
+    }
+
+    async fn recv_workspace_event<S>(
+        socket: &mut S,
+    ) -> Result<WorkspaceEvent, Box<dyn std::error::Error>>
+    where
+        S: Stream<Item = Result<TungsteniteMessage, tokio_tungstenite::tungstenite::Error>> + Unpin,
+    {
+        let message = tokio::time::timeout(Duration::from_secs(2), socket.next())
+            .await?
+            .ok_or("websocket closed before event")??;
+        let TungsteniteMessage::Text(text) = message else {
+            return Err(std::io::Error::other("unexpected websocket message").into());
+        };
+        serde_json::from_str(&text).map_err(Into::into)
     }
 
     async fn post_json<T: DeserializeOwned>(

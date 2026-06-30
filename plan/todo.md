@@ -457,16 +457,16 @@ Acceptance criteria:
 
 ### 6.6 Implement WebSocket events
 
-- [ ] Add workspace events endpoint.
-- [ ] Authenticate WebSocket connection.
-- [ ] Subscribe connection to workspace.
-- [ ] Publish event after operation commit.
-- [ ] Include cursor range only; clients fetch ops through normal API.
-- [ ] Add reconnect test.
+- [x] Add workspace events endpoint.
+- [x] Authenticate WebSocket connection.
+- [x] Subscribe connection to workspace.
+- [x] Publish event after operation commit.
+- [x] Include cursor range only; clients fetch ops through normal API.
+- [x] Add reconnect test.
 
 Acceptance criteria:
 
-- [ ] Client B receives notification after Client A commits an operation.
+- [x] Client B receives notification after Client A commits an operation.
 
 ---
 
