@@ -484,7 +484,7 @@ trait BlobStore {
 
 - [x] Implement local filesystem blob store for tests.
 - [x] Implement S3-compatible blob store.
-- [ ] Add MinIO or localstack test option.
+- [x] Add MinIO or localstack test option.
 
 Acceptance criteria:
 

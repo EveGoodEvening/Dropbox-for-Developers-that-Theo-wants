@@ -369,7 +369,12 @@ impl BlobStore for ObjectStoreBlobStore {
             match self.store.head(&Self::path_for(key)?).await {
                 Ok(_) => Ok(true),
                 Err(object_store::Error::NotFound { .. }) => Ok(false),
-                Err(error) => Err(object_store_error(error)),
+                Err(error) => match object_store_error(error) {
+                    BlobStoreError::Io(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                        Ok(false)
+                    }
+                    error => Err(error),
+                },
             }
         })
     }
@@ -2961,6 +2966,42 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn s3_blob_store_round_trips_against_minio() -> Result<(), Box<dyn std::error::Error>> {
+        let minio = DockerMinio::start()?;
+        wait_for_minio(
+            &minio.endpoint,
+            &minio.access_key,
+            &minio.secret_key,
+            &minio.bucket,
+        )
+        .await?;
+        let config = ObjectStoreConfig::S3 {
+            bucket: minio.bucket.clone(),
+            endpoint: minio.endpoint.clone(),
+            region: "us-east-1".to_owned(),
+            access_key_id: RedactedSecret::new(minio.access_key.clone())?,
+            secret_access_key: RedactedSecret::new(minio.secret_key.clone())?,
+            session_token: None,
+            allow_http: true,
+            virtual_hosted_style: false,
+        };
+        let store = blob_store_for_config(&config)?;
+        let key = "sha256:minio-round-trip";
+
+        assert!(!store.exists(key).await?);
+        store
+            .put(key, Bytes::from_static(b"minio encrypted bytes"))
+            .await?;
+
+        assert!(store.exists(key).await?);
+        assert_eq!(
+            store.get(key).await?,
+            Bytes::from_static(b"minio encrypted bytes")
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn healthz_returns_ok() -> Result<(), Box<dyn std::error::Error>> {
         let response = app()
             .oneshot(Request::builder().uri("/healthz").body(Body::empty())?)
@@ -4362,6 +4403,62 @@ mod tests {
         serde_json::from_slice(&bytes).map_err(Into::into)
     }
 
+    struct DockerMinio {
+        id: String,
+        endpoint: String,
+        bucket: String,
+        access_key: String,
+        secret_key: String,
+    }
+
+    impl DockerMinio {
+        fn start() -> Result<Self, std::io::Error> {
+            let access_key = "fs2minio".to_owned();
+            let secret_key = "fs2miniosecret".to_owned();
+            let bucket = "fs2-test".to_owned();
+            let id = docker_output(&[
+                "run",
+                "--rm",
+                "--detach",
+                "--publish",
+                "127.0.0.1::9000",
+                "--env",
+                "MINIO_ROOT_USER=fs2minio",
+                "--env",
+                "MINIO_ROOT_PASSWORD=fs2miniosecret",
+                "quay.io/minio/minio:latest",
+                "server",
+                "/data",
+            ])?;
+            let port_args = ["port", id.as_str(), "9000/tcp"];
+            let port_output = docker_output(&port_args)?;
+            let port_line = port_output
+                .lines()
+                .next()
+                .ok_or_else(|| std::io::Error::other("docker did not report MinIO port"))?;
+            let port = port_line
+                .rsplit_once(':')
+                .map_or(port_line, |(_, port)| port);
+            Ok(Self {
+                id,
+                endpoint: format!("http://127.0.0.1:{port}"),
+                bucket,
+                access_key,
+                secret_key,
+            })
+        }
+    }
+
+    impl Drop for DockerMinio {
+        fn drop(&mut self) {
+            drop(
+                std::process::Command::new("docker")
+                    .args(["kill", self.id.as_str()])
+                    .status(),
+            );
+        }
+    }
+
     struct DockerPostgres {
         id: String,
         database_url: String,
@@ -4419,6 +4516,36 @@ mod tests {
             )));
         }
         Ok(String::from_utf8_lossy(&output.stdout).trim().to_owned())
+    }
+
+    async fn wait_for_minio(
+        endpoint: &str,
+        access_key: &str,
+        secret_key: &str,
+        bucket: &str,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let mut last_error = String::new();
+        for _ in 0..120 {
+            let command = format!(
+                "mc alias set fs2 {endpoint} {access_key} {secret_key} && mc mb --ignore-existing fs2/{bucket}"
+            );
+            match docker_output(&[
+                "run",
+                "--rm",
+                "--network",
+                "host",
+                "--entrypoint",
+                "/bin/sh",
+                "quay.io/minio/mc:latest",
+                "-c",
+                &command,
+            ]) {
+                Ok(_) => return Ok(()),
+                Err(error) => last_error = error.to_string(),
+            }
+            tokio::time::sleep(Duration::from_millis(250)).await;
+        }
+        Err(std::io::Error::other(format!("MinIO did not become ready: {last_error}")).into())
     }
 
     async fn wait_for_postgres(
