@@ -1011,15 +1011,15 @@ Acceptance criteria:
 
 ### 17.2 Backend env endpoints
 
-- [ ] Add env list endpoint.
-- [ ] Add env set endpoint.
-- [ ] Add env delete endpoint.
-- [ ] Store encrypted payload only.
+- [x] Add env list endpoint.
+- [x] Add env set endpoint.
+- [x] Add env delete endpoint.
+- [x] Store encrypted payload only.
 - [ ] Add tests that backend never receives plaintext in request logs.
 
 Acceptance criteria:
 
-- [ ] Env records sync through operation log or env endpoint consistently.
+- [x] Env records sync through operation log or env endpoint consistently.
 
 ### 17.3 CLI env commands
 

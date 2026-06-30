@@ -12,16 +12,16 @@ use axum::{
     },
     http::{HeaderMap, StatusCode},
     response::{IntoResponse, Response},
-    routing::{get, post},
+    routing::{delete, get, post},
     Json, Router,
 };
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
 use bytes::Bytes;
 use chrono::Utc;
 use fs2_core::{
-    names_collide, CasePolicy, Cursor, DeviceId, EnvVarId, EnvVarMetadata, FsRule, Node, NodeId,
-    NodeKind, NodeName, NodeRevision, OpId, Operation, OperationKind, RevisionContent, RevisionId,
-    UserId, WorkspaceId, WorkspacePath,
+    names_collide, CasePolicy, Cursor, DeviceId, EnvScope, EnvVarId, EnvVarMetadata, FsRule, Node,
+    NodeId, NodeKind, NodeName, NodeRevision, OpId, Operation, OperationKind, RevisionContent,
+    RevisionId, UserId, WorkspaceId, WorkspacePath,
 };
 use fs2_core::{ErrorEnvelope, Fs2Error};
 use hmac::{Hmac, Mac};
@@ -797,6 +797,24 @@ pub struct EnvRecord {
 }
 
 #[derive(Debug, Deserialize)]
+pub struct EnvListQuery {
+    pub project_path: Option<String>,
+    pub environment: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct SetEnvRequest {
+    pub env_var_id: EnvVarId,
+    pub encrypted_payload: String,
+    pub metadata: EnvVarMetadata,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct EnvListResponse {
+    pub records: Vec<EnvRecord>,
+}
+
+#[derive(Debug, Deserialize)]
 pub struct CreateWorkspaceRequest {
     pub name: String,
 }
@@ -1059,6 +1077,14 @@ pub fn app_with_state(state: AppState) -> Router {
         )
         .route("/v1/workspaces/:workspace_id/manifest", get(fetch_manifest))
         .route(
+            "/v1/workspaces/:workspace_id/env",
+            get(list_env).post(set_env),
+        )
+        .route(
+            "/v1/workspaces/:workspace_id/env/:env_var_id",
+            delete(delete_env),
+        )
+        .route(
             "/v1/workspaces/:workspace_id/events/ws",
             get(workspace_events_ws),
         )
@@ -1274,6 +1300,209 @@ async fn create_workspace(
     }))
 }
 
+async fn list_env(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(workspace_id): Path<String>,
+    Query(query): Query<EnvListQuery>,
+) -> Result<Json<EnvListResponse>, ApiError> {
+    let auth = authenticate(&headers, &state).await?;
+    let workspace_id = WorkspaceId::from_str(&workspace_id)
+        .map_err(|_| ApiError::InvalidRequest("workspace_id must be a UUID"))?;
+    let query = normalize_env_query(query)?;
+    let records = {
+        let workspaces = state.workspaces.read().await;
+        let workspace = authorized_workspace(&workspaces, workspace_id, auth.user_id)?;
+        let mut records = workspace
+            .env_vars
+            .values()
+            .filter(|record| env_record_matches(record, &query))
+            .cloned()
+            .collect::<Vec<_>>();
+        records.sort_by(|left, right| {
+            left.metadata
+                .env_name
+                .cmp(&right.metadata.env_name)
+                .then_with(|| {
+                    left.env_var_id
+                        .to_string()
+                        .cmp(&right.env_var_id.to_string())
+                })
+        });
+        drop(workspaces);
+        records
+    };
+    Ok(Json(EnvListResponse { records }))
+}
+
+async fn set_env(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(workspace_id): Path<String>,
+    Json(request): Json<SetEnvRequest>,
+) -> Result<Json<EnvRecord>, ApiError> {
+    let auth = authenticate(&headers, &state).await?;
+    let workspace_id = WorkspaceId::from_str(&workspace_id)
+        .map_err(|_| ApiError::InvalidRequest("workspace_id must be a UUID"))?;
+    if request.encrypted_payload.trim().is_empty() {
+        return Err(ApiError::InvalidRequest(
+            "encrypted payload must not be empty",
+        ));
+    }
+    let mut request = request;
+    normalize_env_metadata(&mut request.metadata)?;
+    validate_env_request_shape(&auth, workspace_id, &request)?;
+    let env_var_id = request.env_var_id;
+    let record = EnvRecord {
+        env_var_id,
+        encrypted_payload: request.encrypted_payload,
+        metadata: request.metadata,
+    };
+    {
+        let mut workspaces = state.workspaces.write().await;
+        let workspace = authorized_workspace_mut(&mut workspaces, workspace_id, auth.user_id)?;
+        insert_env_record(workspace, record.clone())?;
+        drop(workspaces);
+    }
+    Ok(Json(record))
+}
+
+async fn delete_env(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path((workspace_id, env_var_id)): Path<(String, String)>,
+) -> Result<StatusCode, ApiError> {
+    let auth = authenticate(&headers, &state).await?;
+    let workspace_id = WorkspaceId::from_str(&workspace_id)
+        .map_err(|_| ApiError::InvalidRequest("workspace_id must be a UUID"))?;
+    let env_var_id = EnvVarId::from_str(&env_var_id)
+        .map_err(|_| ApiError::InvalidRequest("env_var_id must be a UUID"))?;
+    {
+        let mut workspaces = state.workspaces.write().await;
+        let workspace = authorized_workspace_mut(&mut workspaces, workspace_id, auth.user_id)?;
+        workspace
+            .env_vars
+            .remove(&env_var_id)
+            .ok_or(ApiError::InvalidRequest("env record not found"))?;
+        drop(workspaces);
+    }
+    Ok(StatusCode::NO_CONTENT)
+}
+
+fn env_record_matches(record: &EnvRecord, query: &EnvListQuery) -> bool {
+    if let Some(environment) = &query.environment {
+        if record.metadata.environment != *environment {
+            return false;
+        }
+    }
+    query.project_path.as_ref().map_or(true, |project_path| {
+        matches!(
+            &record.metadata.scope,
+            EnvScope::Project { project_path: record_path }
+                | EnvScope::ProjectMachine { project_path: record_path, .. }
+                if record_path == project_path
+        )
+    })
+}
+
+fn normalize_env_query(mut query: EnvListQuery) -> Result<EnvListQuery, ApiError> {
+    if let Some(project_path) = &mut query.project_path {
+        *project_path = WorkspacePath::parse(project_path.as_str())
+            .map_err(|_| ApiError::InvalidRequest("project_path must be workspace-relative"))?
+            .into_string();
+    }
+    Ok(query)
+}
+
+fn normalize_env_metadata(metadata: &mut EnvVarMetadata) -> Result<(), ApiError> {
+    match &mut metadata.scope {
+        EnvScope::Project { project_path } | EnvScope::ProjectMachine { project_path, .. } => {
+            *project_path = WorkspacePath::parse(project_path.as_str())
+                .map_err(|_| ApiError::InvalidRequest("project_path must be workspace-relative"))?
+                .into_string();
+        }
+        EnvScope::Workspace | EnvScope::Machine { .. } => {}
+    }
+    Ok(())
+}
+
+fn env_metadata_identity_matches(left: &EnvVarMetadata, right: &EnvVarMetadata) -> bool {
+    left.env_name == right.env_name
+        && left.environment == right.environment
+        && left.scope == right.scope
+}
+
+fn normalize_operation_env_metadata(kind: &mut OperationKind) -> Result<(), ApiError> {
+    if let OperationKind::SetEnvVar { metadata, .. } = kind {
+        normalize_env_metadata(metadata)?;
+    }
+    Ok(())
+}
+
+fn insert_env_record(workspace: &mut WorkspaceRecord, record: EnvRecord) -> Result<(), ApiError> {
+    if workspace.env_vars.iter().any(|(existing_id, existing)| {
+        *existing_id != record.env_var_id
+            && env_metadata_identity_matches(&existing.metadata, &record.metadata)
+    }) {
+        return Err(ApiError::InvalidRequest("env identity already exists"));
+    }
+    workspace.env_vars.insert(record.env_var_id, record);
+    Ok(())
+}
+
+fn validate_env_request_shape(
+    auth: &AuthenticatedDevice,
+    workspace_id: WorkspaceId,
+    request: &SetEnvRequest,
+) -> Result<(), ApiError> {
+    let operation = Operation {
+        op_id: OpId::new_v4(),
+        workspace_id,
+        device_id: auth.device_id,
+        base_cursor: Cursor::new(0).map_err(|error| ApiError::Internal(error.to_string()))?,
+        kind: OperationKind::SetEnvVar {
+            env_var_id: request.env_var_id,
+            encrypted_payload: request.encrypted_payload.clone(),
+            metadata: request.metadata.clone(),
+        },
+        created_at: Utc::now(),
+    };
+    operation
+        .validate_shape()
+        .map_err(|error| ApiError::Structured {
+            error: error.error.code,
+            details: error.error.details,
+        })
+}
+
+fn authorized_workspace(
+    workspaces: &HashMap<WorkspaceId, WorkspaceRecord>,
+    workspace_id: WorkspaceId,
+    user_id: UserId,
+) -> Result<&WorkspaceRecord, ApiError> {
+    let workspace = workspaces
+        .get(&workspace_id)
+        .ok_or_else(|| ApiError::structured(Fs2Error::WorkspaceNotFound))?;
+    if workspace.user_id != user_id {
+        return Err(ApiError::Unauthorized("device does not own this workspace"));
+    }
+    Ok(workspace)
+}
+
+fn authorized_workspace_mut(
+    workspaces: &mut HashMap<WorkspaceId, WorkspaceRecord>,
+    workspace_id: WorkspaceId,
+    user_id: UserId,
+) -> Result<&mut WorkspaceRecord, ApiError> {
+    let workspace = workspaces
+        .get_mut(&workspace_id)
+        .ok_or_else(|| ApiError::structured(Fs2Error::WorkspaceNotFound))?;
+    if workspace.user_id != user_id {
+        return Err(ApiError::Unauthorized("device does not own this workspace"));
+    }
+    Ok(workspace)
+}
+
 async fn idempotent_commit_response(
     state: &AppState,
     auth: &AuthenticatedDevice,
@@ -1318,7 +1547,7 @@ async fn commit_operation(
     Json(request): Json<CommitOperationRequest>,
 ) -> Result<Json<CommitOperationResponse>, ApiError> {
     let auth = authenticate(&headers, &state).await?;
-    let operation = Operation {
+    let mut operation = Operation {
         op_id: request.op_id,
         workspace_id,
         device_id: auth.device_id,
@@ -1326,6 +1555,7 @@ async fn commit_operation(
         kind: request.kind,
         created_at: request.created_at,
     };
+    normalize_operation_env_metadata(&mut operation.kind)?;
     operation
         .validate_shape()
         .map_err(shape_error_into_api_error)?;
@@ -1723,17 +1953,14 @@ fn apply_operation(
             env_var_id,
             encrypted_payload,
             metadata,
-        } => {
-            workspace.env_vars.insert(
-                *env_var_id,
-                EnvRecord {
-                    env_var_id: *env_var_id,
-                    encrypted_payload: encrypted_payload.clone(),
-                    metadata: metadata.clone(),
-                },
-            );
-            Ok(())
-        }
+        } => insert_env_record(
+            workspace,
+            EnvRecord {
+                env_var_id: *env_var_id,
+                encrypted_payload: encrypted_payload.clone(),
+                metadata: metadata.clone(),
+            },
+        ),
         OperationKind::DeleteEnvVar { env_var_id } => {
             workspace
                 .env_vars
@@ -3836,6 +4063,131 @@ mod tests {
             .ok_or("created workspace missing")?;
         assert!(stored.env_vars.is_empty());
         drop(workspaces);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn env_endpoints_set_list_filter_delete_without_plaintext(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let app = app();
+        let login = post_json::<DevLoginResponse>(
+            app.clone(),
+            "/v1/auth/dev-login",
+            serde_json::json!({
+                "device_name": "env-api-laptop",
+                "platform": {"os": "linux"},
+                "public_key": "env-api-key"
+            }),
+            None,
+        )
+        .await?;
+        let workspace = post_json::<CreateWorkspaceResponse>(
+            app.clone(),
+            "/v1/workspaces",
+            serde_json::json!({"name": "env-api-ws"}),
+            Some(&login.access_token),
+        )
+        .await?;
+        let env_var_id = EnvVarId::new_v4();
+        let fake_plaintext = "sk_live_fake_plaintext_should_not_leak";
+        let encrypted_payload = "encrypted-envelope-only";
+        let env_uri = format!("/v1/workspaces/{}/env", workspace.workspace_id);
+
+        let created = post_json::<EnvRecord>(
+            app.clone(),
+            &env_uri,
+            serde_json::json!({
+                "env_var_id": env_var_id,
+                "encrypted_payload": encrypted_payload,
+                "metadata": {
+                    "env_name": "STRIPE_SECRET_KEY",
+                    "environment": "dev",
+                    "scope": {"type": "project", "project_path": "apps/web"},
+                    "secret_kind": "secret"
+                }
+            }),
+            Some(&login.access_token),
+        )
+        .await?;
+        assert_eq!(created.env_var_id, env_var_id);
+        assert_eq!(created.encrypted_payload, encrypted_payload);
+        assert!(!serde_json::to_string(&created)?.contains(fake_plaintext));
+
+        let duplicate_response = post_json_raw(
+            app.clone(),
+            &env_uri,
+            serde_json::json!({
+                "env_var_id": EnvVarId::new_v4(),
+                "encrypted_payload": "different-envelope",
+                "metadata": {
+                    "env_name": "STRIPE_SECRET_KEY",
+                    "environment": "dev",
+                    "scope": {"type": "project", "project_path": "apps\\web"},
+                    "secret_kind": "plain_config"
+                }
+            }),
+            Some(&login.access_token),
+        )
+        .await?;
+        assert_eq!(duplicate_response.status(), StatusCode::BAD_REQUEST);
+
+        post_json::<CommitOperationResponse>(
+            app.clone(),
+            &format!("/v1/workspaces/{}/ops", workspace.workspace_id),
+            serde_json::json!({
+                "op_id": OpId::new_v4(),
+                "base_cursor": 0,
+                "kind": {
+                    "type": "set_env_var",
+                    "env_var_id": EnvVarId::new_v4(),
+                    "encrypted_payload": "op-envelope",
+                    "metadata": {
+                        "env_name": "API_URL",
+                        "environment": "dev",
+                        "scope": {"type": "project", "project_path": "apps\\web"},
+                        "secret_kind": "plain_config"
+                    }
+                }
+            }),
+            Some(&login.access_token),
+        )
+        .await?;
+
+        let listed = get_json::<EnvListResponse>(
+            app.clone(),
+            &format!("{env_uri}?environment=dev&project_path=apps/web"),
+            Some(&login.access_token),
+        )
+        .await?;
+        let listed_json = serde_json::to_string(&listed)?;
+        assert_eq!(listed.records.len(), 2);
+        assert!(listed_json.contains(encrypted_payload));
+        assert!(listed_json.contains("op-envelope"));
+        assert!(!listed_json.contains(fake_plaintext));
+
+        let filtered = get_json::<EnvListResponse>(
+            app.clone(),
+            &format!("{env_uri}?environment=prod"),
+            Some(&login.access_token),
+        )
+        .await?;
+        assert!(filtered.records.is_empty());
+
+        let delete_response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("DELETE")
+                    .uri(format!("{env_uri}/{env_var_id}"))
+                    .header("authorization", format!("Bearer {}", login.access_token))
+                    .body(Body::empty())?,
+            )
+            .await?;
+        assert_eq!(delete_response.status(), StatusCode::NO_CONTENT);
+
+        let listed = get_json::<EnvListResponse>(app, &env_uri, Some(&login.access_token)).await?;
+        assert_eq!(listed.records.len(), 1);
+        assert_eq!(listed.records[0].metadata.env_name, "API_URL");
         Ok(())
     }
 
