@@ -331,23 +331,21 @@ Acceptance criteria:
 
 ### 5.2 Add Postgres migrations
 
-- [ ] Create users table.
-- [ ] Create devices table.
-- [ ] Create workspaces table.
-- [ ] Create nodes table.
-- [ ] Create node_revisions table.
-- [ ] Create operations table.
-- [ ] Create blobs table.
-- [ ] Create env_vars table.
-- [ ] Create key_envelopes table.
-- [ ] Add indexes from `design.md`.
-- [ ] Add migration test that runs migrations on an empty DB.
+- [x] Create users table.
+- [x] Create devices table.
+- [x] Create workspaces table.
+- [x] Create nodes table.
+- [x] Create node_revisions table.
+- [x] Create operations table.
+- [x] Create blobs table.
+- [x] Create env_vars table.
+- [x] Create key_envelopes table.
+- [x] Add indexes from `design.md`.
+- [x] Add migration test that runs migrations on an empty DB.
 
 Acceptance criteria:
 
-- [ ] Backend starts with a fresh migrated database.
-
-Blocked as of 2026-06-29: Phase 4.2 completion requires a real Postgres execution environment to run migrations on an empty database and verify backend startup against the migrated database. This workstation has no `psql`, `postgres`, or Docker, so the migration test and acceptance cannot be run locally. Provide a reachable `DATABASE_URL`, Docker/testcontainers, CI Postgres result, or explicit approval for a real embedded-Postgres test dependency before implementing and marking these tasks complete.
+- [x] Backend starts with a fresh migrated database.
 
 ### 5.3 Implement auth stub for local development
 

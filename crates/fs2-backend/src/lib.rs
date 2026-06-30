@@ -51,6 +51,8 @@ pub const DEFAULT_BIND_ADDR: &str = "127.0.0.1:3000";
 pub const DEFAULT_DATABASE_URL: &str = "postgres://fs2:fs2@localhost:5432/fs2";
 pub const DEFAULT_OBJECT_STORE: &str = "local:./.fs2-dev/blobs";
 const DEFAULT_DEV_SECRET: &str = "dev-only-secret-change-before-production";
+static POSTGRES_MIGRATOR: sqlx::migrate::Migrator = sqlx::migrate!("../../migrations/postgres");
+
 const DEV_AUTH_WARNING: &str = "development-only auth; not for production";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -842,10 +844,25 @@ pub fn app_with_state(state: AppState) -> Router {
         .with_state(state)
 }
 
+pub async fn migrate_database(
+    database_url: &str,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let pool = sqlx::postgres::PgPoolOptions::new()
+        .max_connections(5)
+        .connect(database_url)
+        .await?;
+    POSTGRES_MIGRATOR.run(&pool).await?;
+    pool.close().await;
+    Ok(())
+}
+
 pub async fn serve(
     config: BackendConfig,
     shutdown: impl Future<Output = ()> + Send + 'static,
 ) -> Result<(), std::io::Error> {
+    migrate_database(&config.database_url)
+        .await
+        .map_err(std::io::Error::other)?;
     let listener = TcpListener::bind(config.bind_addr).await?;
     info!(bind_addr = %config.bind_addr, "fs2-backend listening");
     let blob_store = blob_store_for_config(&config.object_store).map_err(std::io::Error::other)?;
@@ -2145,6 +2162,257 @@ mod tests {
             ObjectStoreConfig::Local { ref root } if root == &PathBuf::from("/tmp/fs2-test-blobs")
         ));
         assert!(blob_store_for_config(&config.object_store).is_ok());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn postgres_migrations_run_on_empty_db_and_backend_starts(
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let postgres = DockerPostgres::start()?;
+        wait_for_postgres(&postgres.database_url).await?;
+
+        let object_dir = TempDir::new()?;
+        let config = BackendConfig {
+            bind_addr: "127.0.0.1:0".parse()?,
+            database_url: postgres.database_url.clone(),
+            object_store: ObjectStoreConfig::Local {
+                root: object_dir.path().to_path_buf(),
+            },
+            jwt_secret: RedactedSecret::new(DEFAULT_DEV_SECRET.to_owned())?,
+            session_secret: RedactedSecret::new(DEFAULT_DEV_SECRET.to_owned())?,
+        };
+
+        serve(config, async {}).await?;
+
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .max_connections(1)
+            .connect(&postgres.database_url)
+            .await?;
+        let table_count = sqlx::query_scalar::<_, i64>(
+            "SELECT count(*) FROM (VALUES \
+             ('users'), ('devices'), ('workspaces'), ('nodes'), ('node_revisions'), \
+             ('operations'), ('blobs'), ('env_vars'), ('key_envelopes')) AS expected(name) \
+             JOIN information_schema.tables tables \
+             ON tables.table_schema = 'public' AND tables.table_name = expected.name",
+        )
+        .fetch_one(&pool)
+        .await?;
+        assert_eq!(table_count, 9);
+
+        let index_count = sqlx::query_scalar::<_, i64>(
+            "SELECT count(*) FROM pg_indexes \
+             WHERE schemaname = 'public' \
+             AND indexname IN ( \
+               'nodes_live_name_idx', \
+               'nodes_live_root_name_idx', \
+               'nodes_workspace_parent_idx', \
+               'nodes_workspace_path_scan_idx', \
+               'node_revisions_node_created_idx', \
+               'node_revisions_workspace_node_idx', \
+               'operations_workspace_cursor_idx', \
+               'blobs_workspace_idx', \
+               'env_vars_live_workspace_name_idx', \
+               'env_vars_live_project_name_idx', \
+               'env_vars_live_machine_name_idx', \
+               'env_vars_live_project_machine_name_idx', \
+               'env_vars_workspace_idx', \
+               'key_envelopes_device_idx' \
+             )",
+        )
+        .fetch_one(&pool)
+        .await?;
+        assert_eq!(index_count, 14);
+        sqlx::query(
+            "INSERT INTO users (id, email) \
+             VALUES ('00000000-0000-0000-0000-000000000001', 'test@example.invalid')",
+        )
+        .execute(&pool)
+        .await?;
+        sqlx::query(
+            "INSERT INTO workspaces (id, user_id, name, root_node_id) \
+             VALUES ( \
+               '00000000-0000-0000-0000-000000000002', \
+               '00000000-0000-0000-0000-000000000001', \
+               'code', \
+               '00000000-0000-0000-0000-000000000003' \
+             )",
+        )
+        .execute(&pool)
+        .await?;
+        sqlx::query(
+            "INSERT INTO nodes (id, workspace_id, parent_id, name, normalized_name, kind) \
+             VALUES ( \
+               '00000000-0000-0000-0000-000000000004', \
+               '00000000-0000-0000-0000-000000000002', \
+               NULL, \
+               'README.md', \
+               'readme.md', \
+               'file' \
+             )",
+        )
+        .execute(&pool)
+        .await?;
+        let duplicate_root_child = sqlx::query(
+            "INSERT INTO nodes (id, workspace_id, parent_id, name, normalized_name, kind) \
+             VALUES ( \
+               '00000000-0000-0000-0000-000000000005', \
+               '00000000-0000-0000-0000-000000000002', \
+               NULL, \
+               'readme.md', \
+               'readme.md', \
+               'file' \
+             )",
+        )
+        .execute(&pool)
+        .await;
+        assert!(duplicate_root_child.is_err());
+        sqlx::query(
+            "INSERT INTO nodes (id, workspace_id, parent_id, name, normalized_name, kind) \
+             VALUES ( \
+               '00000000-0000-0000-0000-000000000000', \
+               '00000000-0000-0000-0000-000000000002', \
+               NULL, \
+               'sentinel-parent', \
+               'sentinel-parent', \
+               'directory' \
+             )",
+        )
+        .execute(&pool)
+        .await?;
+        sqlx::query(
+            "INSERT INTO nodes (id, workspace_id, parent_id, name, normalized_name, kind) \
+             VALUES ( \
+               '00000000-0000-0000-0000-000000000006', \
+               '00000000-0000-0000-0000-000000000002', \
+               '00000000-0000-0000-0000-000000000000', \
+               'readme.md', \
+               'readme.md', \
+               'file' \
+             )",
+        )
+        .execute(&pool)
+        .await?;
+        sqlx::query(
+            "INSERT INTO env_vars ( \
+               id, workspace_id, environment, name, scope, secret_kind, encrypted_value, metadata \
+             ) VALUES ( \
+               '00000000-0000-0000-0000-000000000010', \
+               '00000000-0000-0000-0000-000000000002', \
+               'dev', \
+               'API_KEY', \
+               '{\"type\":\"workspace\"}'::jsonb, \
+               'secret', \
+               'ciphertext', \
+               '{}'::jsonb \
+             )",
+        )
+        .execute(&pool)
+        .await?;
+        sqlx::query(
+            "INSERT INTO env_vars ( \
+               id, workspace_id, environment, name, scope, secret_kind, encrypted_value, metadata \
+             ) VALUES ( \
+               '00000000-0000-0000-0000-000000000011', \
+               '00000000-0000-0000-0000-000000000002', \
+               'dev', \
+               'API_KEY', \
+               '{\"type\":\"machine\",\"device_id\":\"00000000-0000-0000-0000-000000000099\"}'::jsonb, \
+               'secret', \
+               'ciphertext', \
+               '{}'::jsonb \
+             )",
+        )
+        .execute(&pool)
+        .await?;
+        sqlx::query(
+            "INSERT INTO env_vars ( \
+               id, workspace_id, project_path, environment, name, scope, secret_kind, encrypted_value, metadata \
+             ) VALUES ( \
+               '00000000-0000-0000-0000-000000000012', \
+               '00000000-0000-0000-0000-000000000002', \
+               '', \
+               'dev', \
+               'API_KEY', \
+               '{\"type\":\"project\",\"project_path\":\"\"}'::jsonb, \
+               'secret', \
+               'ciphertext', \
+               '{}'::jsonb \
+             )",
+        )
+        .execute(&pool)
+        .await?;
+        let duplicate_workspace_env = sqlx::query(
+            "INSERT INTO env_vars ( \
+               id, workspace_id, environment, name, scope, secret_kind, encrypted_value, metadata \
+             ) VALUES ( \
+               '00000000-0000-0000-0000-000000000013', \
+               '00000000-0000-0000-0000-000000000002', \
+               'dev', \
+               'API_KEY', \
+               '{\"type\":\"workspace\"}'::jsonb, \
+               'secret', \
+               'ciphertext', \
+               '{}'::jsonb \
+             )",
+        )
+        .execute(&pool)
+        .await;
+        assert!(duplicate_workspace_env.is_err());
+        let missing_scope_type = sqlx::query(
+            "INSERT INTO env_vars ( \
+               id, workspace_id, environment, name, scope, secret_kind, encrypted_value, metadata \
+             ) VALUES ( \
+               '00000000-0000-0000-0000-000000000014', \
+               '00000000-0000-0000-0000-000000000002', \
+               'dev', \
+               'BROKEN', \
+               '{}'::jsonb, \
+               'secret', \
+               'ciphertext', \
+               '{}'::jsonb \
+             )",
+        )
+        .execute(&pool)
+        .await;
+        assert!(missing_scope_type.is_err());
+
+        let null_machine_device = sqlx::query(
+            "INSERT INTO env_vars ( \
+               id, workspace_id, environment, name, scope, secret_kind, encrypted_value, metadata \
+             ) VALUES ( \
+               '00000000-0000-0000-0000-000000000015', \
+               '00000000-0000-0000-0000-000000000002', \
+               'dev', \
+               'BROKEN', \
+               '{\"type\":\"machine\",\"device_id\":null}'::jsonb, \
+               'secret', \
+               'ciphertext', \
+               '{}'::jsonb \
+             )",
+        )
+        .execute(&pool)
+        .await;
+        assert!(null_machine_device.is_err());
+
+        let mismatched_project_scope = sqlx::query(
+            "INSERT INTO env_vars ( \
+               id, workspace_id, project_path, environment, name, scope, secret_kind, encrypted_value, metadata \
+             ) VALUES ( \
+               '00000000-0000-0000-0000-000000000016', \
+               '00000000-0000-0000-0000-000000000002', \
+               'apps/api', \
+               'dev', \
+               'BROKEN', \
+               '{\"type\":\"project\",\"project_path\":\"apps/web\"}'::jsonb, \
+               'secret', \
+               'ciphertext', \
+               '{}'::jsonb \
+             )",
+        )
+        .execute(&pool)
+        .await;
+        assert!(mismatched_project_scope.is_err());
+        pool.close().await;
         Ok(())
     }
 
@@ -3567,5 +3835,87 @@ mod tests {
     ) -> Result<T, Box<dyn std::error::Error>> {
         let bytes = axum::body::to_bytes(response.into_body(), usize::MAX).await?;
         serde_json::from_slice(&bytes).map_err(Into::into)
+    }
+
+    struct DockerPostgres {
+        id: String,
+        database_url: String,
+    }
+
+    impl DockerPostgres {
+        fn start() -> Result<Self, std::io::Error> {
+            let id = docker_output(&[
+                "run",
+                "--rm",
+                "--detach",
+                "--publish",
+                "127.0.0.1::5432",
+                "--env",
+                "POSTGRES_PASSWORD=fs2",
+                "--env",
+                "POSTGRES_USER=fs2",
+                "--env",
+                "POSTGRES_DB=fs2",
+                "postgres:16-alpine",
+            ])?;
+            let port_args = ["port", id.as_str(), "5432/tcp"];
+            let port_output = docker_output(&port_args)?;
+            let port_line = port_output
+                .lines()
+                .next()
+                .ok_or_else(|| std::io::Error::other("docker did not report postgres port"))?;
+            let port = port_line
+                .rsplit_once(':')
+                .map_or(port_line, |(_, port)| port);
+            Ok(Self {
+                id,
+                database_url: format!("postgres://fs2:fs2@127.0.0.1:{port}/fs2"),
+            })
+        }
+    }
+
+    impl Drop for DockerPostgres {
+        fn drop(&mut self) {
+            drop(
+                std::process::Command::new("docker")
+                    .args(["kill", self.id.as_str()])
+                    .status(),
+            );
+        }
+    }
+
+    fn docker_output(args: &[&str]) -> Result<String, std::io::Error> {
+        let output = std::process::Command::new("docker").args(args).output()?;
+        if !output.status.success() {
+            return Err(std::io::Error::other(format!(
+                "docker {} failed: {}",
+                args.join(" "),
+                String::from_utf8_lossy(&output.stderr)
+            )));
+        }
+        Ok(String::from_utf8_lossy(&output.stdout).trim().to_owned())
+    }
+
+    async fn wait_for_postgres(
+        database_url: &str,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let mut last_error = String::new();
+        for _ in 0..120 {
+            match sqlx::postgres::PgPoolOptions::new()
+                .max_connections(1)
+                .connect(database_url)
+                .await
+            {
+                Ok(pool) => {
+                    pool.close().await;
+                    return Ok(());
+                }
+                Err(error) => {
+                    last_error = error.to_string();
+                    tokio::time::sleep(Duration::from_millis(250)).await;
+                }
+            }
+        }
+        Err(std::io::Error::other(format!("postgres did not become ready: {last_error}")).into())
     }
 }
