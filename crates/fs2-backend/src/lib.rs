@@ -25,6 +25,7 @@ use fs2_core::{
 };
 use fs2_core::{ErrorEnvelope, Fs2Error};
 use hmac::{Hmac, Mac};
+use object_store::{aws::AmazonS3Builder, path::Path as ObjectStorePath, ObjectStore};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::{
@@ -75,10 +76,11 @@ impl BackendConfig {
             .map_err(ConfigError::BindAddress)?;
         let database_url =
             lookup("DATABASE_URL").unwrap_or_else(|| DEFAULT_DATABASE_URL.to_owned());
-        let object_store = ObjectStoreConfig::parse(
+        let object_store = ObjectStoreConfig::from_lookup(
             lookup("FS2_OBJECT_STORE")
                 .as_deref()
                 .unwrap_or(DEFAULT_OBJECT_STORE),
+            &mut lookup,
         )?;
         let jwt_secret = RedactedSecret::new(
             lookup("FS2_JWT_SECRET").unwrap_or_else(|| DEFAULT_DEV_SECRET.to_owned()),
@@ -98,12 +100,26 @@ impl BackendConfig {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ObjectStoreConfig {
-    Local { root: PathBuf },
-    S3 { bucket: String, endpoint: String },
+    Local {
+        root: PathBuf,
+    },
+    S3 {
+        bucket: String,
+        endpoint: String,
+        region: String,
+        access_key_id: RedactedSecret,
+        secret_access_key: RedactedSecret,
+        session_token: Option<RedactedSecret>,
+        allow_http: bool,
+        virtual_hosted_style: bool,
+    },
 }
 
 impl ObjectStoreConfig {
-    fn parse(value: &str) -> Result<Self, ConfigError> {
+    fn from_lookup(
+        value: &str,
+        lookup: &mut impl FnMut(&str) -> Option<String>,
+    ) -> Result<Self, ConfigError> {
         if let Some(root) = value.strip_prefix("local:") {
             if root.is_empty() {
                 return Err(ConfigError::ObjectStore(
@@ -126,15 +142,51 @@ impl ObjectStoreConfig {
                     "S3 object store bucket and endpoint must not be empty".to_owned(),
                 ));
             }
+            let access_key_id = required_secret(lookup, "FS2_S3_ACCESS_KEY_ID")?;
+            let secret_access_key = required_secret(lookup, "FS2_S3_SECRET_ACCESS_KEY")?;
+            let session_token = lookup("FS2_S3_SESSION_TOKEN")
+                .map(RedactedSecret::new)
+                .transpose()?;
             return Ok(Self::S3 {
                 bucket: bucket.to_owned(),
                 endpoint: endpoint.to_owned(),
+                region: lookup("FS2_S3_REGION").unwrap_or_else(|| "us-east-1".to_owned()),
+                access_key_id,
+                secret_access_key,
+                session_token,
+                allow_http: parse_config_bool(
+                    lookup("FS2_S3_ALLOW_HTTP").as_deref(),
+                    "FS2_S3_ALLOW_HTTP",
+                )?,
+                virtual_hosted_style: parse_config_bool(
+                    lookup("FS2_S3_VIRTUAL_HOSTED_STYLE").as_deref(),
+                    "FS2_S3_VIRTUAL_HOSTED_STYLE",
+                )?,
             });
         }
 
         Err(ConfigError::ObjectStore(
             "object store must start with local: or s3:".to_owned(),
         ))
+    }
+}
+
+fn required_secret(
+    lookup: &mut impl FnMut(&str) -> Option<String>,
+    key: &str,
+) -> Result<RedactedSecret, ConfigError> {
+    RedactedSecret::new(lookup(key).ok_or_else(|| {
+        ConfigError::ObjectStore(format!("{key} is required for S3 object store"))
+    })?)
+}
+
+fn parse_config_bool(value: Option<&str>, key: &str) -> Result<bool, ConfigError> {
+    match value {
+        Some("true" | "1" | "yes" | "on") => Ok(true),
+        None | Some("false" | "0" | "no" | "off") => Ok(false),
+        Some(_) => Err(ConfigError::ObjectStore(format!(
+            "{key} must be a boolean value"
+        ))),
     }
 }
 
@@ -196,6 +248,7 @@ pub trait BlobStore: fmt::Debug + Send + Sync {
 pub enum BlobStoreError {
     InvalidKey(String),
     Io(std::io::Error),
+    ObjectStore(String),
 }
 
 impl fmt::Display for BlobStoreError {
@@ -203,6 +256,7 @@ impl fmt::Display for BlobStoreError {
         match self {
             Self::InvalidKey(message) => formatter.write_str(message),
             Self::Io(error) => write!(formatter, "blob store I/O error: {error}"),
+            Self::ObjectStore(message) => write!(formatter, "blob object-store error: {message}"),
         }
     }
 }
@@ -261,6 +315,71 @@ impl BlobStore for LocalFilesystemBlobStore {
                 Err(error) => Err(BlobStoreError::Io(error)),
             }
         })
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct ObjectStoreBlobStore {
+    store: Arc<dyn ObjectStore>,
+}
+
+impl ObjectStoreBlobStore {
+    #[must_use]
+    pub fn new(store: Arc<dyn ObjectStore>) -> Self {
+        Self { store }
+    }
+
+    fn path_for(key: &str) -> Result<ObjectStorePath, BlobStoreError> {
+        validate_blob_key(key)?;
+        Ok(ObjectStorePath::from(key))
+    }
+}
+
+impl BlobStore for ObjectStoreBlobStore {
+    fn put<'a>(
+        &'a self,
+        key: &'a str,
+        bytes: Bytes,
+    ) -> BlobStoreFuture<'a, Result<(), BlobStoreError>> {
+        Box::pin(async move {
+            self.store
+                .put(&Self::path_for(key)?, bytes.into())
+                .await
+                .map_err(object_store_error)?;
+            Ok(())
+        })
+    }
+
+    fn get<'a>(&'a self, key: &'a str) -> BlobStoreFuture<'a, Result<Bytes, BlobStoreError>> {
+        Box::pin(async move {
+            self.store
+                .get(&Self::path_for(key)?)
+                .await
+                .map_err(object_store_error)?
+                .bytes()
+                .await
+                .map_err(object_store_error)
+        })
+    }
+
+    fn exists<'a>(&'a self, key: &'a str) -> BlobStoreFuture<'a, Result<bool, BlobStoreError>> {
+        Box::pin(async move {
+            match self.store.head(&Self::path_for(key)?).await {
+                Ok(_) => Ok(true),
+                Err(object_store::Error::NotFound { .. }) => Ok(false),
+                Err(error) => Err(object_store_error(error)),
+            }
+        })
+    }
+}
+
+fn object_store_error(error: object_store::Error) -> BlobStoreError {
+    match error {
+        object_store::Error::NotFound { .. } => BlobStoreError::Io(std::io::Error::new(
+            std::io::ErrorKind::NotFound,
+            "blob object not found",
+        )),
+        error => BlobStoreError::ObjectStore(error.to_string()),
     }
 }
 
@@ -333,7 +452,7 @@ pub struct AppState {
     jwt_secret: RedactedSecret,
     dev_user_id: UserId,
     devices: Arc<RwLock<HashMap<DeviceId, DeviceRecord>>>,
-    blob_store: Arc<LocalFilesystemBlobStore>,
+    blob_store: Arc<dyn BlobStore>,
     blob_metadata: Arc<RwLock<HashMap<String, BlobMetadata>>>,
     workspaces: Arc<RwLock<HashMap<WorkspaceId, WorkspaceRecord>>>,
     /// Committed operations per workspace, sorted ascending by assigned cursor.
@@ -349,12 +468,19 @@ impl AppState {
     }
 
     pub fn dev_with_blob_root(jwt_secret: RedactedSecret, blob_root: impl Into<PathBuf>) -> Self {
+        Self::dev_with_blob_store(
+            jwt_secret,
+            Arc::new(LocalFilesystemBlobStore::new(blob_root)),
+        )
+    }
+
+    pub fn dev_with_blob_store(jwt_secret: RedactedSecret, blob_store: Arc<dyn BlobStore>) -> Self {
         let (event_tx, _event_rx) = broadcast::channel(1024);
         Self {
             jwt_secret,
             dev_user_id: UserId::new_v4(),
             devices: Arc::new(RwLock::new(HashMap::new())),
-            blob_store: Arc::new(LocalFilesystemBlobStore::new(blob_root)),
+            blob_store,
             blob_metadata: Arc::new(RwLock::new(HashMap::new())),
             workspaces: Arc::new(RwLock::new(HashMap::new())),
             operations: Arc::new(RwLock::new(HashMap::new())),
@@ -722,10 +848,8 @@ pub async fn serve(
 ) -> Result<(), std::io::Error> {
     let listener = TcpListener::bind(config.bind_addr).await?;
     info!(bind_addr = %config.bind_addr, "fs2-backend listening");
-    let state = AppState::dev_with_blob_root(
-        config.jwt_secret,
-        blob_root_for_config(&config.object_store),
-    );
+    let blob_store = blob_store_for_config(&config.object_store).map_err(std::io::Error::other)?;
+    let state = AppState::dev_with_blob_store(config.jwt_secret, blob_store);
     axum::serve(listener, app_with_state(state))
         .with_graceful_shutdown(shutdown)
         .await
@@ -1790,13 +1914,41 @@ fn blob_store_api_error(error: BlobStoreError) -> ApiError {
             ApiError::BlobMissing
         }
         BlobStoreError::Io(error) => ApiError::Internal(error.to_string()),
+        BlobStoreError::ObjectStore(message) => ApiError::Internal(message),
     }
 }
 
-fn blob_root_for_config(object_store: &ObjectStoreConfig) -> PathBuf {
+fn blob_store_for_config(
+    object_store: &ObjectStoreConfig,
+) -> Result<Arc<dyn BlobStore>, ConfigError> {
     match object_store {
-        ObjectStoreConfig::Local { root } => root.clone(),
-        ObjectStoreConfig::S3 { .. } => PathBuf::from(".fs2-dev/blobs"),
+        ObjectStoreConfig::Local { root } => Ok(Arc::new(LocalFilesystemBlobStore::new(root))),
+        ObjectStoreConfig::S3 {
+            bucket,
+            endpoint,
+            region,
+            access_key_id,
+            secret_access_key,
+            session_token,
+            allow_http,
+            virtual_hosted_style,
+        } => {
+            let mut builder = AmazonS3Builder::new()
+                .with_bucket_name(bucket)
+                .with_endpoint(endpoint)
+                .with_region(region)
+                .with_access_key_id(access_key_id.expose_for_signing())
+                .with_secret_access_key(secret_access_key.expose_for_signing())
+                .with_allow_http(*allow_http)
+                .with_virtual_hosted_style_request(*virtual_hosted_style);
+            if let Some(token) = session_token {
+                builder = builder.with_token(token.expose_for_signing());
+            }
+            let store = builder
+                .build()
+                .map_err(|error| ConfigError::ObjectStore(error.to_string()))?;
+            Ok(Arc::new(ObjectStoreBlobStore::new(Arc::new(store))))
+        }
     }
 }
 
@@ -1960,6 +2112,7 @@ mod tests {
     use super::*;
     use axum::{body::Body, http::Request};
     use futures_util::{Stream, StreamExt};
+    use object_store::memory::InMemory;
     use serde::de::DeserializeOwned;
     use std::time::Duration;
     use tempfile::TempDir;
@@ -1982,25 +2135,89 @@ mod tests {
     }
 
     #[test]
-    fn local_blob_root_uses_configured_object_store_root() -> Result<(), Box<dyn std::error::Error>>
-    {
+    fn local_blob_store_uses_configured_root() -> Result<(), Box<dyn std::error::Error>> {
         let config = BackendConfig::from_lookup(|key| {
             (key == "FS2_OBJECT_STORE").then(|| "local:/tmp/fs2-test-blobs".to_owned())
         })?;
 
-        assert_eq!(
-            blob_root_for_config(&config.object_store),
-            PathBuf::from("/tmp/fs2-test-blobs")
-        );
+        assert!(matches!(
+            config.object_store,
+            ObjectStoreConfig::Local { ref root } if root == &PathBuf::from("/tmp/fs2-test-blobs")
+        ));
+        assert!(blob_store_for_config(&config.object_store).is_ok());
         Ok(())
     }
 
     #[test]
-    fn config_parses_object_store_and_rejects_bad_values() {
-        let s3 = ObjectStoreConfig::parse("s3:bucket@http://localhost:9000");
-        assert!(matches!(s3, Ok(ObjectStoreConfig::S3 { .. })));
-        assert!(ObjectStoreConfig::parse("s3:bucket").is_err());
-        assert!(ObjectStoreConfig::parse("local:").is_err());
+    fn config_parses_s3_store_redacts_credentials_and_rejects_bad_values(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let config = BackendConfig::from_lookup(|key| match key {
+            "FS2_OBJECT_STORE" => Some("s3:bucket@http://localhost:9000".to_owned()),
+            "FS2_S3_ACCESS_KEY_ID" => Some("access-key".to_owned()),
+            "FS2_S3_SECRET_ACCESS_KEY" => Some("secret-key".to_owned()),
+            "FS2_S3_SESSION_TOKEN" => Some("session-token".to_owned()),
+            "FS2_S3_REGION" => Some("auto".to_owned()),
+            "FS2_S3_ALLOW_HTTP" => Some("true".to_owned()),
+            _ => None,
+        })?;
+        assert!(matches!(
+            config.object_store,
+            ObjectStoreConfig::S3 {
+                ref bucket,
+                ref endpoint,
+                allow_http: true,
+                virtual_hosted_style: false,
+                ..
+            } if bucket == "bucket" && endpoint == "http://localhost:9000"
+        ));
+        let debug = format!("{config:?}");
+        assert!(debug.contains("<redacted>"));
+        assert!(!debug.contains("access-key"));
+        assert!(!debug.contains("secret-key"));
+        assert!(!debug.contains("session-token"));
+        assert!(blob_store_for_config(&config.object_store).is_ok());
+
+        assert!(BackendConfig::from_lookup(|key| {
+            (key == "FS2_OBJECT_STORE").then(|| "s3:bucket".to_owned())
+        })
+        .is_err());
+        assert!(BackendConfig::from_lookup(|key| {
+            (key == "FS2_OBJECT_STORE").then(|| "local:".to_owned())
+        })
+        .is_err());
+        assert!(BackendConfig::from_lookup(|key| match key {
+            "FS2_OBJECT_STORE" => Some("s3:bucket@http://localhost:9000".to_owned()),
+            "FS2_S3_SECRET_ACCESS_KEY" => Some("secret-key".to_owned()),
+            _ => None,
+        })
+        .is_err());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn object_store_blob_store_round_trips_and_rejects_invalid_keys(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let store = ObjectStoreBlobStore::new(Arc::new(InMemory::new()));
+        assert!(!store.exists("sha256:missing").await?);
+
+        store
+            .put("sha256:abc/nested", Bytes::from_static(b"blob bytes"))
+            .await?;
+        assert!(store.exists("sha256:abc/nested").await?);
+        assert_eq!(
+            store.get("sha256:abc/nested").await?,
+            Bytes::from_static(b"blob bytes")
+        );
+
+        assert!(matches!(
+            store.put("../escape", Bytes::new()).await,
+            Err(BlobStoreError::InvalidKey(_))
+        ));
+        assert!(matches!(
+            store.get("sha256:missing").await,
+            Err(BlobStoreError::Io(error)) if error.kind() == std::io::ErrorKind::NotFound
+        ));
+        Ok(())
     }
 
     #[tokio::test]
@@ -2702,6 +2919,8 @@ mod tests {
         .await?;
         let uri = format!("/v1/workspaces/{}/ops", workspace.workspace_id);
         let env_var_id = EnvVarId::new_v4();
+        let fake_plaintext = "sk_test_fake_backend_must_not_store";
+        let encrypted_payload = "xchacha20poly1305-envelope-without-secret";
 
         post_json::<CommitOperationResponse>(
             app.clone(),
@@ -2727,7 +2946,7 @@ mod tests {
                 "kind": {
                     "type": "set_env_var",
                     "env_var_id": env_var_id,
-                    "encrypted_payload": "ciphertext-envelope",
+                    "encrypted_payload": encrypted_payload,
                     "metadata": {
                         "env_name": "API_KEY",
                         "environment": "dev",
@@ -2752,9 +2971,21 @@ mod tests {
                 .get(&env_var_id)
                 .ok_or("env record missing")?
                 .encrypted_payload,
-            "ciphertext-envelope"
+            encrypted_payload
         );
+        let stored_json = serde_json::to_string(stored)?;
+        assert!(!stored_json.contains(fake_plaintext));
         drop(workspaces);
+
+        let fetched = get_json::<FetchOpsResponse>(
+            app.clone(),
+            &format!("{uri}?after=0"),
+            Some(&login.access_token),
+        )
+        .await?;
+        let fetched_json = serde_json::to_string(&fetched)?;
+        assert!(fetched_json.contains(encrypted_payload));
+        assert!(!fetched_json.contains(fake_plaintext));
 
         post_json::<CommitOperationResponse>(
             app,

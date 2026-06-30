@@ -485,7 +485,7 @@ trait BlobStore {
 ```
 
 - [x] Implement local filesystem blob store for tests.
-- [ ] Implement S3-compatible blob store.
+- [x] Implement S3-compatible blob store.
 - [ ] Add MinIO or localstack test option.
 
 Acceptance criteria:
@@ -541,12 +541,12 @@ MVP note:
 - [x] Add `WorkspaceContentKey` type.
 - [x] Add `WorkspaceSecretKey` type.
 - [x] Generate keys with CSPRNG.
-- [ ] Store keys locally through OS keychain abstraction.
+- [x] Store keys locally through OS keychain abstraction.
 - [x] For development, allow encrypted file fallback with explicit warning.
 
 Acceptance criteria:
 
-- [ ] Keys are never stored in plaintext config files.
+- [x] Keys are never stored in plaintext config files.
 
 ### 8.2 Implement blob encryption
 
@@ -574,7 +574,7 @@ Acceptance criteria:
 
 Acceptance criteria:
 
-- [ ] Backend can store env records but cannot decrypt values.
+- [x] Backend can store env records but cannot decrypt values.
 
 ### 8.4 Redaction tests
 

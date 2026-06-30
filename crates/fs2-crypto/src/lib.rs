@@ -7,10 +7,11 @@ use chacha20poly1305::{
     XChaCha20Poly1305, XNonce,
 };
 use fs2_core::{BlobId, EnvVarId, WorkspaceId};
+use keyring::Entry;
 use rand::{rngs::OsRng, RngCore};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use std::{fmt, fs, io, path::PathBuf};
+use std::{fmt, fs, io, path::PathBuf, sync::Arc};
 use zeroize::Zeroize;
 
 const KEY_LEN: usize = 32;
@@ -125,14 +126,16 @@ pub enum CryptoError {
     Io(io::Error),
     Json(serde_json::Error),
     BlobId(fs2_core::ParseFs2IdError),
+    KeyStore(String),
 }
 
 impl fmt::Display for CryptoError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::InvalidHeader(message) | Self::InvalidKey(message) | Self::Aead(message) => {
-                formatter.write_str(message)
-            }
+            Self::InvalidHeader(message)
+            | Self::InvalidKey(message)
+            | Self::Aead(message)
+            | Self::KeyStore(message) => formatter.write_str(message),
             Self::Io(error) => write!(formatter, "I/O error: {error}"),
             Self::Json(error) => write!(formatter, "JSON error: {error}"),
             Self::BlobId(error) => write!(formatter, "blob id error: {error}"),
@@ -304,6 +307,101 @@ impl WorkspaceKeyStore for DevEncryptedFileKeyStore {
     }
 }
 
+pub const KEYCHAIN_SERVICE: &str = "fs2-devsync.workspace-keys.v1";
+
+#[derive(Debug, Clone)]
+pub struct KeyringWorkspaceKeyStore {
+    service: String,
+    keychain: Arc<dyn KeychainSecretStore>,
+}
+
+impl KeyringWorkspaceKeyStore {
+    #[must_use]
+    pub fn new() -> Self {
+        Self::with_service(KEYCHAIN_SERVICE)
+    }
+
+    #[must_use]
+    pub fn with_service(service: impl Into<String>) -> Self {
+        Self {
+            service: service.into(),
+            keychain: Arc::new(SystemKeychainSecretStore),
+        }
+    }
+
+    #[cfg(test)]
+    fn with_keychain_for_test(
+        service: impl Into<String>,
+        keychain: Arc<dyn KeychainSecretStore>,
+    ) -> Self {
+        Self {
+            service: service.into(),
+            keychain,
+        }
+    }
+}
+
+impl Default for KeyringWorkspaceKeyStore {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl WorkspaceKeyStore for KeyringWorkspaceKeyStore {
+    fn save_workspace_keys(
+        &self,
+        workspace_id: WorkspaceId,
+        keys: &WorkspaceKeys,
+    ) -> Result<(), CryptoError> {
+        let bytes = serde_json::to_vec(&SerializableWorkspaceKeys::from(keys))?;
+        self.keychain
+            .set_secret(&self.service, &workspace_id.to_string(), &bytes)
+    }
+
+    fn load_workspace_keys(
+        &self,
+        workspace_id: WorkspaceId,
+    ) -> Result<Option<WorkspaceKeys>, CryptoError> {
+        self.keychain
+            .get_secret(&self.service, &workspace_id.to_string())?
+            .map(|bytes| serde_json::from_slice::<SerializableWorkspaceKeys>(&bytes)?.try_into())
+            .transpose()
+    }
+}
+
+trait KeychainSecretStore: fmt::Debug + Send + Sync {
+    fn set_secret(&self, service: &str, account: &str, secret: &[u8]) -> Result<(), CryptoError>;
+
+    fn get_secret(&self, service: &str, account: &str) -> Result<Option<Vec<u8>>, CryptoError>;
+}
+
+#[derive(Debug)]
+struct SystemKeychainSecretStore;
+
+impl KeychainSecretStore for SystemKeychainSecretStore {
+    fn set_secret(&self, service: &str, account: &str, secret: &[u8]) -> Result<(), CryptoError> {
+        Entry::new(service, account)
+            .map_err(|error| keyring_error(&error))?
+            .set_secret(secret)
+            .map_err(|error| keyring_error(&error))
+    }
+
+    fn get_secret(&self, service: &str, account: &str) -> Result<Option<Vec<u8>>, CryptoError> {
+        match Entry::new(service, account)
+            .map_err(|error| keyring_error(&error))?
+            .get_secret()
+        {
+            Ok(bytes) => Ok(Some(bytes)),
+            Err(keyring::Error::NoEntry) => Ok(None),
+            Err(error) => Err(keyring_error(&error)),
+        }
+    }
+}
+
+fn keyring_error(error: &keyring::Error) -> CryptoError {
+    CryptoError::KeyStore(format!("OS keychain error: {error}"))
+}
+
 pub fn encrypt_blob(
     plaintext: &[u8],
     key: &WorkspaceContentKey,
@@ -473,6 +571,7 @@ mod tests {
     #![allow(clippy::panic)]
 
     use super::*;
+    use std::{collections::HashMap, sync::Mutex};
     use tempfile::TempDir;
 
     #[test]
@@ -566,6 +665,63 @@ mod tests {
             DevEncryptedFileKeyStore::new(root_file, WorkspaceKeyEncryptionKey::generate());
         assert!(inaccessible.load_workspace_keys(workspace_id).is_err());
         Ok(())
+    }
+
+    #[test]
+    fn keyring_key_store_saves_loads_and_distinguishes_missing(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let workspace_id = WorkspaceId::new_v4();
+        let keys = WorkspaceKeys::generate();
+        let keychain = Arc::new(FakeKeychain::default());
+        let store = KeyringWorkspaceKeyStore::with_keychain_for_test(
+            format!("fs2-test-{workspace_id}"),
+            keychain,
+        );
+
+        assert!(store.load_workspace_keys(workspace_id)?.is_none());
+
+        store.save_workspace_keys(workspace_id, &keys)?;
+        let loaded = store
+            .load_workspace_keys(workspace_id)?
+            .ok_or("missing keyring keys")?;
+        assert_eq!(
+            loaded.content.expose_for_test(),
+            keys.content.expose_for_test()
+        );
+        assert_eq!(
+            loaded.secret.expose_for_test(),
+            keys.secret.expose_for_test()
+        );
+        Ok(())
+    }
+
+    #[derive(Debug, Default)]
+    struct FakeKeychain {
+        secrets: Mutex<HashMap<(String, String), Vec<u8>>>,
+    }
+
+    impl KeychainSecretStore for FakeKeychain {
+        fn set_secret(
+            &self,
+            service: &str,
+            account: &str,
+            secret: &[u8],
+        ) -> Result<(), CryptoError> {
+            self.secrets
+                .lock()
+                .map_err(|error| CryptoError::KeyStore(error.to_string()))?
+                .insert((service.to_owned(), account.to_owned()), secret.to_vec());
+            Ok(())
+        }
+
+        fn get_secret(&self, service: &str, account: &str) -> Result<Option<Vec<u8>>, CryptoError> {
+            Ok(self
+                .secrets
+                .lock()
+                .map_err(|error| CryptoError::KeyStore(error.to_string()))?
+                .get(&(service.to_owned(), account.to_owned()))
+                .cloned())
+        }
     }
 
     fn env_aad(name: &str, environment: &str) -> EnvSecretAssociatedData {
