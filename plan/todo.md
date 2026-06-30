@@ -557,7 +557,7 @@ Acceptance criteria:
 
 Acceptance criteria:
 
-- [ ] Object store never receives plaintext file content in normal mode.
+- [x] Object store never receives plaintext file content in normal mode.
 
 ### 8.3 Implement secret encryption
 

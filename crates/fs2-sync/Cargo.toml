@@ -5,5 +5,9 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 
+[dependencies]
+fs2-core = { path = "../fs2-core" }
+fs2-crypto = { path = "../fs2-crypto" }
+
 [lints]
 workspace = true

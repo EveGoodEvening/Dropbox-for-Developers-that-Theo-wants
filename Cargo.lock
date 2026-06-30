@@ -652,6 +652,10 @@ dependencies = [
 [[package]]
 name = "fs2-sync"
 version = "0.1.0"
+dependencies = [
+ "fs2-core",
+ "fs2-crypto",
+]
 
 [[package]]
 name = "fs2-testkit"
