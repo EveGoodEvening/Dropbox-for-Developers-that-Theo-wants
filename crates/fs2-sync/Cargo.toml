@@ -8,6 +8,7 @@ license.workspace = true
 [dependencies]
 fs2-core = { path = "../fs2-core" }
 fs2-crypto = { path = "../fs2-crypto" }
+fs2-rules = { path = "../fs2-rules" }
 
 [lints]
 workspace = true

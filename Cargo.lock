@@ -658,6 +658,7 @@ version = "0.1.0"
 dependencies = [
  "fs2-core",
  "fs2-crypto",
+ "fs2-rules",
 ]
 
 [[package]]
