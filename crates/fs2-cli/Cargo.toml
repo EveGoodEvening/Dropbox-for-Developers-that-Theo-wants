@@ -11,8 +11,13 @@ path = "src/main.rs"
 
 [dependencies]
 fs2-git = { path = "../fs2-git" }
+fs2-core = { path = "../fs2-core" }
+fs2-rules = { path = "../fs2-rules" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+
+[dev-dependencies]
+tempfile = "3"
 
 [lints]
 workspace = true

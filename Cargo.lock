@@ -568,9 +568,12 @@ dependencies = [
 name = "fs2-cli"
 version = "0.1.0"
 dependencies = [
+ "fs2-core",
  "fs2-git",
+ "fs2-rules",
  "serde",
  "serde_json",
+ "tempfile",
 ]
 
 [[package]]
