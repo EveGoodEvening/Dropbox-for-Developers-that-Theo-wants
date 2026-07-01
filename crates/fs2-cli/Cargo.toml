@@ -12,6 +12,7 @@ path = "src/main.rs"
 [dependencies]
 fs2-git = { path = "../fs2-git" }
 fs2-core = { path = "../fs2-core" }
+fs2-daemon = { path = "../fs2-daemon" }
 fs2-rules = { path = "../fs2-rules" }
 globset = "0.4"
 keyring = { version = "=3.6.3", features = ["apple-native", "windows-native", "linux-native"] }

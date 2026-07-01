@@ -831,6 +831,19 @@ pub struct CreateWorkspaceResponse {
     pub current_cursor: Cursor,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorkspaceSummary {
+    pub workspace_id: WorkspaceId,
+    pub name: String,
+    pub root_node_id: NodeId,
+    pub current_cursor: Cursor,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct WorkspaceListResponse {
+    pub workspaces: Vec<WorkspaceSummary>,
+}
+
 /// An operation committed to the workspace log with its assigned cursor.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CommittedOperation {
@@ -1075,7 +1088,10 @@ pub fn app_with_state(state: AppState) -> Router {
         .route("/v1/auth/whoami", get(whoami))
         .route("/v1/devices", get(list_devices).post(enroll_device))
         .route("/v1/devices/:device_id/revoke", post(revoke_device))
-        .route("/v1/workspaces", post(create_workspace))
+        .route(
+            "/v1/workspaces",
+            get(list_workspaces).post(create_workspace),
+        )
         .route(
             "/v1/workspaces/:workspace_id/ops",
             get(fetch_operations).post(commit_operation),
@@ -1311,6 +1327,28 @@ async fn create_workspace(
         root_node_id,
         current_cursor,
     }))
+}
+
+async fn list_workspaces(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<WorkspaceListResponse>, ApiError> {
+    let auth = authenticate(&headers, &state).await?;
+    let mut workspaces = state
+        .workspaces
+        .read()
+        .await
+        .values()
+        .filter(|workspace| workspace.user_id == auth.user_id)
+        .map(|workspace| WorkspaceSummary {
+            workspace_id: workspace.workspace_id,
+            name: workspace.name.clone(),
+            root_node_id: workspace.root_node_id,
+            current_cursor: workspace.current_cursor,
+        })
+        .collect::<Vec<_>>();
+    workspaces.sort_by(|left, right| left.name.cmp(&right.name));
+    Ok(Json(WorkspaceListResponse { workspaces }))
 }
 
 async fn list_env(
@@ -3323,6 +3361,16 @@ mod tests {
         assert_eq!(workspace.root_node.parent_id, None);
         assert_eq!(workspace.root_node.deleted_at, None);
         drop(workspaces);
+
+        let listed = get_json::<WorkspaceListResponse>(
+            app.clone(),
+            "/v1/workspaces",
+            Some(&login.access_token),
+        )
+        .await?;
+        assert_eq!(listed.workspaces.len(), 1);
+        assert_eq!(listed.workspaces[0].workspace_id, created.workspace_id);
+        assert_eq!(listed.workspaces[0].name, "personal-code");
 
         let rejected = app
             .oneshot(

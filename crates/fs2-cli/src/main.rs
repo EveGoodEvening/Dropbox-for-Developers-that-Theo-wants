@@ -1,6 +1,6 @@
 //! FS2 command-line entry point.
 
-use fs2_core::{RuleAction, WorkspacePath};
+use fs2_core::{NodeId, RuleAction, WorkspaceId, WorkspacePath};
 use serde::{Deserialize, Serialize};
 use std::{
     env,
@@ -31,7 +31,7 @@ fn run_from_args(args: impl IntoIterator<Item = String>) -> Result<String, Strin
     let credentials = SystemCredentialStore;
     let needs_config = matches!(
         args.as_slice(),
-        [cmd, ..] if cmd == "login" || cmd == "logout" || cmd == "device"
+        [cmd, ..] if cmd == "login" || cmd == "logout" || cmd == "device" || cmd == "workspace" || cmd == "mount"
     );
     let config_path = if needs_config {
         default_cli_config_path()?
@@ -72,6 +72,20 @@ fn run_from_args_with_context(
         [cmd, subcmd] if cmd == "device" && subcmd == "list" => {
             device_list(credentials, config_path)
         }
+        [cmd, subcmd, name] if cmd == "workspace" && subcmd == "create" => {
+            workspace_create(name, None, credentials, config_path)
+        }
+        [cmd, subcmd] if cmd == "workspace" && subcmd == "list" => {
+            workspace_list(credentials, config_path)
+        }
+        [cmd, subcmd, path, name_flag, name]
+            if cmd == "workspace" && subcmd == "init" && name_flag == "--name" =>
+        {
+            workspace_create(name, Some(Path::new(path)), credentials, config_path)
+        }
+        [cmd, workspace, path] if cmd == "mount" => {
+            workspace_mount(workspace, Path::new(path), config_path)
+        }
         [cmd] if cmd == "status" => status_text("."),
         [cmd, flag] if cmd == "status" && flag == "--json" => status_json("."),
         [cmd, flag, path] if cmd == "status" && flag == "--path" => status_text(path),
@@ -97,7 +111,7 @@ fn run_from_args_with_context(
 }
 
 fn help() -> String {
-    "fs2-devsync CLI\n\nCommands:\n  fs2 login --backend <url> [--device-name <name>]\n  fs2 logout\n  fs2 device list\n  fs2 status [--json]\n  fs2 doctor [path]\n  fs2 git status [path]\n  fs2 git submodules status [path]\n"
+    "fs2-devsync CLI\n\nCommands:\n  fs2 login --backend <url> [--device-name <name>]\n  fs2 logout\n  fs2 device list\n  fs2 workspace create <name>\n  fs2 workspace list\n  fs2 workspace init <path> --name <name>\n  fs2 mount <workspace> <path>\n  fs2 status [--json]\n  fs2 doctor [path]\n  fs2 git status [path]\n  fs2 git submodules status [path]\n"
         .to_owned()
 }
 
@@ -131,6 +145,36 @@ struct CliDeviceRecord {
     name: String,
     #[serde(default)]
     revoked: bool,
+}
+
+#[derive(Debug, Deserialize)]
+struct CreateWorkspaceResponse {
+    workspace_id: String,
+    root_node_id: String,
+    current_cursor: i64,
+}
+
+#[derive(Debug, Deserialize)]
+struct WorkspaceListResponse {
+    workspaces: Vec<CliWorkspaceSummary>,
+}
+
+#[derive(Debug, Deserialize)]
+struct CliWorkspaceSummary {
+    workspace_id: String,
+    name: String,
+    root_node_id: String,
+    current_cursor: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct LocalWorkspaceConfig {
+    workspace_id: String,
+    name: String,
+    root_node_id: String,
+    metadata_db: String,
+    path: Option<String>,
+    mount_path: Option<String>,
 }
 
 trait CredentialStore {
@@ -279,6 +323,227 @@ fn device_list(credentials: &dyn CredentialStore, config_path: &Path) -> Result<
         .map_err(|error| error.to_string())?;
     }
     Ok(out)
+}
+
+fn workspace_create(
+    name: &str,
+    init_path: Option<&Path>,
+    credentials: &dyn CredentialStore,
+    config_path: &Path,
+) -> Result<String, String> {
+    let config = load_cli_config(config_path)?;
+    let token = credentials
+        .get_access_token()?
+        .ok_or("not logged in; run `fs2 login --backend <url>`")?;
+    let (host, port, path) = parse_http_url(&config.backend_url, "/v1/workspaces")?;
+    let body = serde_json::json!({"name": name}).to_string();
+    let response = request_json("POST", &host, port, &path, Some(&body), Some(&token))?;
+    let created = serde_json::from_str::<CreateWorkspaceResponse>(&response)
+        .map_err(|error| format!("workspace create response was not valid JSON: {error}"))?;
+    let workspace = local_workspace_from_create(config_path, name, init_path, &created)?;
+    initialize_local_workspace(&workspace)?;
+    if let Some(path) = init_path {
+        write_workspace_marker(path, name)?;
+    }
+    upsert_local_workspace(config_path, workspace.clone())?;
+    let mut out = String::new();
+    writeln!(out, "Workspace created: {name}").map_err(|error| error.to_string())?;
+    writeln!(out, "  id: {}", workspace.workspace_id).map_err(|error| error.to_string())?;
+    writeln!(out, "  root: {}", workspace.root_node_id).map_err(|error| error.to_string())?;
+    writeln!(out, "  cursor: {}", created.current_cursor).map_err(|error| error.to_string())?;
+    writeln!(out, "  metadata: {}", workspace.metadata_db).map_err(|error| error.to_string())?;
+    if let Some(path) = workspace.path {
+        writeln!(out, "  path: {path}").map_err(|error| error.to_string())?;
+    }
+    Ok(out)
+}
+
+fn workspace_list(credentials: &dyn CredentialStore, config_path: &Path) -> Result<String, String> {
+    let config = load_cli_config(config_path)?;
+    let token = credentials
+        .get_access_token()?
+        .ok_or("not logged in; run `fs2 login --backend <url>`")?;
+    let (host, port, path) = parse_http_url(&config.backend_url, "/v1/workspaces")?;
+    let response = request_json("GET", &host, port, &path, None, Some(&token))?;
+    let remote = serde_json::from_str::<WorkspaceListResponse>(&response)
+        .map_err(|error| format!("workspace list response was not valid JSON: {error}"))?;
+    let locals = load_local_workspaces(config_path)?;
+    let mut out = String::new();
+    writeln!(out, "Workspaces:").map_err(|error| error.to_string())?;
+    for workspace in remote.workspaces {
+        let local = locals
+            .iter()
+            .find(|local| local.workspace_id == workspace.workspace_id);
+        let local_marker = if local.is_some() { " local" } else { "" };
+        writeln!(
+            out,
+            "  - {} {} root={} cursor={}{}",
+            workspace.workspace_id,
+            workspace.name,
+            workspace.root_node_id,
+            workspace.current_cursor,
+            local_marker
+        )
+        .map_err(|error| error.to_string())?;
+    }
+    Ok(out)
+}
+
+fn workspace_mount(
+    workspace: &str,
+    mount_path: &Path,
+    config_path: &Path,
+) -> Result<String, String> {
+    let mut workspaces = load_local_workspaces(config_path)?;
+    let index = resolve_local_workspace_index(&workspaces, workspace)?;
+    let local = &mut workspaces[index];
+    fs::create_dir_all(mount_path).map_err(|error| {
+        format!(
+            "could not create mount path {}: {error}",
+            mount_path.display()
+        )
+    })?;
+    local.mount_path = Some(mount_path.display().to_string());
+    save_local_workspaces(config_path, &workspaces)?;
+    Ok(format!(
+        "Mount placeholder recorded for {} at {}\n  FUSE mounting is implemented in a later phase.\n",
+        workspace,
+        mount_path.display()
+    ))
+}
+
+fn resolve_local_workspace_index(
+    workspaces: &[LocalWorkspaceConfig],
+    workspace: &str,
+) -> Result<usize, String> {
+    if let Some((index, _)) = workspaces
+        .iter()
+        .enumerate()
+        .find(|(_, local)| local.workspace_id == workspace)
+    {
+        return Ok(index);
+    }
+    let mut name_matches = workspaces
+        .iter()
+        .enumerate()
+        .filter(|(_, local)| local.name == workspace)
+        .map(|(index, _)| index);
+    let Some(index) = name_matches.next() else {
+        return Err(format!("workspace not initialized locally: {workspace}"));
+    };
+    if name_matches.next().is_some() {
+        return Err(format!(
+            "workspace name is ambiguous; use a workspace id instead: {workspace}"
+        ));
+    }
+    Ok(index)
+}
+
+fn local_workspace_from_create(
+    config_path: &Path,
+    name: &str,
+    init_path: Option<&Path>,
+    created: &CreateWorkspaceResponse,
+) -> Result<LocalWorkspaceConfig, String> {
+    let metadata_db = workspace_metadata_db_path(config_path, &created.workspace_id)?;
+    Ok(LocalWorkspaceConfig {
+        workspace_id: created.workspace_id.clone(),
+        name: name.to_owned(),
+        root_node_id: created.root_node_id.clone(),
+        metadata_db: metadata_db.display().to_string(),
+        path: init_path.map(|path| path.display().to_string()),
+        mount_path: None,
+    })
+}
+
+fn initialize_local_workspace(workspace: &LocalWorkspaceConfig) -> Result<(), String> {
+    let workspace_id = workspace
+        .workspace_id
+        .parse::<WorkspaceId>()
+        .map_err(|error| error.to_string())?;
+    let root_node_id = workspace
+        .root_node_id
+        .parse::<NodeId>()
+        .map_err(|error| error.to_string())?;
+    let mut store = fs2_daemon::LocalStore::open(&workspace.metadata_db)
+        .map_err(|error| format!("could not initialize local metadata DB: {error}"))?;
+    store
+        .initialize_workspace(workspace_id, &workspace.name, root_node_id)
+        .map_err(|error| format!("could not initialize local workspace: {error}"))
+}
+
+fn write_workspace_marker(path: &Path, name: &str) -> Result<(), String> {
+    fs::create_dir_all(path)
+        .map_err(|error| format!("could not create {}: {error}", path.display()))?;
+    let fs2_dir = path.join(".fs2");
+    fs::create_dir_all(&fs2_dir)
+        .map_err(|error| format!("could not create {}: {error}", fs2_dir.display()))?;
+    let config_path = fs2_dir.join("config.toml");
+    if !config_path.exists() {
+        let workspace_name = serde_json::to_string(name).map_err(|error| error.to_string())?;
+        fs::write(
+            &config_path,
+            format!("version = 1\nworkspace_name = {workspace_name}\n"),
+        )
+        .map_err(|error| format!("could not write {}: {error}", config_path.display()))?;
+    }
+    Ok(())
+}
+
+fn workspace_metadata_db_path(config_path: &Path, workspace_id: &str) -> Result<PathBuf, String> {
+    let base = config_path
+        .parent()
+        .ok_or("config path must have a parent directory")?;
+    Ok(base
+        .join("workspaces")
+        .join(workspace_id)
+        .join("metadata.sqlite"))
+}
+
+fn workspace_config_path(config_path: &Path) -> Result<PathBuf, String> {
+    let base = config_path
+        .parent()
+        .ok_or("config path must have a parent directory")?;
+    Ok(base.join("workspaces.json"))
+}
+
+fn load_local_workspaces(config_path: &Path) -> Result<Vec<LocalWorkspaceConfig>, String> {
+    let path = workspace_config_path(config_path)?;
+    if !path.exists() {
+        return Ok(Vec::new());
+    }
+    let bytes =
+        fs::read(&path).map_err(|error| format!("could not read {}: {error}", path.display()))?;
+    serde_json::from_slice(&bytes).map_err(|error| format!("invalid {}: {error}", path.display()))
+}
+
+fn save_local_workspaces(
+    config_path: &Path,
+    workspaces: &[LocalWorkspaceConfig],
+) -> Result<(), String> {
+    let path = workspace_config_path(config_path)?;
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)
+            .map_err(|error| format!("could not create {}: {error}", parent.display()))?;
+    }
+    let bytes = serde_json::to_vec_pretty(workspaces).map_err(|error| error.to_string())?;
+    fs::write(&path, bytes).map_err(|error| format!("could not write {}: {error}", path.display()))
+}
+
+fn upsert_local_workspace(
+    config_path: &Path,
+    workspace: LocalWorkspaceConfig,
+) -> Result<(), String> {
+    let mut workspaces = load_local_workspaces(config_path)?;
+    if let Some(existing) = workspaces
+        .iter_mut()
+        .find(|existing| existing.workspace_id == workspace.workspace_id)
+    {
+        *existing = workspace;
+    } else {
+        workspaces.push(workspace);
+    }
+    save_local_workspaces(config_path, &workspaces)
 }
 
 fn default_cli_config_path() -> Result<PathBuf, String> {
@@ -1441,6 +1706,193 @@ mod tests {
         assert!(request.starts_with("GET /v1/devices HTTP/1.1"));
         assert!(request.contains("Authorization: Bearer token-123"));
         assert!(output.contains("device-1 laptop (current)"));
+        Ok(())
+    }
+
+    #[test]
+    fn workspace_init_creates_remote_and_local_metadata() -> Result<(), Box<dyn std::error::Error>>
+    {
+        let dir = tempfile::tempdir()?;
+        let config_path = dir.path().join("config.json");
+        let workspace_path = dir.path().join("code");
+        let credentials = FakeCredentialStore::default();
+        credentials.set_access_token("token-123")?;
+        let (backend, server) = serve_json_once(
+            r#"{"workspace_id":"00000000-0000-0000-0000-000000000101","root_node_id":"00000000-0000-0000-0000-000000000102","current_cursor":0}"#,
+        )?;
+        save_cli_config(
+            &config_path,
+            &CliConfig {
+                backend_url: backend,
+                user_id: "user-1".to_owned(),
+                device_id: "device-1".to_owned(),
+                device_name: "laptop".to_owned(),
+                token_type: "Bearer".to_owned(),
+            },
+        )?;
+
+        let output = run_from_args_with_context(
+            [
+                "workspace".to_owned(),
+                "init".to_owned(),
+                workspace_path.display().to_string(),
+                "--name".to_owned(),
+                "team \"alpha\"".to_owned(),
+            ],
+            &credentials,
+            &config_path,
+        )?;
+        let request = server
+            .join()
+            .map_err(|_| std::io::Error::other("server thread panicked"))??;
+
+        assert!(request.starts_with("POST /v1/workspaces HTTP/1.1"));
+        assert!(request.contains("Authorization: Bearer token-123"));
+        assert!(request.contains("\"name\":\"team \\\"alpha\\\"\""));
+        assert!(output.contains("Workspace created: team \"alpha\""));
+        let marker = fs::read_to_string(workspace_path.join(".fs2").join("config.toml"))?;
+        let parsed_marker = fs2_rules::parse_config_toml(&marker)?;
+        assert_eq!(
+            parsed_marker.workspace_name.as_deref(),
+            Some("team \"alpha\"")
+        );
+        let workspaces = load_local_workspaces(&config_path)?;
+        assert_eq!(workspaces.len(), 1);
+        assert_eq!(workspaces[0].name, "team \"alpha\"");
+        assert_eq!(
+            workspaces[0].path,
+            Some(workspace_path.display().to_string())
+        );
+        let workspace_id = workspaces[0].workspace_id.parse::<WorkspaceId>()?;
+        let store = fs2_daemon::LocalStore::open(&workspaces[0].metadata_db)?;
+        assert!(store.get_node_by_path(workspace_id, "")?.is_some());
+        Ok(())
+    }
+
+    #[test]
+    fn workspace_list_marks_local_entries_and_mount_records_path(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let dir = tempfile::tempdir()?;
+        let config_path = dir.path().join("config.json");
+        let credentials = FakeCredentialStore::default();
+        credentials.set_access_token("token-123")?;
+        let (backend, server) = serve_json_once(
+            r#"{"workspaces":[{"workspace_id":"00000000-0000-0000-0000-000000000201","name":"personal-code","root_node_id":"00000000-0000-0000-0000-000000000202","current_cursor":0}]}"#,
+        )?;
+        save_cli_config(
+            &config_path,
+            &CliConfig {
+                backend_url: backend,
+                user_id: "user-1".to_owned(),
+                device_id: "device-1".to_owned(),
+                device_name: "laptop".to_owned(),
+                token_type: "Bearer".to_owned(),
+            },
+        )?;
+        save_local_workspaces(
+            &config_path,
+            &[LocalWorkspaceConfig {
+                workspace_id: "00000000-0000-0000-0000-000000000201".to_owned(),
+                name: "personal-code".to_owned(),
+                root_node_id: "00000000-0000-0000-0000-000000000202".to_owned(),
+                metadata_db: dir.path().join("metadata.sqlite").display().to_string(),
+                path: None,
+                mount_path: None,
+            }],
+        )?;
+
+        let output = run_from_args_with_context(
+            ["workspace".to_owned(), "list".to_owned()],
+            &credentials,
+            &config_path,
+        )?;
+        let request = server
+            .join()
+            .map_err(|_| std::io::Error::other("server thread panicked"))??;
+        assert!(request.starts_with("GET /v1/workspaces HTTP/1.1"));
+        assert!(output
+            .contains("personal-code root=00000000-0000-0000-0000-000000000202 cursor=0 local"));
+
+        let mount_path = dir.path().join("mnt");
+        let mount_output = run_from_args_with_context(
+            [
+                "mount".to_owned(),
+                "personal-code".to_owned(),
+                mount_path.display().to_string(),
+            ],
+            &credentials,
+            &config_path,
+        )?;
+        assert!(mount_output.contains("Mount placeholder recorded"));
+        assert_eq!(
+            load_local_workspaces(&config_path)?[0].mount_path,
+            Some(mount_path.display().to_string())
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn workspace_mount_prefers_ids_and_rejects_ambiguous_names(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let dir = tempfile::tempdir()?;
+        let config_path = dir.path().join("config.json");
+        save_local_workspaces(
+            &config_path,
+            &[
+                LocalWorkspaceConfig {
+                    workspace_id: "00000000-0000-0000-0000-000000000301".to_owned(),
+                    name: "00000000-0000-0000-0000-000000000302".to_owned(),
+                    root_node_id: "00000000-0000-0000-0000-000000000303".to_owned(),
+                    metadata_db: dir.path().join("first.sqlite").display().to_string(),
+                    path: None,
+                    mount_path: None,
+                },
+                LocalWorkspaceConfig {
+                    workspace_id: "00000000-0000-0000-0000-000000000302".to_owned(),
+                    name: "duplicate".to_owned(),
+                    root_node_id: "00000000-0000-0000-0000-000000000304".to_owned(),
+                    metadata_db: dir.path().join("second.sqlite").display().to_string(),
+                    path: None,
+                    mount_path: None,
+                },
+                LocalWorkspaceConfig {
+                    workspace_id: "00000000-0000-0000-0000-000000000305".to_owned(),
+                    name: "duplicate".to_owned(),
+                    root_node_id: "00000000-0000-0000-0000-000000000306".to_owned(),
+                    metadata_db: dir.path().join("third.sqlite").display().to_string(),
+                    path: None,
+                    mount_path: None,
+                },
+            ],
+        )?;
+
+        let id_mount = dir.path().join("id-mount");
+        run_from_args_with_context(
+            [
+                "mount".to_owned(),
+                "00000000-0000-0000-0000-000000000302".to_owned(),
+                id_mount.display().to_string(),
+            ],
+            &FakeCredentialStore::default(),
+            &config_path,
+        )?;
+        let workspaces = load_local_workspaces(&config_path)?;
+        assert_eq!(workspaces[0].mount_path, None);
+        assert_eq!(
+            workspaces[1].mount_path,
+            Some(id_mount.display().to_string())
+        );
+
+        let ambiguous = run_from_args_with_context(
+            [
+                "mount".to_owned(),
+                "duplicate".to_owned(),
+                dir.path().join("ambiguous").display().to_string(),
+            ],
+            &FakeCredentialStore::default(),
+            &config_path,
+        );
+        assert!(matches!(ambiguous, Err(error) if error.contains("ambiguous")));
         Ok(())
     }
 

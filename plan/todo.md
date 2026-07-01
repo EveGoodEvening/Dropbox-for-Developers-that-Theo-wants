@@ -657,15 +657,15 @@ Acceptance criteria:
 
 ### 10.2 Workspace commands
 
-- [ ] `fs2 workspace create <name>`.
-- [ ] `fs2 workspace list`.
-- [ ] `fs2 workspace init <path> --name <name>`.
-- [ ] `fs2 mount <workspace> <path>` placeholder command.
-- [ ] Write local workspace config.
+- [x] `fs2 workspace create <name>`.
+- [x] `fs2 workspace list`.
+- [x] `fs2 workspace init <path> --name <name>`.
+- [x] `fs2 mount <workspace> <path>` placeholder command.
+- [x] Write local workspace config.
 
 Acceptance criteria:
 
-- [ ] Workspace can be created from CLI and local metadata DB initialized.
+- [x] Workspace can be created from CLI and local metadata DB initialized.
 
 ### 10.3 Status command
 
