@@ -812,21 +812,21 @@ Acceptance criteria:
 
 Acceptance criteria:
 
-- [ ] `mkdir` and `echo hi > file.txt` in mount produce pending ops.
+- [x] `mkdir` and `echo hi > file.txt` in mount produce pending ops.
 
 ### 13.2 File write lifecycle
 
-- [ ] Implement write staging files.
-- [ ] Implement `write`.
-- [ ] Implement `flush`/`release` commit.
-- [ ] Compute hash on close.
-- [ ] Encrypt blob.
-- [ ] Queue upload and `PutFileRevision`.
-- [ ] Mark local state dirty until backend ack.
+- [x] Implement write staging files.
+- [x] Implement `write`.
+- [x] Implement `flush`/`release` commit.
+- [x] Compute hash on close.
+- [x] Encrypt blob.
+- [x] Queue upload and `PutFileRevision`.
+- [x] Mark local state dirty until backend ack.
 
 Acceptance criteria:
 
-- [ ] Edited files survive daemon restart before upload completes.
+- [x] Edited files survive daemon restart before upload completes.
 
 ### 13.3 Rename and delete
 

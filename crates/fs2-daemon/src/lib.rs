@@ -3,7 +3,7 @@
 
 use chrono::{DateTime, Utc};
 use fs2_core::{
-    BlobId, Cursor, FsRule, Node, NodeId, NodeKind, NodeRevision, Operation, OperationKind,
+    BlobId, Cursor, FsRule, Node, NodeId, NodeKind, NodeRevision, OpId, Operation, OperationKind,
     RevisionId, WorkspaceId, WorkspacePath,
 };
 use fs2_rules::{rule_pattern_matches, RulePathKind};
@@ -331,6 +331,16 @@ impl LocalStore {
         .collect()
     }
 
+    pub fn has_pending_op(&self, op_id: OpId) -> Result<bool> {
+        self.conn
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM pending_ops WHERE op_id = ?1)",
+                params![op_id.to_string()],
+                |row| row.get::<_, bool>(0),
+            )
+            .map_err(Into::into)
+    }
+
     pub fn mark_pending_op_failed(&mut self, operation: &Operation, error: &str) -> Result<()> {
         let tx = self.conn.transaction()?;
         tx.execute(
@@ -470,6 +480,65 @@ impl LocalStore {
         Ok(())
     }
 
+    pub fn mark_node_dirty(
+        &mut self,
+        node_id: NodeId,
+        local_blob_path: &str,
+        dirty_base_revision_id: Option<RevisionId>,
+        pinned: bool,
+    ) -> Result<()> {
+        let tx = self.conn.transaction()?;
+        tx.execute(
+            "INSERT INTO local_state
+             (node_id, hydration_state, local_blob_path, dirty_base_revision_id, pinned)
+             VALUES (?1, ?2, ?3, ?4, ?5)
+             ON CONFLICT(node_id) DO UPDATE SET
+               hydration_state = excluded.hydration_state,
+               local_blob_path = excluded.local_blob_path,
+               dirty_base_revision_id = excluded.dirty_base_revision_id,
+               pinned = excluded.pinned",
+            params![
+                node_id.to_string(),
+                HydrationState::Dirty.to_string(),
+                local_blob_path,
+                dirty_base_revision_id.map(|revision_id| revision_id.to_string()),
+                pinned,
+            ],
+        )?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    pub fn remove_optimistic_create(&mut self, node_id: NodeId, op_id: OpId) -> Result<()> {
+        let tx = self.conn.transaction()?;
+        tx.execute(
+            "DELETE FROM pending_ops WHERE op_id = ?1",
+            params![op_id.to_string()],
+        )?;
+        tx.execute(
+            "DELETE FROM local_state WHERE node_id = ?1",
+            params![node_id.to_string()],
+        )?;
+        tx.execute(
+            "DELETE FROM local_nodes WHERE node_id = ?1",
+            params![node_id.to_string()],
+        )?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    pub fn restore_pending_write_head(&mut self, node_id: NodeId) -> Result<bool> {
+        let tx = self.conn.transaction()?;
+        let restored = if let Some(revision) = newest_pending_put_revision_for_node(&tx, node_id)? {
+            update_node_revision(&tx, node_id, revision.revision_id, revision.created_at)?;
+            true
+        } else {
+            false
+        };
+        tx.commit()?;
+        Ok(restored)
+    }
+
     pub fn mark_node_accessed(&mut self, node_id: NodeId) -> Result<()> {
         self.conn.execute(
             "UPDATE local_state SET last_accessed_at = ?2 WHERE node_id = ?1",
@@ -606,10 +675,13 @@ impl LocalStore {
             "UPDATE local_workspaces SET last_cursor = ?2 WHERE workspace_id = ?1",
             params![operation.workspace_id.to_string(), assigned_cursor.value()],
         )?;
-        tx.execute(
+        let removed_pending = tx.execute(
             "DELETE FROM pending_ops WHERE op_id = ?1",
             params![operation.op_id.to_string()],
         )?;
+        if removed_pending > 0 {
+            clear_dirty_after_committed_write(&tx, operation)?;
+        }
         tx.commit()?;
         Ok(assigned_cursor)
     }
@@ -853,6 +925,69 @@ fn apply_operation_in_tx(
             Ok(())
         }
     }
+}
+
+fn clear_dirty_after_committed_write(tx: &Transaction<'_>, operation: &Operation) -> Result<()> {
+    if let OperationKind::CreateNode { node_id, .. } = &operation.kind {
+        if let Some(revision) = newest_pending_put_revision_for_node(tx, *node_id)? {
+            update_node_revision(tx, *node_id, revision.revision_id, revision.created_at)?;
+        }
+        return Ok(());
+    }
+    let OperationKind::PutFileRevision {
+        node_id,
+        base_revision_id,
+        ..
+    } = &operation.kind
+    else {
+        return Ok(());
+    };
+    if let Some(revision) = newest_pending_put_revision_for_node(tx, *node_id)? {
+        update_node_revision(tx, *node_id, revision.revision_id, revision.created_at)?;
+        return Ok(());
+    }
+    let base_revision_id = base_revision_id.map(|revision_id| revision_id.to_string());
+    tx.execute(
+        "UPDATE local_state
+         SET hydration_state = ?2,
+             dirty_base_revision_id = NULL,
+             error_code = NULL,
+             error_message = NULL
+         WHERE node_id = ?1
+           AND hydration_state = ?3
+           AND ((dirty_base_revision_id IS NULL AND ?4 IS NULL) OR dirty_base_revision_id = ?4)",
+        params![
+            node_id.to_string(),
+            HydrationState::Hydrated.to_string(),
+            HydrationState::Dirty.to_string(),
+            base_revision_id,
+        ],
+    )?;
+    Ok(())
+}
+
+fn newest_pending_put_revision_for_node(
+    tx: &Transaction<'_>,
+    node_id: NodeId,
+) -> Result<Option<NodeRevision>> {
+    let mut statement =
+        tx.prepare("SELECT operation_json FROM pending_ops ORDER BY created_at, op_id")?;
+    let rows = statement.query_map([], |row| row.get::<_, String>(0))?;
+    let mut newest = None;
+    for row in rows {
+        let operation: Operation = serde_json::from_str(&row?)?;
+        if let OperationKind::PutFileRevision {
+            node_id: pending_node_id,
+            revision,
+            ..
+        } = operation.kind
+        {
+            if pending_node_id == node_id {
+                newest = Some(revision);
+            }
+        }
+    }
+    Ok(newest)
 }
 
 fn apply_create_node(

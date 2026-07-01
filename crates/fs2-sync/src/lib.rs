@@ -365,10 +365,15 @@ impl<'a> InboundSync<'a> {
                 return Ok(InboundSyncReport { applied });
             }
             for committed in page.operations {
+                let was_pending = store
+                    .has_pending_op(committed.operation.op_id)
+                    .map_err(|error| ApiClientError::LocalStore(error.to_string()))?;
                 store
                     .apply_committed_operation(&committed.operation, committed.cursor)
                     .map_err(|error| ApiClientError::LocalStore(error.to_string()))?;
-                mark_remote_file_revision_metadata_only(store, &committed.operation)?;
+                if !was_pending {
+                    mark_remote_file_revision_metadata_only(store, &committed.operation)?;
+                }
                 applied += 1;
             }
             if !page.has_more {
@@ -395,10 +400,27 @@ fn mark_remote_file_revision_metadata_only(
     let OperationKind::PutFileRevision { node_id, .. } = &operation.kind else {
         return Ok(());
     };
-    let pinned = store
+    let state = store
         .node_state(*node_id)
+        .map_err(|error| ApiClientError::LocalStore(error.to_string()))?;
+    let local_dirty = state
+        .as_ref()
+        .is_some_and(|state| state.hydration_state == fs2_daemon::HydrationState::Dirty);
+    let has_pending_write = store
+        .list_pending_ops(operation.workspace_id)
         .map_err(|error| ApiClientError::LocalStore(error.to_string()))?
-        .is_some_and(|state| state.pinned);
+        .into_iter()
+        .any(|pending| matches!(pending.operation.kind, OperationKind::PutFileRevision { node_id: pending_node_id, .. } if pending_node_id == *node_id));
+    if has_pending_write {
+        store
+            .restore_pending_write_head(*node_id)
+            .map_err(|error| ApiClientError::LocalStore(error.to_string()))?;
+        return Ok(());
+    }
+    if local_dirty {
+        return Ok(());
+    }
+    let pinned = state.is_some_and(|state| state.pinned);
     store
         .set_hydration_state(
             *node_id,
