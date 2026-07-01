@@ -1015,7 +1015,7 @@ Acceptance criteria:
 - [x] Add env set endpoint.
 - [x] Add env delete endpoint.
 - [x] Store encrypted payload only.
-- [ ] Add tests that backend never receives plaintext in request logs.
+- [x] Add tests that backend never receives plaintext in request logs.
 
 Acceptance criteria:
 

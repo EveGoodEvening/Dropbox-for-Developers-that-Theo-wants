@@ -6,11 +6,13 @@
 //! Backend HTTP server skeleton with development-only auth/device endpoints.
 
 use axum::{
+    body::Body,
     extract::{
         ws::{Message, WebSocket, WebSocketUpgrade},
         Path, Query, State,
     },
-    http::{HeaderMap, StatusCode},
+    http::{HeaderMap, Request, StatusCode},
+    middleware::{self, Next},
     response::{IntoResponse, Response},
     routing::{delete, get, post},
     Json, Router,
@@ -39,7 +41,7 @@ use std::{
     path::{Path as FsPath, PathBuf},
     pin::Pin,
     str::FromStr,
-    sync::Arc,
+    sync::{Arc, Mutex as StdMutex},
     time::{SystemTime, UNIX_EPOCH},
 };
 use tokio::io::AsyncWriteExt;
@@ -474,6 +476,7 @@ pub struct AppState {
     /// Live Postgres pool for DB-backed state. `None` keeps the fast in-memory
     /// development behavior used by unit tests.
     database: Option<sqlx::PgPool>,
+    request_log: Option<Arc<StdMutex<Vec<String>>>>,
 }
 
 impl AppState {
@@ -502,6 +505,7 @@ impl AppState {
             idempotency: Arc::new(RwLock::new(HashMap::new())),
             event_tx,
             database: None,
+            request_log: None,
         }
     }
 
@@ -986,6 +990,25 @@ pub fn app() -> Router {
     app_with_state(state)
 }
 
+async fn log_request(
+    State(state): State<AppState>,
+    request: Request<Body>,
+    next: Next,
+) -> Response {
+    let method = request.method().clone();
+    let path = request.uri().path().to_owned();
+    let response = next.run(request).await;
+    let status = response.status();
+    let message = format!("request completed method={method} path={path} status={status}");
+    info!(%method, %path, %status, "request completed");
+    if let Some(request_log) = &state.request_log {
+        if let Ok(mut request_log) = request_log.lock() {
+            request_log.push(message);
+        }
+    }
+    response
+}
+
 pub fn app_with_state(state: AppState) -> Router {
     Router::new()
         .route("/healthz", get(healthz))
@@ -1017,6 +1040,7 @@ pub fn app_with_state(state: AppState) -> Router {
         .route("/v1/blobs/dev-upload", post(dev_blob_upload))
         .route("/v1/blobs/dev-download", post(dev_blob_download))
         .route("/v1/blobs/:blob_id/status", get(blob_status))
+        .layer(middleware::from_fn_with_state(state.clone(), log_request))
         .with_state(state)
 }
 
@@ -2616,7 +2640,11 @@ mod tests {
     use futures_util::{Stream, StreamExt};
     use object_store::memory::InMemory;
     use serde::de::DeserializeOwned;
-    use std::time::Duration;
+    use std::{
+        io,
+        sync::{Arc, Mutex},
+        time::Duration,
+    };
     use tempfile::TempDir;
     use tokio_tungstenite::{connect_async, tungstenite::Message as TungsteniteMessage};
     use tower::util::ServiceExt;
@@ -4036,7 +4064,10 @@ mod tests {
     #[tokio::test]
     async fn env_endpoints_set_list_filter_delete_without_plaintext(
     ) -> Result<(), Box<dyn std::error::Error>> {
-        let app = app();
+        let request_logs = Arc::new(Mutex::new(Vec::new()));
+        let mut state = AppState::dev(RedactedSecret::new(DEFAULT_DEV_SECRET.to_owned())?);
+        state.request_log = Some(Arc::clone(&request_logs));
+        let app = app_with_state(state);
         let login = post_json::<DevLoginResponse>(
             app.clone(),
             "/v1/auth/dev-login",
@@ -4155,6 +4186,16 @@ mod tests {
         let listed = get_json::<EnvListResponse>(app, &env_uri, Some(&login.access_token)).await?;
         assert_eq!(listed.records.len(), 1);
         assert_eq!(listed.records[0].metadata.env_name, "API_URL");
+        let logs = request_logs
+            .lock()
+            .map_err(|_| io::Error::other("request log mutex poisoned"))?
+            .join("\n");
+        assert!(logs.contains("request completed"));
+        assert!(logs.contains("/v1/workspaces/"));
+        assert!(logs.contains("/env"));
+        assert!(!logs.contains(&login.access_token));
+        assert!(!logs.contains(fake_plaintext));
+
         Ok(())
     }
 
