@@ -719,16 +719,16 @@ Acceptance criteria:
 
 ### 11.3 Implement inbound sync loop
 
-- [ ] Connect WebSocket.
-- [ ] On notification, fetch ops since local cursor.
-- [ ] On startup, fetch ops since local cursor.
-- [ ] On WebSocket failure, poll periodically.
-- [ ] Apply remote ops locally.
-- [ ] Do not hydrate bytes unless pinned/prefetch.
+- [x] Connect WebSocket.
+- [x] On notification, fetch ops since local cursor.
+- [x] On startup, fetch ops since local cursor.
+- [x] On WebSocket failure, poll periodically.
+- [x] Apply remote ops locally.
+- [x] Do not hydrate bytes unless pinned/prefetch.
 
 Acceptance criteria:
 
-- [ ] Client B sees Client A metadata changes after event.
+- [x] Client B sees Client A metadata changes after event.
 
 ### 11.4 Two-client materialized test harness
 

@@ -273,6 +273,142 @@ fn record_outbound_failure(
     })
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InboundSyncReport {
+    pub applied: usize,
+}
+
+pub struct InboundSync<'a> {
+    client: &'a ApiClient,
+    workspace_id: WorkspaceId,
+    poll_interval: Duration,
+}
+
+impl<'a> InboundSync<'a> {
+    #[must_use]
+    pub const fn new(
+        client: &'a ApiClient,
+        workspace_id: WorkspaceId,
+        poll_interval: Duration,
+    ) -> Self {
+        Self {
+            client,
+            workspace_id,
+            poll_interval,
+        }
+    }
+
+    pub fn sync_startup(
+        &self,
+        store: &mut fs2_daemon::LocalStore,
+    ) -> Result<InboundSyncReport, ApiClientError> {
+        self.fetch_and_apply_since_local_cursor(store)
+    }
+
+    pub fn sync_after_event(
+        &self,
+        store: &mut fs2_daemon::LocalStore,
+        event: &WorkspaceEvent,
+    ) -> Result<InboundSyncReport, ApiClientError> {
+        match event {
+            WorkspaceEvent::WorkspaceOpsAvailable { workspace_id, .. }
+                if *workspace_id == self.workspace_id =>
+            {
+                self.fetch_and_apply_since_local_cursor(store)
+            }
+            WorkspaceEvent::WorkspaceOpsAvailable { .. } => Ok(InboundSyncReport { applied: 0 }),
+        }
+    }
+
+    pub fn sync_after_next_event_or_poll(
+        &self,
+        store: &mut fs2_daemon::LocalStore,
+    ) -> Result<InboundSyncReport, ApiClientError> {
+        match self.client.connect_workspace_events(self.workspace_id) {
+            Ok(mut listener) => {
+                let catch_up = self.fetch_and_apply_since_local_cursor(store)?;
+                if catch_up.applied > 0 {
+                    return Ok(catch_up);
+                }
+                match listener.next_event() {
+                    Ok(event) => self.sync_after_event(store, &event),
+                    Err(_) => self.poll_after_websocket_failure(store),
+                }
+            }
+            Err(_) => self.poll_after_websocket_failure(store),
+        }
+    }
+
+    pub fn poll_after_websocket_failure(
+        &self,
+        store: &mut fs2_daemon::LocalStore,
+    ) -> Result<InboundSyncReport, ApiClientError> {
+        if !self.poll_interval.is_zero() {
+            thread::sleep(self.poll_interval);
+        }
+        self.fetch_and_apply_since_local_cursor(store)
+    }
+
+    fn fetch_and_apply_since_local_cursor(
+        &self,
+        store: &mut fs2_daemon::LocalStore,
+    ) -> Result<InboundSyncReport, ApiClientError> {
+        let mut applied = 0;
+        loop {
+            let since = store
+                .last_cursor(self.workspace_id)
+                .map_err(|error| ApiClientError::LocalStore(error.to_string()))?;
+            let page = self
+                .client
+                .fetch_operations(self.workspace_id, since, Some(100))?;
+            if page.operations.is_empty() {
+                return Ok(InboundSyncReport { applied });
+            }
+            for committed in page.operations {
+                store
+                    .apply_committed_operation(&committed.operation, committed.cursor)
+                    .map_err(|error| ApiClientError::LocalStore(error.to_string()))?;
+                mark_remote_file_revision_metadata_only(store, &committed.operation)?;
+                applied += 1;
+            }
+            if !page.has_more {
+                return Ok(InboundSyncReport { applied });
+            }
+        }
+    }
+}
+
+impl fmt::Debug for InboundSync<'_> {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("InboundSync")
+            .field("workspace_id", &self.workspace_id)
+            .field("poll_interval", &self.poll_interval)
+            .finish_non_exhaustive()
+    }
+}
+
+fn mark_remote_file_revision_metadata_only(
+    store: &mut fs2_daemon::LocalStore,
+    operation: &Operation,
+) -> Result<(), ApiClientError> {
+    let OperationKind::PutFileRevision { node_id, .. } = &operation.kind else {
+        return Ok(());
+    };
+    let pinned = store
+        .node_state(*node_id)
+        .map_err(|error| ApiClientError::LocalStore(error.to_string()))?
+        .is_some_and(|state| state.pinned);
+    store
+        .set_hydration_state(
+            *node_id,
+            fs2_daemon::HydrationState::MetadataOnly,
+            None,
+            pinned,
+        )
+        .map_err(|error| ApiClientError::LocalStore(error.to_string()))
+}
+
 fn operation_blob_ids(operation: &Operation) -> Vec<&BlobId> {
     match &operation.kind {
         OperationKind::CreateNode {
@@ -1101,6 +1237,113 @@ mod tests {
         Ok(())
     }
 
+    fn directory_create_operation(
+        workspace_id: WorkspaceId,
+        device_id: fs2_core::DeviceId,
+        root_node_id: fs2_core::NodeId,
+        name: &str,
+        base_cursor: Cursor,
+    ) -> Operation {
+        Operation {
+            op_id: fs2_core::OpId::new_v4(),
+            workspace_id,
+            device_id,
+            base_cursor,
+            kind: fs2_core::OperationKind::CreateNode {
+                node_id: fs2_core::NodeId::new_v4(),
+                parent_id: root_node_id,
+                name: name.to_owned(),
+                kind: fs2_core::NodeKind::Directory,
+                initial_revision: None,
+            },
+            created_at: chrono::Utc::now(),
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn inbound_sync_applies_startup_event_and_poll_changes(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let backend = spawn_backend()?;
+        let bootstrap = ApiClient::with_retry_policy(
+            &backend.base_url,
+            "bootstrap-token",
+            RetryPolicy::no_retry(),
+        )?;
+        let login: TestLoginResponse = bootstrap.post_json(
+            &["v1", "auth", "dev-login"],
+            &serde_json::json!({
+                "device_name": "inbound-test",
+                "platform": {"os": "linux", "arch": "x86_64"},
+                "public_key": "test-public-key"
+            }),
+        )?;
+        let client = ApiClient::with_retry_policy(
+            &backend.base_url,
+            login.access_token,
+            RetryPolicy::no_retry(),
+        )?;
+        let workspace: fs2_backend::CreateWorkspaceResponse = client.post_json(
+            &["v1", "workspaces"],
+            &serde_json::json!({"name": "inbound-sync"}),
+        )?;
+        let workspace_id = workspace.workspace_id;
+        let device_id = login.device_id.parse()?;
+        let mut store = fs2_daemon::LocalStore::in_memory()?;
+        store.initialize_workspace(workspace_id, "inbound-sync", workspace.root_node_id)?;
+        let inbound = InboundSync::new(&client, workspace_id, Duration::ZERO);
+
+        let startup = directory_create_operation(
+            workspace_id,
+            device_id,
+            workspace.root_node_id,
+            "startup",
+            Cursor::new(0)?,
+        );
+        client.submit_operation(workspace_id, &startup)?;
+        let report = inbound.sync_startup(&mut store)?;
+        assert_eq!(report.applied, 1);
+        assert!(store.get_node_by_path(workspace_id, "startup")?.is_some());
+
+        let mut listener = client.connect_workspace_events(workspace_id)?;
+        let event_op = directory_create_operation(
+            workspace_id,
+            device_id,
+            workspace.root_node_id,
+            "event",
+            Cursor::new(1)?,
+        );
+        client.submit_operation(workspace_id, &event_op)?;
+        let event = listener.next_event()?;
+        let report = inbound.sync_after_event(&mut store, &event)?;
+        assert_eq!(report.applied, 1);
+        assert!(store.get_node_by_path(workspace_id, "event")?.is_some());
+
+        let gap = directory_create_operation(
+            workspace_id,
+            device_id,
+            workspace.root_node_id,
+            "gap",
+            Cursor::new(2)?,
+        );
+        client.submit_operation(workspace_id, &gap)?;
+        let report = inbound.sync_after_next_event_or_poll(&mut store)?;
+        assert_eq!(report.applied, 1);
+        assert!(store.get_node_by_path(workspace_id, "gap")?.is_some());
+
+        let polled = directory_create_operation(
+            workspace_id,
+            device_id,
+            workspace.root_node_id,
+            "polled",
+            Cursor::new(3)?,
+        );
+        client.submit_operation(workspace_id, &polled)?;
+        let report = inbound.poll_after_websocket_failure(&mut store)?;
+        assert_eq!(report.applied, 1);
+        assert!(store.get_node_by_path(workspace_id, "polled")?.is_some());
+        Ok(())
+    }
+
     fn file_create_operation(
         workspace_id: WorkspaceId,
         device_id: fs2_core::DeviceId,
@@ -1143,6 +1386,127 @@ mod tests {
             },
             created_at: chrono::Utc::now(),
         })
+    }
+
+    fn put_file_revision_operation(
+        workspace_id: WorkspaceId,
+        device_id: fs2_core::DeviceId,
+        node_id: fs2_core::NodeId,
+        base_cursor: Cursor,
+        base_revision_id: fs2_core::RevisionId,
+        plan: &BlobUploadPlan,
+    ) -> Result<Operation, Box<dyn std::error::Error>> {
+        let encryption_header = serde_json::to_string(&plan.encryption_header)?;
+        Ok(Operation {
+            op_id: fs2_core::OpId::new_v4(),
+            workspace_id,
+            device_id,
+            base_cursor,
+            kind: fs2_core::OperationKind::PutFileRevision {
+                node_id,
+                base_revision_id: Some(base_revision_id),
+                revision: fs2_core::NodeRevision {
+                    revision_id: fs2_core::RevisionId::new_v4(),
+                    node_id,
+                    workspace_id,
+                    device_id,
+                    base_revision_id: Some(base_revision_id),
+                    content: RevisionContent::File {
+                        blob_id: plan.blob_id.clone(),
+                        chunk_ids: Vec::new(),
+                        content_hash: "plaintext-sha256:test-update".to_owned(),
+                        encryption_header: Some(encryption_header),
+                    },
+                    posix_mode: 0o100_644,
+                    mtime: chrono::Utc::now(),
+                    size: plan.plaintext_size,
+                    executable: false,
+                    created_at: chrono::Utc::now(),
+                },
+            },
+            created_at: chrono::Utc::now(),
+        })
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn inbound_file_update_invalidates_stale_hydrated_bytes(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let backend = spawn_backend()?;
+        let bootstrap = ApiClient::with_retry_policy(
+            &backend.base_url,
+            "bootstrap-token",
+            RetryPolicy::no_retry(),
+        )?;
+        let login: TestLoginResponse = bootstrap.post_json(
+            &["v1", "auth", "dev-login"],
+            &serde_json::json!({
+                "device_name": "inbound-stale-test",
+                "platform": {"os": "linux", "arch": "x86_64"},
+                "public_key": "test-public-key"
+            }),
+        )?;
+        let client = ApiClient::with_retry_policy(
+            &backend.base_url,
+            login.access_token,
+            RetryPolicy::no_retry(),
+        )?;
+        let workspace: fs2_backend::CreateWorkspaceResponse = client.post_json(
+            &["v1", "workspaces"],
+            &serde_json::json!({"name": "inbound-stale"}),
+        )?;
+        let workspace_id = workspace.workspace_id;
+        let device_id = login.device_id.parse()?;
+        let content_key = WorkspaceContentKey::from_bytes([7; 32]);
+        let first_plan = BlobUploadPlan::from_plaintext(b"first", &content_key)?;
+        client.upload_blob(workspace_id, &first_plan)?;
+        let create = file_create_operation(
+            workspace_id,
+            device_id,
+            workspace.root_node_id,
+            "stale.txt",
+            Cursor::new(0)?,
+            &first_plan,
+        )?;
+        let (node_id, first_revision_id) = match &create.kind {
+            fs2_core::OperationKind::CreateNode {
+                node_id,
+                initial_revision: Some(revision),
+                ..
+            } => (*node_id, revision.revision_id),
+            _ => unreachable!("file_create_operation creates a file revision"),
+        };
+        client.submit_operation(workspace_id, &create)?;
+        let mut store = fs2_daemon::LocalStore::in_memory()?;
+        store.initialize_workspace(workspace_id, "inbound-stale", workspace.root_node_id)?;
+        let inbound = InboundSync::new(&client, workspace_id, Duration::ZERO);
+        assert_eq!(inbound.sync_startup(&mut store)?.applied, 1);
+        store.set_hydration_state(
+            node_id,
+            fs2_daemon::HydrationState::Hydrated,
+            Some("old-local-blob"),
+            true,
+        )?;
+
+        let second_plan = BlobUploadPlan::from_plaintext(b"second", &content_key)?;
+        client.upload_blob(workspace_id, &second_plan)?;
+        let update = put_file_revision_operation(
+            workspace_id,
+            device_id,
+            node_id,
+            Cursor::new(1)?,
+            first_revision_id,
+            &second_plan,
+        )?;
+        client.submit_operation(workspace_id, &update)?;
+        assert_eq!(inbound.poll_after_websocket_failure(&mut store)?.applied, 1);
+        let state = store
+            .node_state(node_id)?
+            .map(|state| (state.hydration_state, state.local_blob_path, state.pinned));
+        assert_eq!(
+            state,
+            Some((fs2_daemon::HydrationState::MetadataOnly, None, true))
+        );
+        Ok(())
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
