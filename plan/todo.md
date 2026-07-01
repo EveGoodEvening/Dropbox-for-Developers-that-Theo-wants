@@ -1114,7 +1114,7 @@ Acceptance criteria:
 
 Acceptance criteria:
 
-- [ ] `fs2 doctor` can explain why `node_modules` is generated and which install command to run.
+- [x] `fs2 doctor` can explain why `node_modules` is generated and which install command to run.
 
 ### 19.2 Generated write suppression
 

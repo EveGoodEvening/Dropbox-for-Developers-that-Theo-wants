@@ -199,11 +199,236 @@ fn doctor(path: impl AsRef<Path>) -> Result<String, String> {
             }
         }
     }
+    append_dependency_doctor(root, &engine, &mut out)?;
     Ok(out)
 }
 
 fn fs2_config_path(path: &Path) -> PathBuf {
     path.join(".fs2").join("config.toml")
+}
+
+fn append_dependency_doctor(
+    root: &Path,
+    engine: &fs2_rules::RuleEngine,
+    out: &mut String,
+) -> Result<(), String> {
+    let dependency_roots =
+        fs2_rules::discover_dependency_roots(root).map_err(|error| error.to_string())?;
+    if dependency_roots.is_empty() {
+        out.push_str("  dependencies: no package roots detected\n");
+        return Ok(());
+    }
+    out.push_str("  dependencies:\n");
+    let mut rendered_node_roots = Vec::new();
+    for dependency_root in &dependency_roots {
+        if dependency_root.ecosystem != fs2_rules::DependencyEcosystem::Node {
+            continue;
+        }
+        if tooling_only_node_root(dependency_root) {
+            continue;
+        }
+        let display_root = dependency_display_root(root, &dependency_root.root);
+        if covered_by_rendered_node_workspace_ancestor(dependency_root, &rendered_node_roots) {
+            continue;
+        }
+        if dependency_root_is_generated_or_local(engine, &display_root)? {
+            continue;
+        }
+        let renders_guidance = dependency_root
+            .generated_paths
+            .iter()
+            .any(|path| path == "node_modules/")
+            && dependency_generated_by_effective_rule(engine, &display_root)?;
+        if renders_guidance {
+            let command = dependency_root.install_command.join(" ");
+            writeln!(
+                out,
+                "    - {display_root}: node_modules/ is generated dependency cache; run `{command}` to recreate it locally"
+            )
+            .map_err(|error| error.to_string())?;
+            rendered_node_roots.push(dependency_root);
+        }
+    }
+    Ok(())
+}
+
+fn tooling_only_node_root(dependency_root: &fs2_rules::DependencyRoot) -> bool {
+    !dependency_root.root.join("package.json").is_file()
+        && dependency_root.lockfiles.is_empty()
+        && !dependency_root.workspace_files.iter().any(|file| {
+            matches!(
+                file.as_str(),
+                "pnpm-workspace.yaml" | "package.json#workspaces"
+            )
+        })
+}
+
+fn dependency_display_root(root: &Path, dependency_root: &Path) -> String {
+    dependency_root
+        .strip_prefix(root)
+        .ok()
+        .filter(|path| !path.as_os_str().is_empty())
+        .map_or_else(|| ".".to_owned(), |path| path.display().to_string())
+}
+
+fn covered_by_rendered_node_workspace_ancestor(
+    dependency_root: &fs2_rules::DependencyRoot,
+    rendered_node_roots: &[&fs2_rules::DependencyRoot],
+) -> bool {
+    rendered_node_roots.iter().any(|candidate| {
+        candidate.root != dependency_root.root
+            && dependency_root.root.starts_with(&candidate.root)
+            && workspace_declaration_covers(candidate, dependency_root)
+    })
+}
+
+fn workspace_declaration_covers(
+    candidate: &fs2_rules::DependencyRoot,
+    dependency_root: &fs2_rules::DependencyRoot,
+) -> bool {
+    let Ok(relative) = dependency_root.root.strip_prefix(&candidate.root) else {
+        return false;
+    };
+    let relative = relative.to_string_lossy().replace('\\', "/");
+    if candidate.manager == fs2_rules::PackageManager::Pnpm
+        && candidate
+            .workspace_files
+            .iter()
+            .any(|file| file == "pnpm-workspace.yaml")
+    {
+        let patterns = pnpm_workspace_patterns(&candidate.root);
+        if workspace_patterns_cover(&patterns, &relative) {
+            return true;
+        }
+    }
+    if candidate.manager != fs2_rules::PackageManager::Pnpm
+        && candidate
+            .workspace_files
+            .iter()
+            .any(|file| file == "package.json#workspaces")
+    {
+        return workspace_patterns_cover(
+            &package_json_workspace_patterns(&candidate.root),
+            &relative,
+        );
+    }
+    false
+}
+
+fn package_json_workspace_patterns(root: &Path) -> Vec<String> {
+    let Ok(text) = fs::read_to_string(root.join("package.json")) else {
+        return Vec::new();
+    };
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(&text) else {
+        return Vec::new();
+    };
+    match value.get("workspaces") {
+        Some(serde_json::Value::Array(items)) => items
+            .iter()
+            .filter_map(serde_json::Value::as_str)
+            .map(str::to_owned)
+            .collect(),
+        Some(serde_json::Value::Object(object)) => object
+            .get("packages")
+            .and_then(serde_json::Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter_map(serde_json::Value::as_str)
+            .map(str::to_owned)
+            .collect(),
+        _ => Vec::new(),
+    }
+}
+
+fn pnpm_workspace_patterns(root: &Path) -> Vec<String> {
+    let Ok(text) = fs::read_to_string(root.join("pnpm-workspace.yaml")) else {
+        return Vec::new();
+    };
+    let Ok(value) = serde_yaml::from_str::<serde_yaml::Value>(&text) else {
+        return Vec::new();
+    };
+    let serde_yaml::Value::Mapping(mapping) = value else {
+        return Vec::new();
+    };
+    let Some(packages) = mapping.get(serde_yaml::Value::String("packages".to_owned())) else {
+        return Vec::new();
+    };
+    let serde_yaml::Value::Sequence(items) = packages else {
+        return Vec::new();
+    };
+    items
+        .iter()
+        .filter_map(serde_yaml::Value::as_str)
+        .map(str::to_owned)
+        .collect()
+}
+
+fn workspace_patterns_cover(patterns: &[String], relative: &str) -> bool {
+    let included = patterns
+        .iter()
+        .filter(|pattern| !pattern.starts_with('!'))
+        .any(|pattern| workspace_pattern_matches(pattern, relative));
+    let excluded = patterns
+        .iter()
+        .filter_map(|pattern| pattern.strip_prefix('!'))
+        .any(|pattern| workspace_pattern_matches(pattern, relative));
+    included && !excluded
+}
+
+fn workspace_pattern_matches(pattern: &str, relative: &str) -> bool {
+    let pattern = pattern.trim_start_matches("./").trim_end_matches('/');
+    globset::GlobBuilder::new(pattern)
+        .literal_separator(true)
+        .build()
+        .map_or(relative == pattern, |glob| {
+            glob.compile_matcher().is_match(relative)
+        })
+}
+
+fn dependency_generated_by_effective_rule(
+    engine: &fs2_rules::RuleEngine,
+    dependency_root: &str,
+) -> Result<bool, String> {
+    let probe = if dependency_root == "." {
+        "node_modules/pkg/index.js".to_owned()
+    } else {
+        format!("{dependency_root}/node_modules/pkg/index.js")
+    };
+    let path = WorkspacePath::parse(&probe).map_err(|error| error.to_string())?;
+    let resolution = engine
+        .resolve(
+            &path,
+            fs2_rules::RulePathKind::File,
+            fs2_rules::EvaluationPurpose::ExistingOrRemoteLookup,
+            None,
+        )
+        .map_err(|error| error.to_string())?;
+    Ok(matches!(
+        resolution.effective_rule.action,
+        RuleAction::DependencyCache | RuleAction::Generated
+    ))
+}
+
+fn dependency_root_is_generated_or_local(
+    engine: &fs2_rules::RuleEngine,
+    dependency_root: &str,
+) -> Result<bool, String> {
+    if dependency_root == "." {
+        return Ok(false);
+    }
+    let path = WorkspacePath::parse(dependency_root).map_err(|error| error.to_string())?;
+    let resolution = engine
+        .resolve(
+            &path,
+            fs2_rules::RulePathKind::Directory,
+            fs2_rules::EvaluationPurpose::ExistingOrRemoteLookup,
+            None,
+        )
+        .map_err(|error| error.to_string())?;
+    Ok(matches!(
+        resolution.effective_rule.action,
+        RuleAction::DependencyCache | RuleAction::Generated | RuleAction::LocalOnly
+    ))
 }
 
 fn git_normal_overrides(
@@ -769,8 +994,359 @@ mod tests {
 
         assert_eq!(
             output,
-            "FS2 doctor:\n  config: not found\n  git internals: protected by built-in defaults\n"
+            "FS2 doctor:\n  config: not found\n  git internals: protected by built-in defaults\n  dependencies: no package roots detected\n"
         );
+        Ok(())
+    }
+
+    #[test]
+    fn doctor_explains_node_modules_generation_and_install_command(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let dir = tempfile::tempdir()?;
+        fs::write(
+            dir.path().join("package.json"),
+            r#"{"packageManager":"pnpm@9.0.0"}"#,
+        )?;
+
+        let output = doctor(dir.path())?;
+
+        assert!(output.contains("dependencies:"));
+        assert!(output.contains("node_modules/ is generated dependency cache"));
+        assert!(output.contains("run `pnpm install`"));
+        Ok(())
+    }
+
+    #[test]
+    fn doctor_skips_generated_dependency_roots() -> Result<(), Box<dyn std::error::Error>> {
+        let dir = tempfile::tempdir()?;
+        let generated_dir = dir.path().join(".next").join("standalone");
+        fs::create_dir_all(&generated_dir)?;
+        fs::write(
+            generated_dir.join("package.json"),
+            r#"{"name":"standalone"}"#,
+        )?;
+
+        let output = doctor(dir.path())?;
+
+        assert!(!output.contains(".next/standalone: node_modules/"));
+        Ok(())
+    }
+
+    #[test]
+    fn doctor_uses_workspace_root_install_command_once() -> Result<(), Box<dyn std::error::Error>> {
+        let dir = tempfile::tempdir()?;
+        let app_dir = dir.path().join("apps").join("api");
+        fs::create_dir_all(&app_dir)?;
+        fs::write(
+            dir.path().join("package.json"),
+            r#"{"packageManager":"pnpm@9.0.0","workspaces":["apps/*"]}"#,
+        )?;
+        fs::write(
+            dir.path().join("pnpm-workspace.yaml"),
+            "packages:\n  - 'apps/*'\n",
+        )?;
+        fs::write(app_dir.join("package.json"), r#"{"name":"api"}"#)?;
+
+        let output = doctor(dir.path())?;
+
+        assert!(
+            output.contains("- .: node_modules/ is generated dependency cache; run `pnpm install`")
+        );
+        assert!(!output.contains("apps/api: node_modules/"));
+        assert!(!output.contains("run `npm install`"));
+        Ok(())
+    }
+
+    #[test]
+    fn doctor_does_not_use_package_json_workspaces_for_pnpm_without_pnpm_file(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let dir = tempfile::tempdir()?;
+        let app_dir = dir.path().join("apps").join("api");
+        fs::create_dir_all(&app_dir)?;
+        fs::write(
+            dir.path().join("package.json"),
+            r#"{"packageManager":"pnpm@9.0.0","workspaces":["apps/*"]}"#,
+        )?;
+        fs::write(
+            app_dir.join("package.json"),
+            r#"{"packageManager":"bun@1.0.0"}"#,
+        )?;
+
+        let output = doctor(dir.path())?;
+
+        assert!(output
+            .contains("apps/api: node_modules/ is generated dependency cache; run `bun install`"));
+        Ok(())
+    }
+
+    #[test]
+    fn doctor_keeps_child_guidance_when_workspace_root_rule_not_generated(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let dir = tempfile::tempdir()?;
+        let app_dir = dir.path().join("apps").join("api");
+        let config_dir = dir.path().join(".fs2");
+        fs::create_dir_all(&app_dir)?;
+        fs::create_dir_all(&config_dir)?;
+        fs::write(
+            config_dir.join("config.toml"),
+            "version = 1\n[profiles]\nnode = false\n[[rules]]\npattern = \"apps/*/node_modules/**\"\naction = \"dependency-cache\"\n",
+        )?;
+        fs::write(
+            dir.path().join("package.json"),
+            r#"{"packageManager":"npm@10.0.0","workspaces":["apps/*"]}"#,
+        )?;
+        fs::write(
+            app_dir.join("package.json"),
+            r#"{"packageManager":"bun@1.0.0"}"#,
+        )?;
+
+        let output = doctor(dir.path())?;
+
+        assert!(output
+            .contains("apps/api: node_modules/ is generated dependency cache; run `bun install`"));
+        Ok(())
+    }
+
+    #[test]
+    fn doctor_keeps_grandchild_when_intermediate_workspace_is_suppressed(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let dir = tempfile::tempdir()?;
+        let lib_dir = dir.path().join("packages").join("lib");
+        let api_dir = lib_dir.join("examples").join("api");
+        fs::create_dir_all(&api_dir)?;
+        fs::write(
+            dir.path().join("package.json"),
+            r#"{"packageManager":"npm@10.0.0","workspaces":["packages/*"]}"#,
+        )?;
+        fs::write(
+            lib_dir.join("package.json"),
+            r#"{"packageManager":"npm@10.0.0","workspaces":["examples/*"]}"#,
+        )?;
+        fs::write(
+            api_dir.join("package.json"),
+            r#"{"packageManager":"bun@1.0.0"}"#,
+        )?;
+
+        let output = doctor(dir.path())?;
+
+        assert!(!output.contains("packages/lib: node_modules/"));
+        assert!(output.contains("packages/lib/examples/api: node_modules/ is generated dependency cache; run `bun install`"));
+        Ok(())
+    }
+
+    #[test]
+    fn doctor_keeps_nested_package_outside_workspace_globs(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let dir = tempfile::tempdir()?;
+        let package_dir = dir.path().join("packages").join("lib");
+        let example_dir = dir.path().join("examples").join("api");
+        fs::create_dir_all(&package_dir)?;
+        fs::create_dir_all(&example_dir)?;
+        fs::write(
+            dir.path().join("package.json"),
+            r#"{"packageManager":"npm@10.0.0","workspaces":["packages/*"]}"#,
+        )?;
+        fs::write(package_dir.join("package.json"), r#"{"name":"lib"}"#)?;
+        fs::write(
+            example_dir.join("package.json"),
+            r#"{"packageManager":"bun@1.0.0"}"#,
+        )?;
+
+        let output = doctor(dir.path())?;
+
+        assert!(!output.contains("packages/lib: node_modules/"));
+        assert!(output.contains(
+            "examples/api: node_modules/ is generated dependency cache; run `bun install`"
+        ));
+        Ok(())
+    }
+
+    #[test]
+    fn doctor_does_not_let_single_star_cross_directories() -> Result<(), Box<dyn std::error::Error>>
+    {
+        let dir = tempfile::tempdir()?;
+        let deep_dir = dir
+            .path()
+            .join("packages")
+            .join("lib")
+            .join("examples")
+            .join("api");
+        fs::create_dir_all(&deep_dir)?;
+        fs::write(
+            dir.path().join("package.json"),
+            r#"{"packageManager":"npm@10.0.0","workspaces":["packages/*"]}"#,
+        )?;
+        fs::write(
+            deep_dir.join("package.json"),
+            r#"{"packageManager":"bun@1.0.0"}"#,
+        )?;
+
+        let output = doctor(dir.path())?;
+
+        assert!(output.contains("packages/lib/examples/api: node_modules/ is generated dependency cache; run `bun install`"));
+        Ok(())
+    }
+
+    #[test]
+    fn doctor_keeps_nested_package_outside_pnpm_workspace_globs(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let dir = tempfile::tempdir()?;
+        let package_dir = dir.path().join("packages").join("lib");
+        let example_dir = dir.path().join("examples").join("api");
+        fs::create_dir_all(&package_dir)?;
+        fs::create_dir_all(&example_dir)?;
+        fs::write(
+            dir.path().join("pnpm-workspace.yaml"),
+            "packages:\n# workspace packages\n\n  - 'packages/*' # workspace packages\n",
+        )?;
+        fs::write(package_dir.join("package.json"), r#"{"name":"lib"}"#)?;
+        fs::write(
+            example_dir.join("package.json"),
+            r#"{"packageManager":"bun@1.0.0"}"#,
+        )?;
+
+        let output = doctor(dir.path())?;
+
+        assert!(!output.contains("packages/lib: node_modules/"));
+        assert!(output.contains(
+            "examples/api: node_modules/ is generated dependency cache; run `bun install`"
+        ));
+        Ok(())
+    }
+
+    #[test]
+    fn doctor_does_not_apply_pnpm_workspace_to_npm_root() -> Result<(), Box<dyn std::error::Error>>
+    {
+        let dir = tempfile::tempdir()?;
+        let package_dir = dir.path().join("packages").join("lib");
+        fs::create_dir_all(&package_dir)?;
+        fs::write(
+            dir.path().join("pnpm-workspace.yaml"),
+            "packages:\n  - 'packages/*'\n",
+        )?;
+        fs::write(
+            dir.path().join("package.json"),
+            r#"{"packageManager":"npm@10.0.0"}"#,
+        )?;
+        fs::write(
+            package_dir.join("package.json"),
+            r#"{"packageManager":"bun@1.0.0"}"#,
+        )?;
+
+        let output = doctor(dir.path())?;
+
+        assert!(output.contains(
+            "packages/lib: node_modules/ is generated dependency cache; run `bun install`"
+        ));
+        Ok(())
+    }
+
+    #[test]
+    fn doctor_parses_inline_pnpm_workspace_packages() -> Result<(), Box<dyn std::error::Error>> {
+        let dir = tempfile::tempdir()?;
+        let package_dir = dir.path().join("packages").join("lib");
+        fs::create_dir_all(&package_dir)?;
+        fs::write(
+            dir.path().join("pnpm-workspace.yaml"),
+            "packages: ['packages/*'] # workspace packages\n",
+        )?;
+        fs::write(package_dir.join("package.json"), r#"{"name":"lib"}"#)?;
+
+        let output = doctor(dir.path())?;
+
+        assert!(
+            output.contains("- .: node_modules/ is generated dependency cache; run `pnpm install`")
+        );
+        assert!(!output.contains("packages/lib: node_modules/"));
+        Ok(())
+    }
+
+    #[test]
+    fn doctor_honors_pnpm_workspace_exclusions() -> Result<(), Box<dyn std::error::Error>> {
+        let dir = tempfile::tempdir()?;
+        let test_dir = dir
+            .path()
+            .join("components")
+            .join("lib")
+            .join("test")
+            .join("api");
+        fs::create_dir_all(&test_dir)?;
+        fs::write(
+            dir.path().join("pnpm-workspace.yaml"),
+            "packages:\n  - 'components/**'\n  - '!**/test/**'\n",
+        )?;
+        fs::write(
+            test_dir.join("package.json"),
+            r#"{"packageManager":"bun@1.0.0"}"#,
+        )?;
+
+        let output = doctor(dir.path())?;
+
+        assert!(output.contains("components/lib/test/api: node_modules/ is generated dependency cache; run `bun install`"));
+        Ok(())
+    }
+
+    #[test]
+    fn doctor_handles_bare_workspace_wildcard() -> Result<(), Box<dyn std::error::Error>> {
+        let dir = tempfile::tempdir()?;
+        let app_dir = dir.path().join("app");
+        fs::create_dir_all(&app_dir)?;
+        fs::write(
+            dir.path().join("package.json"),
+            r#"{"packageManager":"npm@10.0.0","workspaces":["*"]}"#,
+        )?;
+        fs::write(app_dir.join("package.json"), r#"{"name":"app"}"#)?;
+
+        let output = doctor(dir.path())?;
+
+        assert!(
+            output.contains("- .: node_modules/ is generated dependency cache; run `npm install`")
+        );
+        assert!(!output.contains("app: node_modules/"));
+        Ok(())
+    }
+
+    #[test]
+    fn doctor_keeps_nested_manager_when_ancestor_is_only_tooling_monorepo(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let dir = tempfile::tempdir()?;
+        let app_dir = dir.path().join("apps").join("api");
+        fs::create_dir_all(&app_dir)?;
+        fs::write(dir.path().join("turbo.json"), "{}")?;
+        fs::write(
+            app_dir.join("package.json"),
+            r#"{"packageManager":"pnpm@9.0.0"}"#,
+        )?;
+
+        let output = doctor(dir.path())?;
+
+        assert!(output
+            .contains("apps/api: node_modules/ is generated dependency cache; run `pnpm install`"));
+        assert!(
+            !output.contains("- .: node_modules/ is generated dependency cache; run `npm install`")
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn doctor_omits_node_modules_generation_when_profile_disabled(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let dir = tempfile::tempdir()?;
+        let config_dir = dir.path().join(".fs2");
+        fs::create_dir_all(&config_dir)?;
+        fs::write(
+            config_dir.join("config.toml"),
+            "version = 1\n[profiles]\nnode = false\n",
+        )?;
+        fs::write(
+            dir.path().join("package.json"),
+            r#"{"packageManager":"pnpm@9.0.0"}"#,
+        )?;
+
+        let output = doctor(dir.path())?;
+
+        assert!(output.contains("dependencies:"));
+        assert!(!output.contains("node_modules/ is generated dependency cache"));
         Ok(())
     }
 
