@@ -19,9 +19,12 @@ use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
 use bytes::Bytes;
 use chrono::Utc;
 use fs2_core::{
-    names_collide, CasePolicy, Cursor, DeviceId, EnvScope, EnvVarId, EnvVarMetadata, FsRule, Node,
-    NodeId, NodeKind, NodeName, NodeRevision, OpId, Operation, OperationKind, RevisionContent,
-    RevisionId, UserId, WorkspaceId, WorkspacePath,
+    names_collide, BlobStatusResponse, CasePolicy, CommitOperationRequest, CommitOperationResponse,
+    CommittedOperation, Cursor, DevBlobDownloadRequest, DevBlobDownloadResponse,
+    DevBlobUploadRequest, DevBlobUploadResponse, DeviceId, EnvScope, EnvVarId, EnvVarMetadata,
+    FetchOpsResponse, FsRule, ManifestEntry, ManifestResponse, Node, NodeId, NodeKind, NodeName,
+    NodeRevision, OpId, Operation, OperationKind, RevisionContent, RevisionId, UserId,
+    WorkspaceEvent, WorkspaceId, WorkspacePath,
 };
 use fs2_core::{ErrorEnvelope, Fs2Error};
 use hmac::{Hmac, Mac};
@@ -196,7 +199,7 @@ fn parse_config_bool(value: Option<&str>, key: &str) -> Result<bool, ConfigError
 pub struct RedactedSecret(String);
 
 impl RedactedSecret {
-    fn new(value: String) -> Result<Self, ConfigError> {
+    pub fn new(value: String) -> Result<Self, ConfigError> {
         if value.is_empty() {
             return Err(ConfigError::Secret("secret must not be empty".to_owned()));
         }
@@ -844,44 +847,6 @@ pub struct WorkspaceListResponse {
     pub workspaces: Vec<WorkspaceSummary>,
 }
 
-/// An operation committed to the workspace log with its assigned cursor.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct CommittedOperation {
-    pub operation: Operation,
-    pub cursor: Cursor,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "type", rename_all = "snake_case")]
-pub enum WorkspaceEvent {
-    WorkspaceOpsAvailable {
-        workspace_id: WorkspaceId,
-        from_cursor: Cursor,
-        to_cursor: Cursor,
-    },
-}
-
-#[derive(Debug, Deserialize)]
-pub struct CommitOperationRequest {
-    pub op_id: OpId,
-    pub base_cursor: Cursor,
-    pub kind: OperationKind,
-    #[serde(default = "default_operation_created_at")]
-    pub created_at: chrono::DateTime<Utc>,
-}
-
-fn default_operation_created_at() -> chrono::DateTime<Utc> {
-    Utc::now()
-}
-
-#[derive(Debug, Serialize, Deserialize)]
-pub struct CommitOperationResponse {
-    pub workspace_id: WorkspaceId,
-    pub op_id: OpId,
-    pub cursor: Cursor,
-    pub committed: CommittedOperation,
-}
-
 #[derive(Debug, Deserialize)]
 pub struct FetchOpsQuery {
     #[serde(default)]
@@ -900,66 +865,6 @@ pub struct ManifestQuery {
     pub limit: Option<u32>,
     #[serde(default)]
     pub offset: Option<usize>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ManifestEntry {
-    pub path: String,
-    pub depth: u32,
-    pub node: Node,
-    pub current_revision: Option<NodeRevision>,
-}
-
-#[derive(Debug, Serialize, Deserialize)]
-pub struct ManifestResponse {
-    pub workspace_id: WorkspaceId,
-    pub nodes: Vec<ManifestEntry>,
-    pub has_more: bool,
-    pub next_offset: Option<usize>,
-}
-
-#[derive(Debug, Serialize, Deserialize)]
-pub struct FetchOpsResponse {
-    pub workspace_id: WorkspaceId,
-    pub operations: Vec<CommittedOperation>,
-    pub has_more: bool,
-    pub next_cursor: Option<Cursor>,
-}
-
-#[derive(Debug, Deserialize)]
-pub struct DevBlobUploadRequest {
-    pub blob_id: String,
-    pub workspace_id: WorkspaceId,
-    pub bytes_base64: String,
-    pub size: u64,
-    pub encryption_header: Option<String>,
-}
-
-#[derive(Debug, Serialize, Deserialize)]
-pub struct DevBlobUploadResponse {
-    pub blob_id: String,
-    pub size: u64,
-}
-
-#[derive(Debug, Deserialize)]
-pub struct DevBlobDownloadRequest {
-    pub blob_id: String,
-}
-
-#[derive(Debug, Serialize, Deserialize)]
-pub struct DevBlobDownloadResponse {
-    pub blob_id: String,
-    pub bytes_base64: String,
-    pub size: u64,
-    pub encryption_header: Option<String>,
-}
-
-#[derive(Debug, Serialize, Deserialize)]
-pub struct BlobStatusResponse {
-    pub blob_id: String,
-    pub exists: bool,
-    pub size: Option<u64>,
-    pub encryption_header: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -341,6 +341,111 @@ impl Operation {
     }
 }
 
+/// An operation committed to the workspace log with its assigned cursor.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CommittedOperation {
+    pub operation: Operation,
+    pub cursor: Cursor,
+}
+
+/// Backend event telling clients that new workspace operations are available.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum WorkspaceEvent {
+    WorkspaceOpsAvailable {
+        workspace_id: WorkspaceId,
+        from_cursor: Cursor,
+        to_cursor: Cursor,
+    },
+}
+
+/// Request body for submitting a client operation to the backend.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CommitOperationRequest {
+    pub op_id: OpId,
+    pub base_cursor: Cursor,
+    pub kind: OperationKind,
+    #[serde(default = "default_operation_created_at")]
+    pub created_at: DateTime<Utc>,
+}
+
+fn default_operation_created_at() -> DateTime<Utc> {
+    Utc::now()
+}
+
+/// Response returned after an operation is durably assigned a cursor.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CommitOperationResponse {
+    pub workspace_id: WorkspaceId,
+    pub op_id: OpId,
+    pub cursor: Cursor,
+    pub committed: CommittedOperation,
+}
+
+/// One node in a paged workspace manifest response.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ManifestEntry {
+    pub path: String,
+    pub depth: u32,
+    pub node: Node,
+    pub current_revision: Option<NodeRevision>,
+}
+
+/// Paged workspace manifest response.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ManifestResponse {
+    pub workspace_id: WorkspaceId,
+    pub nodes: Vec<ManifestEntry>,
+    pub has_more: bool,
+    pub next_offset: Option<usize>,
+}
+
+/// Paged operation log response.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FetchOpsResponse {
+    pub workspace_id: WorkspaceId,
+    pub operations: Vec<CommittedOperation>,
+    pub has_more: bool,
+    pub next_cursor: Option<Cursor>,
+}
+
+/// Development direct-upload blob request used before presigned storage is wired.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DevBlobUploadRequest {
+    pub blob_id: String,
+    pub workspace_id: WorkspaceId,
+    pub bytes_base64: String,
+    pub size: u64,
+    pub encryption_header: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DevBlobUploadResponse {
+    pub blob_id: String,
+    pub size: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DevBlobDownloadRequest {
+    pub blob_id: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DevBlobDownloadResponse {
+    pub blob_id: String,
+    pub bytes_base64: String,
+    pub size: u64,
+    pub encryption_header: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BlobStatusResponse {
+    pub blob_id: String,
+    pub exists: bool,
+    pub size: Option<u64>,
+    pub encryption_header: Option<String>,
+}
+
 /// Operation variants in the canonical operation log.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]

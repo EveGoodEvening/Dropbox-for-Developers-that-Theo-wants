@@ -660,9 +660,21 @@ dependencies = [
 name = "fs2-sync"
 version = "0.1.0"
 dependencies = [
+ "axum",
+ "base64 0.22.1",
+ "chrono",
+ "fs2-backend",
  "fs2-core",
  "fs2-crypto",
+ "fs2-daemon",
  "fs2-rules",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tempfile",
+ "tokio",
+ "tungstenite",
+ "url",
 ]
 
 [[package]]

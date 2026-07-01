@@ -691,18 +691,18 @@ Acceptance criteria:
 
 ### 11.1 Implement API client
 
-- [ ] Authenticated request middleware.
-- [ ] Retry with exponential backoff.
-- [ ] Structured error parsing.
-- [ ] Operation submit.
-- [ ] Operation fetch.
-- [ ] Manifest fetch.
-- [ ] Blob upload/download.
-- [ ] WebSocket event listener.
+- [x] Authenticated request middleware.
+- [x] Retry with exponential backoff.
+- [x] Structured error parsing.
+- [x] Operation submit.
+- [x] Operation fetch.
+- [x] Manifest fetch.
+- [x] Blob upload/download.
+- [x] WebSocket event listener.
 
 Acceptance criteria:
 
-- [ ] API client can replay operations from backend in integration tests.
+- [x] API client can replay operations from backend in integration tests.
 
 ### 11.2 Implement outbound queue
 
