@@ -457,6 +457,7 @@ fn validate_blob_key(key: &str) -> Result<(), BlobStoreError> {
 #[derive(Debug, Clone)]
 pub struct AppState {
     jwt_secret: RedactedSecret,
+    session_secret: RedactedSecret,
     dev_user_id: UserId,
     devices: Arc<RwLock<HashMap<DeviceId, DeviceRecord>>>,
     blob_store: Arc<dyn BlobStore>,
@@ -487,7 +488,8 @@ impl AppState {
     pub fn dev_with_blob_store(jwt_secret: RedactedSecret, blob_store: Arc<dyn BlobStore>) -> Self {
         let (event_tx, _event_rx) = broadcast::channel(1024);
         Self {
-            jwt_secret,
+            jwt_secret: jwt_secret.clone(),
+            session_secret: jwt_secret,
             dev_user_id: UserId::new_v4(),
             devices: Arc::new(RwLock::new(HashMap::new())),
             blob_store,
@@ -506,10 +508,12 @@ impl AppState {
     /// fs2 migrations applied.
     pub fn dev_with_blob_store_and_database(
         jwt_secret: RedactedSecret,
+        session_secret: RedactedSecret,
         blob_store: Arc<dyn BlobStore>,
         database: sqlx::PgPool,
     ) -> Self {
         let mut state = Self::dev_with_blob_store(jwt_secret, blob_store);
+        state.session_secret = session_secret;
         state.database = Some(database);
         state
     }
@@ -733,6 +737,7 @@ pub struct DevLoginRequest {
 #[derive(Debug, Serialize, Deserialize)]
 pub struct DevLoginResponse {
     pub access_token: String,
+    pub refresh_token: String,
     pub token_type: String,
     pub user_id: UserId,
     pub device_id: DeviceId,
@@ -1127,7 +1132,12 @@ pub async fn serve(
     let listener = TcpListener::bind(config.bind_addr).await?;
     info!(bind_addr = %config.bind_addr, "fs2-backend listening");
     let blob_store = blob_store_for_config(&config.object_store).map_err(std::io::Error::other)?;
-    let state = AppState::dev_with_blob_store_and_database(config.jwt_secret, blob_store, pool);
+    let state = AppState::dev_with_blob_store_and_database(
+        config.jwt_secret,
+        config.session_secret,
+        blob_store,
+        pool,
+    );
     axum::serve(listener, app_with_state(state))
         .with_graceful_shutdown(shutdown)
         .await
@@ -1162,8 +1172,11 @@ async fn dev_login(
         .await
         .insert(device.device_id, device.clone());
     let access_token = encode_access_token(device.user_id, device.device_id, &state.jwt_secret)?;
+    let refresh_token =
+        encode_access_token(device.user_id, device.device_id, &state.session_secret)?;
     Ok(Json(DevLoginResponse {
         access_token,
+        refresh_token,
         token_type: "Bearer".to_owned(),
         user_id: device.user_id,
         device_id: device.device_id,
@@ -2958,6 +2971,7 @@ mod tests {
             .await
             .map_err(|error| std::io::Error::other(error.to_string()))?;
         let state = AppState::dev_with_blob_store_and_database(
+            RedactedSecret::new(DEFAULT_DEV_SECRET.to_owned())?,
             RedactedSecret::new(DEFAULT_DEV_SECRET.to_owned())?,
             Arc::new(LocalFilesystemBlobStore::new(
                 object_dir.path().to_path_buf(),

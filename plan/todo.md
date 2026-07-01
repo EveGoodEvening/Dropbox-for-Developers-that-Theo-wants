@@ -644,16 +644,16 @@ Acceptance criteria:
 
 ### 10.1 Implement config and login commands
 
-- [ ] `fs2 login --backend <url>`.
-- [ ] Store backend URL.
-- [ ] Store access/refresh token in keychain.
-- [ ] Register device during login.
-- [ ] `fs2 logout` clears local tokens.
-- [ ] `fs2 device list` calls backend.
+- [x] `fs2 login --backend <url>`.
+- [x] Store backend URL.
+- [x] Store access/refresh token in keychain.
+- [x] Register device during login.
+- [x] `fs2 logout` clears local tokens.
+- [x] `fs2 device list` calls backend.
 
 Acceptance criteria:
 
-- [ ] Developer can login against local backend and see current device.
+- [x] Developer can login against local backend and see current device.
 
 ### 10.2 Workspace commands
 

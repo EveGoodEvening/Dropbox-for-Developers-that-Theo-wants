@@ -572,6 +572,7 @@ dependencies = [
  "fs2-git",
  "fs2-rules",
  "globset",
+ "keyring",
  "serde",
  "serde_json",
  "serde_yaml",

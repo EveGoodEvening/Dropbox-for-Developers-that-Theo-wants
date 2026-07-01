@@ -21,18 +21,56 @@ fn main() {
     }
 }
 
+const CLI_CONFIG_ENV: &str = "FS2_CONFIG_HOME";
+const CLI_KEYCHAIN_SERVICE: &str = "fs2-devsync.cli-token.v1";
+const CLI_TOKEN_ACCOUNT: &str = "default";
+const CLI_REFRESH_TOKEN_ACCOUNT: &str = "default-refresh";
+
 fn run_from_args(args: impl IntoIterator<Item = String>) -> Result<String, String> {
+    let args = args.into_iter().collect::<Vec<_>>();
+    let credentials = SystemCredentialStore;
+    let needs_config = matches!(
+        args.as_slice(),
+        [cmd, ..] if cmd == "login" || cmd == "logout" || cmd == "device"
+    );
+    let config_path = if needs_config {
+        default_cli_config_path()?
+    } else {
+        PathBuf::new()
+    };
+    run_from_args_with_context(args, &credentials, &config_path)
+}
+
+fn run_from_args_with_context(
+    args: impl IntoIterator<Item = String>,
+    credentials: &dyn CredentialStore,
+    config_path: &Path,
+) -> Result<String, String> {
     let args = args.into_iter().collect::<Vec<_>>();
     match args.as_slice() {
         [] => Ok(help()),
         [one] if one == "--help" || one == "-h" => Ok(help()),
-        [cmd, flag, backend] if cmd == "login" && flag == "--backend" => {
-            dev_login(backend, "fs2-dev-cli", "dev-cli-public-key")
-        }
+        [cmd, flag, backend] if cmd == "login" && flag == "--backend" => dev_login(
+            backend,
+            "fs2-dev-cli",
+            "dev-cli-public-key",
+            credentials,
+            config_path,
+        ),
         [cmd, flag, backend, name_flag, device_name]
             if cmd == "login" && flag == "--backend" && name_flag == "--device-name" =>
         {
-            dev_login(backend, device_name, "dev-cli-public-key")
+            dev_login(
+                backend,
+                device_name,
+                "dev-cli-public-key",
+                credentials,
+                config_path,
+            )
+        }
+        [cmd] if cmd == "logout" => logout(credentials, config_path),
+        [cmd, subcmd] if cmd == "device" && subcmd == "list" => {
+            device_list(credentials, config_path)
         }
         [cmd] if cmd == "status" => status_text("."),
         [cmd, flag] if cmd == "status" && flag == "--json" => status_json("."),
@@ -59,20 +97,110 @@ fn run_from_args(args: impl IntoIterator<Item = String>) -> Result<String, Strin
 }
 
 fn help() -> String {
-    "fs2-devsync CLI\n\nCommands:\n  fs2 login --backend <url> [--device-name <name>]\n  fs2 status [--json]\n  fs2 doctor [path]\n  fs2 git status [path]\n  fs2 git submodules status [path]\n"
+    "fs2-devsync CLI\n\nCommands:\n  fs2 login --backend <url> [--device-name <name>]\n  fs2 logout\n  fs2 device list\n  fs2 status [--json]\n  fs2 doctor [path]\n  fs2 git status [path]\n  fs2 git submodules status [path]\n"
         .to_owned()
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct CliConfig {
+    backend_url: String,
+    user_id: String,
+    device_id: String,
+    device_name: String,
+    token_type: String,
 }
 
 #[derive(Debug, Deserialize)]
 struct DevLoginResponse {
     access_token: String,
+    refresh_token: String,
     token_type: String,
     user_id: String,
     device_id: String,
     warning: String,
 }
 
-fn dev_login(backend: &str, device_name: &str, public_key: &str) -> Result<String, String> {
+#[derive(Debug, Deserialize)]
+struct DeviceListResponse {
+    devices: Vec<CliDeviceRecord>,
+}
+
+#[derive(Debug, Deserialize)]
+struct CliDeviceRecord {
+    device_id: String,
+    name: String,
+    #[serde(default)]
+    revoked: bool,
+}
+
+trait CredentialStore {
+    fn set_access_token(&self, token: &str) -> Result<(), String>;
+    fn set_refresh_token(&self, token: &str) -> Result<(), String>;
+    fn get_access_token(&self) -> Result<Option<String>, String>;
+    fn delete_tokens(&self) -> Result<(), String>;
+}
+
+#[derive(Debug)]
+struct SystemCredentialStore;
+
+impl CredentialStore for SystemCredentialStore {
+    fn set_access_token(&self, token: &str) -> Result<(), String> {
+        set_keychain_token(CLI_TOKEN_ACCOUNT, token, "access")
+    }
+
+    fn set_refresh_token(&self, token: &str) -> Result<(), String> {
+        set_keychain_token(CLI_REFRESH_TOKEN_ACCOUNT, token, "refresh")
+    }
+
+    fn get_access_token(&self) -> Result<Option<String>, String> {
+        get_keychain_token(CLI_TOKEN_ACCOUNT, "access")
+    }
+
+    fn delete_tokens(&self) -> Result<(), String> {
+        delete_keychain_token(CLI_TOKEN_ACCOUNT, "access")?;
+        delete_keychain_token(CLI_REFRESH_TOKEN_ACCOUNT, "refresh")
+    }
+}
+
+fn set_keychain_token(account: &str, token: &str, label: &str) -> Result<(), String> {
+    keyring::Entry::new(CLI_KEYCHAIN_SERVICE, account)
+        .map_err(|error| format!("could not open OS keychain: {error}"))?
+        .set_password(token)
+        .map_err(|error| format!("could not store {label} token in OS keychain: {error}"))
+}
+
+fn get_keychain_token(account: &str, label: &str) -> Result<Option<String>, String> {
+    match keyring::Entry::new(CLI_KEYCHAIN_SERVICE, account)
+        .map_err(|error| format!("could not open OS keychain: {error}"))?
+        .get_password()
+    {
+        Ok(token) => Ok(Some(token)),
+        Err(keyring::Error::NoEntry) => Ok(None),
+        Err(error) => Err(format!(
+            "could not read {label} token from OS keychain: {error}"
+        )),
+    }
+}
+
+fn delete_keychain_token(account: &str, label: &str) -> Result<(), String> {
+    match keyring::Entry::new(CLI_KEYCHAIN_SERVICE, account)
+        .map_err(|error| format!("could not open OS keychain: {error}"))?
+        .delete_credential()
+    {
+        Ok(()) | Err(keyring::Error::NoEntry) => Ok(()),
+        Err(error) => Err(format!(
+            "could not delete {label} token from OS keychain: {error}"
+        )),
+    }
+}
+
+fn dev_login(
+    backend: &str,
+    device_name: &str,
+    public_key: &str,
+    credentials: &dyn CredentialStore,
+    config_path: &Path,
+) -> Result<String, String> {
     let (host, port, path) = parse_http_url(backend, "/v1/auth/dev-login")?;
     let body = serde_json::json!({
         "device_name": device_name,
@@ -80,9 +208,27 @@ fn dev_login(backend: &str, device_name: &str, public_key: &str) -> Result<Strin
         "public_key": public_key,
     })
     .to_string();
-    let response = post_json(&host, port, &path, &body)?;
+    let response = request_json("POST", &host, port, &path, Some(&body), None)?;
     let login = serde_json::from_str::<DevLoginResponse>(&response)
         .map_err(|error| format!("login response was not valid JSON: {error}"))?;
+    let config = CliConfig {
+        backend_url: backend.to_owned(),
+        user_id: login.user_id.clone(),
+        device_id: login.device_id.clone(),
+        device_name: device_name.to_owned(),
+        token_type: login.token_type.clone(),
+    };
+    save_cli_config(config_path, &config)?;
+    if let Err(error) = credentials.set_access_token(&login.access_token) {
+        let _ = credentials.delete_tokens();
+        let _ = fs::remove_file(config_path);
+        return Err(error);
+    }
+    if let Err(error) = credentials.set_refresh_token(&login.refresh_token) {
+        let _ = credentials.delete_tokens();
+        let _ = fs::remove_file(config_path);
+        return Err(error);
+    }
     let mut out = String::new();
     writeln!(out, "Logged in to {backend}").map_err(|error| error.to_string())?;
     writeln!(out, "  user: {}", login.user_id).map_err(|error| error.to_string())?;
@@ -96,6 +242,72 @@ fn dev_login(backend: &str, device_name: &str, public_key: &str) -> Result<Strin
     .map_err(|error| error.to_string())?;
     writeln!(out, "  warning: {}", login.warning).map_err(|error| error.to_string())?;
     Ok(out)
+}
+
+fn logout(credentials: &dyn CredentialStore, config_path: &Path) -> Result<String, String> {
+    credentials.delete_tokens()?;
+    if config_path.exists() {
+        fs::remove_file(config_path)
+            .map_err(|error| format!("could not remove {}: {error}", config_path.display()))?;
+    }
+    Ok("Logged out\n".to_owned())
+}
+
+fn device_list(credentials: &dyn CredentialStore, config_path: &Path) -> Result<String, String> {
+    let config = load_cli_config(config_path)?;
+    let token = credentials
+        .get_access_token()?
+        .ok_or("not logged in; run `fs2 login --backend <url>`")?;
+    let (host, port, path) = parse_http_url(&config.backend_url, "/v1/devices")?;
+    let response = request_json("GET", &host, port, &path, None, Some(&token))?;
+    let devices = serde_json::from_str::<DeviceListResponse>(&response)
+        .map_err(|error| format!("device list response was not valid JSON: {error}"))?;
+    let mut out = String::new();
+    writeln!(out, "Devices:").map_err(|error| error.to_string())?;
+    for device in devices.devices {
+        let marker = if device.device_id == config.device_id {
+            " (current)"
+        } else {
+            ""
+        };
+        let revoked = if device.revoked { " revoked" } else { "" };
+        writeln!(
+            out,
+            "  - {} {}{}{}",
+            device.device_id, device.name, marker, revoked
+        )
+        .map_err(|error| error.to_string())?;
+    }
+    Ok(out)
+}
+
+fn default_cli_config_path() -> Result<PathBuf, String> {
+    if let Ok(root) = env::var(CLI_CONFIG_ENV) {
+        return Ok(PathBuf::from(root).join("config.json"));
+    }
+    if let Ok(root) = env::var("XDG_CONFIG_HOME") {
+        return Ok(PathBuf::from(root).join("fs2").join("config.json"));
+    }
+    let home = env::var("HOME").map_err(|_| "HOME is not set; cannot locate fs2 config")?;
+    Ok(PathBuf::from(home)
+        .join(".config")
+        .join("fs2")
+        .join("config.json"))
+}
+
+fn save_cli_config(path: &Path, config: &CliConfig) -> Result<(), String> {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)
+            .map_err(|error| format!("could not create {}: {error}", parent.display()))?;
+    }
+    let bytes = serde_json::to_vec_pretty(config).map_err(|error| error.to_string())?;
+    fs::write(path, bytes).map_err(|error| format!("could not write {}: {error}", path.display()))
+}
+
+fn load_cli_config(path: &Path) -> Result<CliConfig, String> {
+    let bytes =
+        fs::read(path).map_err(|_| "not logged in; run `fs2 login --backend <url>`".to_owned())?;
+    serde_json::from_slice(&bytes).map_err(|error| format!("invalid {}: {error}", path.display()))
 }
 
 fn parse_http_url(backend: &str, endpoint: &str) -> Result<(String, u16, String), String> {
@@ -123,24 +335,41 @@ fn parse_http_url(backend: &str, endpoint: &str) -> Result<(String, u16, String)
     Ok((host.to_owned(), port, path))
 }
 
-fn post_json(host: &str, port: u16, path: &str, body: &str) -> Result<String, String> {
-    let mut stream = TcpStream::connect((host, port))
-        .map_err(|error| format!("login request failed: {error}"))?;
+fn request_json(
+    method: &str,
+    host: &str,
+    port: u16,
+    path: &str,
+    body: Option<&str>,
+    bearer_token: Option<&str>,
+) -> Result<String, String> {
+    let mut stream =
+        TcpStream::connect((host, port)).map_err(|error| format!("request failed: {error}"))?;
+    let body = body.unwrap_or("");
     write!(
         stream,
-        "POST {path} HTTP/1.1\r\nHost: {host}:{port}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+        "{method} {path} HTTP/1.1\r\nHost: {host}:{port}\r\nAccept: application/json\r\nContent-Length: {}\r\nConnection: close\r\n",
         body.len()
     )
-    .map_err(|error| format!("login request failed: {error}"))?;
+    .map_err(|error| format!("request failed: {error}"))?;
+    if !body.is_empty() {
+        write!(stream, "Content-Type: application/json\r\n")
+            .map_err(|error| format!("request failed: {error}"))?;
+    }
+    if let Some(token) = bearer_token {
+        write!(stream, "Authorization: Bearer {token}\r\n")
+            .map_err(|error| format!("request failed: {error}"))?;
+    }
+    write!(stream, "\r\n{body}").map_err(|error| format!("request failed: {error}"))?;
     let mut response = String::new();
     stream
         .read_to_string(&mut response)
-        .map_err(|error| format!("login response failed: {error}"))?;
+        .map_err(|error| format!("response failed: {error}"))?;
     let (head, body) = response
         .split_once("\r\n\r\n")
-        .ok_or("login response was not valid HTTP")?;
-    if !head.starts_with("HTTP/1.1 200") {
-        return Err(format!("login request failed: {head}"));
+        .ok_or("response was not valid HTTP")?;
+    if !head.starts_with("HTTP/1.1 2") && !head.starts_with("HTTP/1.0 2") {
+        return Err(format!("request failed: {head}"));
     }
     Ok(body.to_owned())
 }
@@ -950,6 +1179,296 @@ fn git_submodules_status(path: impl AsRef<Path>) -> Result<String, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::{net::TcpListener, sync::Mutex, thread};
+
+    #[derive(Debug, Default)]
+    struct FakeCredentialStore {
+        access_token: Mutex<Option<String>>,
+        refresh_token: Mutex<Option<String>>,
+    }
+
+    impl CredentialStore for FakeCredentialStore {
+        fn set_access_token(&self, token: &str) -> Result<(), String> {
+            *self
+                .access_token
+                .lock()
+                .map_err(|error| error.to_string())? = Some(token.to_owned());
+            Ok(())
+        }
+
+        fn set_refresh_token(&self, token: &str) -> Result<(), String> {
+            *self
+                .refresh_token
+                .lock()
+                .map_err(|error| error.to_string())? = Some(token.to_owned());
+            Ok(())
+        }
+
+        fn get_access_token(&self) -> Result<Option<String>, String> {
+            self.access_token
+                .lock()
+                .map(|token| token.clone())
+                .map_err(|error| error.to_string())
+        }
+
+        fn delete_tokens(&self) -> Result<(), String> {
+            *self
+                .access_token
+                .lock()
+                .map_err(|error| error.to_string())? = None;
+            *self
+                .refresh_token
+                .lock()
+                .map_err(|error| error.to_string())? = None;
+            Ok(())
+        }
+    }
+
+    impl FakeCredentialStore {
+        fn get_refresh_token(&self) -> Result<Option<String>, String> {
+            self.refresh_token
+                .lock()
+                .map(|token| token.clone())
+                .map_err(|error| error.to_string())
+        }
+    }
+
+    #[derive(Debug, Default)]
+    struct FailingAccessCredentialStore {
+        inner: FakeCredentialStore,
+    }
+
+    impl CredentialStore for FailingAccessCredentialStore {
+        fn set_access_token(&self, _token: &str) -> Result<(), String> {
+            Err("access token write failed".to_owned())
+        }
+
+        fn set_refresh_token(&self, token: &str) -> Result<(), String> {
+            self.inner.set_refresh_token(token)
+        }
+
+        fn get_access_token(&self) -> Result<Option<String>, String> {
+            self.inner.get_access_token()
+        }
+
+        fn delete_tokens(&self) -> Result<(), String> {
+            self.inner.delete_tokens()
+        }
+    }
+
+    impl FailingAccessCredentialStore {
+        fn get_refresh_token(&self) -> Result<Option<String>, String> {
+            self.inner.get_refresh_token()
+        }
+    }
+
+    fn serve_json_once(
+        body: &'static str,
+    ) -> Result<(String, thread::JoinHandle<Result<String, std::io::Error>>), std::io::Error> {
+        let listener = TcpListener::bind("127.0.0.1:0")?;
+        let url = format!("http://{}", listener.local_addr()?);
+        let handle = thread::spawn(move || {
+            let (mut stream, _) = listener.accept()?;
+            let mut request_bytes = Vec::new();
+            loop {
+                let mut buffer = [0_u8; 1024];
+                let read = stream.read(&mut buffer)?;
+                if read == 0 {
+                    break;
+                }
+                request_bytes.extend_from_slice(&buffer[..read]);
+                let Some(header_end) = request_bytes
+                    .windows(4)
+                    .position(|window| window == b"\r\n\r\n")
+                else {
+                    continue;
+                };
+                let headers = String::from_utf8_lossy(&request_bytes[..header_end]);
+                let content_length = headers
+                    .lines()
+                    .find_map(|line| line.strip_prefix("Content-Length: "))
+                    .and_then(|value| value.parse::<usize>().ok())
+                    .unwrap_or(0);
+                if request_bytes.len() >= header_end + 4 + content_length {
+                    break;
+                }
+            }
+            let request_text = String::from_utf8_lossy(&request_bytes).into_owned();
+            write!(
+                stream,
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                body.len(),
+                body
+            )?;
+            Ok(request_text)
+        });
+        Ok((url, handle))
+    }
+
+    #[test]
+    fn login_stores_config_and_redacts_token() -> Result<(), Box<dyn std::error::Error>> {
+        let dir = tempfile::tempdir()?;
+        let config_path = dir.path().join("config.json");
+        let credentials = FakeCredentialStore::default();
+        let (backend, server) = serve_json_once(
+            r#"{"access_token":"super-secret-token","refresh_token":"refresh-secret-token","token_type":"Bearer","user_id":"user-1","device_id":"device-1","warning":"development-only auth"}"#,
+        )?;
+
+        let output = run_from_args_with_context(
+            [
+                "login".to_owned(),
+                "--backend".to_owned(),
+                backend.clone(),
+                "--device-name".to_owned(),
+                "laptop".to_owned(),
+            ],
+            &credentials,
+            &config_path,
+        )?;
+        let request = server
+            .join()
+            .map_err(|_| std::io::Error::other("server thread panicked"))??;
+
+        assert!(request.starts_with("POST /v1/auth/dev-login HTTP/1.1"));
+        assert!(request.contains("\"device_name\":\"laptop\""));
+        assert!(output.contains("Logged in to"));
+        assert!(output.contains("access token: <redacted:18 bytes>"));
+        assert!(!output.contains("super-secret-token"));
+        assert_eq!(
+            credentials.get_access_token()?.as_deref(),
+            Some("super-secret-token")
+        );
+        assert_eq!(
+            credentials.get_refresh_token()?.as_deref(),
+            Some("refresh-secret-token")
+        );
+        assert_eq!(
+            load_cli_config(&config_path)?,
+            CliConfig {
+                backend_url: backend,
+                user_id: "user-1".to_owned(),
+                device_id: "device-1".to_owned(),
+                device_name: "laptop".to_owned(),
+                token_type: "Bearer".to_owned(),
+            }
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn failed_config_write_leaves_no_tokens() -> Result<(), Box<dyn std::error::Error>> {
+        let dir = tempfile::tempdir()?;
+        let blocked_parent = dir.path().join("not-a-directory");
+        fs::write(&blocked_parent, "file blocks config directory")?;
+        let config_path = blocked_parent.join("config.json");
+        let credentials = FakeCredentialStore::default();
+        let (backend, server) = serve_json_once(
+            r#"{"access_token":"super-secret-token","refresh_token":"refresh-secret-token","token_type":"Bearer","user_id":"user-1","device_id":"device-1","warning":"development-only auth"}"#,
+        )?;
+
+        let result = run_from_args_with_context(
+            ["login".to_owned(), "--backend".to_owned(), backend],
+            &credentials,
+            &config_path,
+        );
+        let _request = server
+            .join()
+            .map_err(|_| std::io::Error::other("server thread panicked"))??;
+
+        assert!(result.is_err());
+        assert_eq!(credentials.get_access_token()?, None);
+        assert_eq!(credentials.get_refresh_token()?, None);
+        Ok(())
+    }
+
+    #[test]
+    fn failed_access_token_write_clears_existing_tokens() -> Result<(), Box<dyn std::error::Error>>
+    {
+        let dir = tempfile::tempdir()?;
+        let config_path = dir.path().join("config.json");
+        let credentials = FailingAccessCredentialStore::default();
+        credentials.inner.set_access_token("old-access")?;
+        credentials.inner.set_refresh_token("old-refresh")?;
+        let (backend, server) = serve_json_once(
+            r#"{"access_token":"super-secret-token","refresh_token":"refresh-secret-token","token_type":"Bearer","user_id":"user-1","device_id":"device-1","warning":"development-only auth"}"#,
+        )?;
+
+        let result = run_from_args_with_context(
+            ["login".to_owned(), "--backend".to_owned(), backend],
+            &credentials,
+            &config_path,
+        );
+        let _request = server
+            .join()
+            .map_err(|_| std::io::Error::other("server thread panicked"))??;
+
+        assert!(result.is_err());
+        assert_eq!(credentials.get_access_token()?, None);
+        assert_eq!(credentials.get_refresh_token()?, None);
+        assert!(!config_path.exists());
+        Ok(())
+    }
+
+    #[test]
+    fn device_list_uses_stored_bearer_token() -> Result<(), Box<dyn std::error::Error>> {
+        let dir = tempfile::tempdir()?;
+        let config_path = dir.path().join("config.json");
+        let credentials = FakeCredentialStore::default();
+        credentials.set_access_token("token-123")?;
+        let (backend, server) = serve_json_once(
+            r#"{"devices":[{"device_id":"device-1","user_id":"user-1","name":"laptop","platform":{},"public_key":"pk","revoked":false}]}"#,
+        )?;
+        save_cli_config(
+            &config_path,
+            &CliConfig {
+                backend_url: backend,
+                user_id: "user-1".to_owned(),
+                device_id: "device-1".to_owned(),
+                device_name: "laptop".to_owned(),
+                token_type: "Bearer".to_owned(),
+            },
+        )?;
+
+        let output = run_from_args_with_context(
+            ["device".to_owned(), "list".to_owned()],
+            &credentials,
+            &config_path,
+        )?;
+        let request = server
+            .join()
+            .map_err(|_| std::io::Error::other("server thread panicked"))??;
+
+        assert!(request.starts_with("GET /v1/devices HTTP/1.1"));
+        assert!(request.contains("Authorization: Bearer token-123"));
+        assert!(output.contains("device-1 laptop (current)"));
+        Ok(())
+    }
+
+    #[test]
+    fn logout_clears_token_and_config() -> Result<(), Box<dyn std::error::Error>> {
+        let dir = tempfile::tempdir()?;
+        let config_path = dir.path().join("config.json");
+        let credentials = FakeCredentialStore::default();
+        credentials.set_access_token("token-123")?;
+        save_cli_config(
+            &config_path,
+            &CliConfig {
+                backend_url: "http://127.0.0.1:3000".to_owned(),
+                user_id: "user-1".to_owned(),
+                device_id: "device-1".to_owned(),
+                device_name: "laptop".to_owned(),
+                token_type: "Bearer".to_owned(),
+            },
+        )?;
+
+        let output = run_from_args_with_context(["logout".to_owned()], &credentials, &config_path)?;
+
+        assert_eq!(output, "Logged out\n");
+        assert_eq!(credentials.get_access_token()?, None);
+        assert_eq!(credentials.get_refresh_token()?, None);
+        assert!(!config_path.exists());
+        Ok(())
+    }
 
     #[test]
     fn help_lists_status_and_git_status() -> Result<(), String> {
