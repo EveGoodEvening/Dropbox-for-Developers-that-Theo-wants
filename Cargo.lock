@@ -638,6 +638,9 @@ dependencies = [
 name = "fs2-fuse"
 version = "0.1.0"
 dependencies = [
+ "chrono",
+ "fs2-core",
+ "fs2-daemon",
  "fuser",
  "libc",
  "tempfile",

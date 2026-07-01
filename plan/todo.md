@@ -762,16 +762,16 @@ Acceptance criteria:
 
 ### 12.2 Metadata-backed directory listing
 
-- [ ] Resolve path to node.
-- [ ] Implement inode mapping for `NodeId`.
-- [ ] Implement `lookup`.
-- [ ] Implement `getattr` for files/directories/symlinks.
-- [ ] Implement `readdir` from local SQLite children.
-- [ ] Do not hydrate file content during listing.
+- [x] Resolve path to node.
+- [x] Implement inode mapping for `NodeId`.
+- [x] Implement `lookup`.
+- [x] Implement `getattr` for files/directories/symlinks.
+- [x] Implement `readdir` from local SQLite children.
+- [x] Do not hydrate file content during listing.
 
 Acceptance criteria:
 
-- [ ] A cold workspace tree can be browsed with `find` without downloading bytes, except where `find` stats file metadata only.
+- [x] A cold workspace tree can be browsed with `find` without downloading bytes, except where `find` stats file metadata only.
 
 ### 12.3 Read path with lazy hydration
 

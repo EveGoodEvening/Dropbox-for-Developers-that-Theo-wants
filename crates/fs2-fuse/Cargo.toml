@@ -7,6 +7,9 @@ license.workspace = true
 
 [dependencies]
 libc = "0.2"
+fs2-core = { path = "../fs2-core" }
+fs2-daemon = { path = "../fs2-daemon" }
+chrono = { version = "0.4", default-features = false, features = ["clock"] }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 fuser = { version = "0.14", default-features = false, features = ["abi-7-31"] }
