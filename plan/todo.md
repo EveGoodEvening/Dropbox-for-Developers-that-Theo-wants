@@ -843,13 +843,13 @@ Acceptance criteria:
 
 ### 13.4 chmod/executable bit
 
-- [ ] Implement `setattr` for mode changes.
-- [ ] Queue metadata revision or metadata op.
-- [ ] Preserve executable bit across machines.
+- [x] Implement `setattr` for mode changes.
+- [x] Queue metadata revision or metadata op.
+- [x] Preserve executable bit across machines.
 
 Acceptance criteria:
 
-- [ ] `chmod +x script.sh` on A is reflected on B.
+- [x] `chmod +x script.sh` on A is reflected on B.
 
 ### 13.5 Atomic editor save patterns
 

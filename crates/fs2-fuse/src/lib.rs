@@ -631,6 +631,96 @@ impl MetadataWorkspaceFs {
         Ok(bytes[start..end].to_vec())
     }
 
+    fn set_open_write_handle_mode(&mut self, node_id: NodeId, mode: u32) -> bool {
+        let posix_mode = regular_file_mode(mode);
+        let executable = posix_mode & 0o111 != 0;
+        let mut updated = false;
+        for write_handle in self.write_handles.values_mut() {
+            if write_handle.node_id == node_id {
+                write_handle.posix_mode = posix_mode;
+                write_handle.executable = executable;
+                updated = true;
+            }
+        }
+        updated
+    }
+
+    pub fn set_node_mode(&mut self, node_id: NodeId, mode: u32) -> std::io::Result<NodeRevision> {
+        let node = self
+            .store
+            .get_node_by_id(node_id)
+            .map_err(io_other)?
+            .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::NotFound, "node missing"))?;
+        if node.kind != NodeKind::File {
+            return Err(std::io::Error::from_raw_os_error(libc::ENOTSUP));
+        }
+        let base_revision_id = node.current_rev.ok_or_else(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "file has no current revision",
+            )
+        })?;
+        let base_revision = self
+            .store
+            .get_revision(base_revision_id)
+            .map_err(io_other)?
+            .ok_or_else(|| {
+                std::io::Error::new(std::io::ErrorKind::InvalidData, "base revision missing")
+            })?;
+        let now = chrono::Utc::now();
+        let posix_mode = regular_file_mode(mode);
+        let revision = NodeRevision {
+            revision_id: fs2_core::RevisionId::new_v4(),
+            node_id,
+            workspace_id: self.workspace_id,
+            device_id: self.device_id,
+            base_revision_id: Some(base_revision_id),
+            content: base_revision.content,
+            posix_mode,
+            mtime: base_revision.mtime,
+            size: base_revision.size,
+            executable: posix_mode & 0o111 != 0,
+            created_at: now,
+        };
+        let operation = Operation {
+            op_id: fs2_core::OpId::new_v4(),
+            workspace_id: self.workspace_id,
+            device_id: self.device_id,
+            base_cursor: self
+                .store
+                .last_cursor(self.workspace_id)
+                .map_err(io_other)?,
+            kind: OperationKind::PutFileRevision {
+                node_id,
+                base_revision_id: Some(base_revision_id),
+                revision: revision.clone(),
+            },
+            created_at: now,
+        };
+        self.store
+            .apply_local_pending_op(&operation)
+            .map_err(io_other)?;
+        for write_handle in self.write_handles.values_mut() {
+            if write_handle.node_id == node_id
+                && write_handle.base_revision_id == Some(base_revision_id)
+            {
+                write_handle.base_revision_id = Some(revision.revision_id);
+                write_handle.posix_mode = revision.posix_mode;
+                write_handle.executable = revision.executable;
+            }
+        }
+        if let Some(state) = self.store.node_state(node_id).map_err(io_other)? {
+            if state.hydration_state == HydrationState::Dirty {
+                if let Some(path) = state.local_blob_path {
+                    self.store
+                        .mark_node_dirty(node_id, &path, Some(base_revision_id), state.pinned)
+                        .map_err(io_other)?;
+                }
+            }
+        }
+        Ok(revision)
+    }
+
     fn ensure_file_bytes(&mut self, node: &Node) -> std::io::Result<Vec<u8>> {
         if let Some(state) = self.store.node_state(node.node_id).map_err(io_other)? {
             match state.hydration_state {
@@ -1153,8 +1243,7 @@ impl Filesystem for MetadataWorkspaceFs {
         flags: Option<u32>,
         reply: ReplyAttr,
     ) {
-        if mode.is_some()
-            || uid.is_some()
+        if uid.is_some()
             || gid.is_some()
             || atime.is_some()
             || mtime.is_some()
@@ -1165,6 +1254,45 @@ impl Filesystem for MetadataWorkspaceFs {
             || flags.is_some()
         {
             reply.error(libc::ENOTSUP);
+            return;
+        }
+        let Some(node_id) = self.inodes.node_for(ino) else {
+            reply.error(libc::ENOENT);
+            return;
+        };
+        if let Some(mode) = mode {
+            if size.is_some() {
+                reply.error(libc::ENOTSUP);
+                return;
+            }
+            let result = (|| {
+                let node = self
+                    .store
+                    .get_node_by_id(node_id)
+                    .map_err(io_other)?
+                    .ok_or_else(|| {
+                        std::io::Error::new(std::io::ErrorKind::NotFound, "node missing")
+                    })?;
+                if node.current_rev.is_none() && self.set_open_write_handle_mode(node_id, mode) {
+                    let mut attr = self.attr_for_node(&node, ino).map_err(io_other)?;
+                    attr.perm =
+                        u16::try_from(regular_file_mode(mode) & 0o7777).unwrap_or(attr.perm);
+                    return Ok(attr);
+                }
+                self.set_node_mode(node_id, mode)?;
+                let node = self
+                    .store
+                    .get_node_by_id(node_id)
+                    .map_err(io_other)?
+                    .ok_or_else(|| {
+                        std::io::Error::new(std::io::ErrorKind::NotFound, "node missing")
+                    })?;
+                self.attr_for_node(&node, ino).map_err(io_other)
+            })();
+            match result {
+                Ok(attr) => reply.attr(&TTL, &attr),
+                Err(error) => reply.error(io_error_code(&error)),
+            }
             return;
         }
         let Some(size) = size else {
@@ -1182,10 +1310,7 @@ impl Filesystem for MetadataWorkspaceFs {
             reply.error(libc::ENOTSUP);
             return;
         }
-        let Some(node_id) = self.inodes.node_for(ino) else {
-            reply.error(libc::ENOENT);
-            return;
-        };
+
         let result = if let Some(handle) = fh {
             self.truncate_write_handle(handle, size)
         } else {
@@ -1726,6 +1851,172 @@ mod tests {
         Ok(())
     }
 
+    #[test]
+    fn set_node_mode_queues_metadata_revision() -> Result<(), Box<dyn std::error::Error>> {
+        let (mut fs, ids) = metadata_fixture()?;
+
+        let revision = fs.set_node_mode(ids.file, 0o755)?;
+
+        assert_eq!(revision.posix_mode, 0o100_755);
+        assert!(revision.executable);
+        let node = fs
+            .store
+            .get_node_by_id(ids.file)?
+            .ok_or_else(|| "file missing after chmod".to_owned())?;
+        let inode = fs.inode_for_node(ids.file);
+        let attr = fs.attr_for_node(&node, inode)?;
+        assert_eq!(attr.perm, 0o755);
+        let pending = fs.store.list_pending_ops(ids.workspace)?;
+        assert_eq!(pending.len(), 1);
+        assert!(pending.iter().any(|pending| matches!(
+            &pending.operation.kind,
+            OperationKind::PutFileRevision {
+                node_id,
+                revision,
+                ..
+            } if *node_id == ids.file && revision.executable && revision.posix_mode == 0o100_755
+        )));
+        Ok(())
+    }
+
+    #[test]
+    fn set_node_mode_updates_open_write_handles() -> Result<(), Box<dyn std::error::Error>> {
+        let (fs, ids) = metadata_fixture()?;
+        let temp = tempfile::tempdir()?;
+        let mut fs = fs
+            .with_hydration(HydrationConfig {
+                client: ApiClient::new("http://127.0.0.1:1", "token")?,
+                content_key: WorkspaceContentKey::generate(),
+                cache_dir: temp.path().join("cache"),
+            })
+            .with_write_cache_dir(temp.path().join("writes"));
+        let handle = fs.begin_write_handle(ids.file, true, None)?;
+        fs.write_to_handle(handle, 0, b"updated")?;
+
+        let chmod_revision = fs.set_node_mode(ids.file, 0o644)?;
+        let write_revision = fs
+            .commit_write_handle(handle)?
+            .ok_or_else(|| "write handle did not commit".to_owned())?;
+
+        assert_eq!(
+            write_revision.base_revision_id,
+            Some(chmod_revision.revision_id)
+        );
+        assert_eq!(write_revision.posix_mode, 0o100_644);
+        assert!(!write_revision.executable);
+        Ok(())
+    }
+
+    #[test]
+    fn set_node_mode_does_not_rebase_stale_write_handles() -> Result<(), Box<dyn std::error::Error>>
+    {
+        let (fs, ids) = metadata_fixture()?;
+        let temp = tempfile::tempdir()?;
+        let mut fs = fs
+            .with_hydration(HydrationConfig {
+                client: ApiClient::new("http://127.0.0.1:1", "token")?,
+                content_key: WorkspaceContentKey::generate(),
+                cache_dir: temp.path().join("cache"),
+            })
+            .with_write_cache_dir(temp.path().join("writes"));
+        let original_revision_id = fs
+            .store
+            .get_node_by_id(ids.file)?
+            .ok_or_else(|| "file missing".to_owned())?
+            .current_rev
+            .ok_or_else(|| "file revision missing".to_owned())?;
+        let stale_handle = fs.begin_write_handle(ids.file, true, None)?;
+        let latest_handle = fs.begin_write_handle(ids.file, true, None)?;
+        fs.write_to_handle(latest_handle, 0, b"newer")?;
+        let latest_revision = fs
+            .commit_write_handle(latest_handle)?
+            .ok_or_else(|| "latest write did not commit".to_owned())?;
+
+        let chmod_revision = fs.set_node_mode(ids.file, 0o644)?;
+
+        let stale = fs
+            .write_handles
+            .get(&stale_handle)
+            .ok_or_else(|| "stale handle missing".to_owned())?;
+        assert_eq!(
+            chmod_revision.base_revision_id,
+            Some(latest_revision.revision_id)
+        );
+        assert_eq!(stale.base_revision_id, Some(original_revision_id));
+        assert_eq!(stale.posix_mode, 0o100_755);
+        assert!(stale.executable);
+        Ok(())
+    }
+
+    #[test]
+    fn open_handle_mode_sets_first_file_revision() -> Result<(), Box<dyn std::error::Error>> {
+        let (fs, ids) = metadata_fixture()?;
+        let temp = tempfile::tempdir()?;
+        let mut fs = fs
+            .with_hydration(HydrationConfig {
+                client: ApiClient::new("http://127.0.0.1:1", "token")?,
+                content_key: WorkspaceContentKey::generate(),
+                cache_dir: temp.path().join("cache"),
+            })
+            .with_write_cache_dir(temp.path().join("writes"));
+        let (file, _attr, _op_id) =
+            fs.create_local_node(ids.root, "new-script.sh", NodeKind::File)?;
+        let handle = fs.begin_write_handle(file.node_id, true, Some(0o644))?;
+
+        assert!(fs.set_open_write_handle_mode(file.node_id, 0o755));
+        fs.write_to_handle(handle, 0, b"#!/bin/sh\n")?;
+        let revision = fs
+            .commit_write_handle(handle)?
+            .ok_or_else(|| "write handle did not commit".to_owned())?;
+
+        assert_eq!(revision.posix_mode, 0o100_755);
+        assert!(revision.executable);
+        Ok(())
+    }
+
+    #[test]
+    fn set_node_mode_after_dirty_write_clears_after_acks() -> Result<(), Box<dyn std::error::Error>>
+    {
+        let (fs, ids) = metadata_fixture()?;
+        let temp = tempfile::tempdir()?;
+        let mut fs = fs
+            .with_hydration(HydrationConfig {
+                client: ApiClient::new("http://127.0.0.1:1", "token")?,
+                content_key: WorkspaceContentKey::generate(),
+                cache_dir: temp.path().join("cache"),
+            })
+            .with_write_cache_dir(temp.path().join("writes"));
+        let handle = fs.begin_write_handle(ids.file, true, None)?;
+        fs.write_to_handle(handle, 0, b"updated")?;
+        let write_revision = fs
+            .commit_write_handle(handle)?
+            .ok_or_else(|| "write handle did not commit".to_owned())?;
+        fs.set_node_mode(ids.file, 0o644)?;
+        assert_eq!(
+            fs.store
+                .node_state(ids.file)?
+                .ok_or_else(|| "node state missing".to_owned())?
+                .dirty_base_revision_id,
+            Some(write_revision.revision_id)
+        );
+        let pending = fs.store.list_pending_ops(ids.workspace)?;
+        assert_eq!(pending.len(), 2);
+
+        fs.store
+            .apply_committed_operation(&pending[0].operation, Cursor::new(4)?)?;
+        fs.store
+            .apply_committed_operation(&pending[1].operation, Cursor::new(5)?)?;
+
+        assert_eq!(
+            fs.store
+                .node_state(ids.file)?
+                .ok_or_else(|| "node state missing after ack".to_owned())?
+                .hydration_state,
+            HydrationState::Hydrated
+        );
+        Ok(())
+    }
+
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn rename_and_delete_on_a_converge_to_b() -> Result<(), Box<dyn std::error::Error>> {
         let harness = fs2_testkit::TwoClientHarness::start()?;
@@ -1764,6 +2055,48 @@ mod tests {
         assert!(mirror_store
             .get_node_by_path(harness.workspace_id, "delete-me.txt")?
             .is_none());
+        Ok(())
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn chmod_on_a_converges_to_b() -> Result<(), Box<dyn std::error::Error>> {
+        let harness = fs2_testkit::TwoClientHarness::start()?;
+        let simulated = harness.simulate_file_creation_on_a("script.sh", b"#!/bin/sh\n")?;
+        let OperationKind::CreateNode { node_id, .. } = simulated.operation.kind else {
+            unreachable!("simulate_file_creation_on_a creates nodes")
+        };
+        let mut origin_store = harness.open_client_a_store()?;
+        let mut mirror_store = harness.open_client_b_store()?;
+        InboundSync::new(&harness.client_a, harness.workspace_id, Duration::ZERO)
+            .sync_startup(&mut origin_store)?;
+        harness.sync_b(&mut mirror_store)?;
+
+        let mut metadata_fs =
+            MetadataWorkspaceFs::new(origin_store, harness.workspace_id, harness.root_node_id)
+                .with_device_id(harness.device_a_id);
+        let revision = metadata_fs.set_node_mode(node_id, 0o755)?;
+        assert!(revision.executable);
+        let report = OutboundQueue::new(&harness.client_a).drain_workspace(
+            &mut metadata_fs.store,
+            harness.workspace_id,
+            &[],
+        )?;
+        assert_eq!(report.failed, None);
+        assert_eq!(report.submitted, 1);
+
+        harness.sync_b(&mut mirror_store)?;
+        let script = mirror_store
+            .get_node_by_path(harness.workspace_id, "script.sh")?
+            .ok_or_else(|| "script missing on mirror".to_owned())?;
+        let mirror_revision = mirror_store
+            .get_revision(
+                script
+                    .current_rev
+                    .ok_or_else(|| "script has no revision on mirror".to_owned())?,
+            )?
+            .ok_or_else(|| "script revision missing on mirror".to_owned())?;
+        assert_eq!(mirror_revision.posix_mode, 0o100_755);
+        assert!(mirror_revision.executable);
         Ok(())
     }
 
