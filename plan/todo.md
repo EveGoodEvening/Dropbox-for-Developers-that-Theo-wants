@@ -749,16 +749,16 @@ Acceptance criteria:
 
 ### 12.1 Mount skeleton
 
-- [ ] Implement `fs2-fuse` crate.
-- [ ] Mount empty workspace root.
-- [ ] Implement `getattr` for root.
-- [ ] Implement `readdir` for root.
-- [ ] Implement clean unmount.
-- [ ] Add manual test instructions for macOS and Linux.
+- [x] Implement `fs2-fuse` crate.
+- [x] Mount empty workspace root.
+- [x] Implement `getattr` for root.
+- [x] Implement `readdir` for root.
+- [x] Implement clean unmount.
+- [x] Add manual test instructions for macOS and Linux.
 
 Acceptance criteria:
 
-- [ ] `ls ~/code` works on mounted empty workspace.
+- [x] `ls ~/code` works on mounted empty workspace.
 
 ### 12.2 Metadata-backed directory listing
 
