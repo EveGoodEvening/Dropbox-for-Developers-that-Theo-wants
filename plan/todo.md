@@ -854,7 +854,7 @@ Acceptance criteria:
 ### 13.5 Atomic editor save patterns
 
 - [ ] Test temp-file write + rename.
-- [ ] Add default ignore rules for common swap/temp files.
+- [x] Add default ignore rules for common swap/temp files.
 - [ ] Ensure final file revision is uploaded once.
 
 Acceptance criteria:

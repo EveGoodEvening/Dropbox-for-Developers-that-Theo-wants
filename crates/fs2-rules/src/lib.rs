@@ -73,6 +73,7 @@ pub enum EvaluationPurpose {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum BuiltinProfile {
+    EditorTemp,
     Git,
     Node,
     Rust,
@@ -835,6 +836,17 @@ pub fn parse_config_toml(input: &str) -> Result<Config, RuleError> {
 
 pub fn built_in_rules(profiles: &ProfilesConfig) -> Result<Vec<BuiltinRule>, RuleError> {
     let mut out = Vec::new();
+    for pattern in [
+        "*.swp", "*.swo", "*.swx", ".*.swp", ".*.swo", ".*.swx", "4913", "*~", "*.tmp", "*.temp",
+    ] {
+        push_builtin(
+            &mut out,
+            BuiltinProfile::EditorTemp,
+            pattern,
+            RuleAction::Ignore,
+            None,
+        )?;
+    }
     push_builtin(
         &mut out,
         BuiltinProfile::Git,
@@ -2038,6 +2050,46 @@ scope = "project"
             submodule_worktree_content.effective_rule.action,
             RuleAction::Normal
         );
+        Ok(())
+    }
+
+    #[test]
+    fn builtins_ignore_common_editor_temp_files() -> Result<(), Box<dyn std::error::Error>> {
+        let engine = RuleEngine::new(Config::default(), Vec::new())?;
+        for temp_path in [
+            ".foo.swp",
+            "foo.swp",
+            ".foo.swo",
+            "4913",
+            "notes.txt~",
+            "file.ts.tmp",
+            "file.ts.temp",
+        ] {
+            let result = engine.resolve(
+                &path(temp_path),
+                RulePathKind::File,
+                EvaluationPurpose::NewLocalCreate,
+                None,
+            )?;
+            assert_eq!(
+                result.effective_rule.action,
+                RuleAction::Ignore,
+                "{temp_path}"
+            );
+        }
+        for normal_path in ["foo.txt", "src/main.rs"] {
+            let result = engine.resolve(
+                &path(normal_path),
+                RulePathKind::File,
+                EvaluationPurpose::NewLocalCreate,
+                None,
+            )?;
+            assert_eq!(
+                result.effective_rule.action,
+                RuleAction::Normal,
+                "{normal_path}"
+            );
+        }
         Ok(())
     }
 
