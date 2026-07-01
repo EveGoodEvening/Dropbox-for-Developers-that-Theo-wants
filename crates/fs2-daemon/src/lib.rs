@@ -241,6 +241,18 @@ impl LocalStore {
             .transpose()
     }
 
+    pub fn get_revision(&self, revision_id: RevisionId) -> Result<Option<NodeRevision>> {
+        self.conn
+            .query_row(
+                "SELECT revision_json FROM local_revisions WHERE revision_id = ?1",
+                params![revision_id.to_string()],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()?
+            .map(|json| serde_json::from_str(&json).map_err(Into::into))
+            .transpose()
+    }
+
     pub fn list_children(&self, parent_id: NodeId) -> Result<Vec<Node>> {
         let mut statement = self.conn.prepare(
             "SELECT node_json FROM local_nodes

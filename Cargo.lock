@@ -681,6 +681,19 @@ dependencies = [
 [[package]]
 name = "fs2-testkit"
 version = "0.1.0"
+dependencies = [
+ "axum",
+ "chrono",
+ "fs2-backend",
+ "fs2-core",
+ "fs2-crypto",
+ "fs2-daemon",
+ "fs2-sync",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tokio",
+]
 
 [[package]]
 name = "futures"

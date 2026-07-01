@@ -5,5 +5,18 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 
+[dependencies]
+axum = "0.7"
+chrono = { version = "0.4", default-features = false, features = ["clock"] }
+fs2-backend = { path = "../fs2-backend" }
+fs2-core = { path = "../fs2-core" }
+fs2-crypto = { path = "../fs2-crypto" }
+fs2-daemon = { path = "../fs2-daemon" }
+fs2-sync = { path = "../fs2-sync" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tempfile = "3"
+tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
+
 [lints]
 workspace = true

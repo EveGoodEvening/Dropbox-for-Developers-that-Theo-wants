@@ -732,16 +732,16 @@ Acceptance criteria:
 
 ### 11.4 Two-client materialized test harness
 
-- [ ] Build `fs2-testkit` with fake/local backend.
-- [ ] Create two local client state dirs.
-- [ ] Simulate file creation on A by creating operation directly.
-- [ ] Sync B.
-- [ ] Assert metadata appears.
-- [ ] Hydrate B and assert bytes match.
+- [x] Build `fs2-testkit` with fake/local backend.
+- [x] Create two local client state dirs.
+- [x] Simulate file creation on A by creating operation directly.
+- [x] Sync B.
+- [x] Assert metadata appears.
+- [x] Hydrate B and assert bytes match.
 
 Acceptance criteria:
 
-- [ ] Two-client metadata and blob sync works before FUSE exists.
+- [x] Two-client metadata and blob sync works before FUSE exists.
 
 ---
 

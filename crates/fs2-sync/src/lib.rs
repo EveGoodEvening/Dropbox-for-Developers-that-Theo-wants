@@ -667,7 +667,7 @@ impl ApiClient {
         self.request_json("GET", path, query, None::<&()>)
     }
 
-    fn post_json<T: DeserializeOwned>(
+    pub fn post_json<T: DeserializeOwned>(
         &self,
         path: &[&str],
         body: &impl serde::Serialize,
