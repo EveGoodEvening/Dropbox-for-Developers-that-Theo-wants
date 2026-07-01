@@ -706,16 +706,16 @@ Acceptance criteria:
 
 ### 11.2 Implement outbound queue
 
-- [ ] Persist pending ops in SQLite.
-- [ ] Upload blobs before submitting file revision ops.
-- [ ] Submit ops idempotently.
-- [ ] Remove pending op only after commit acknowledged.
-- [ ] Retry transient failures.
-- [ ] Surface permanent failures to status.
+- [x] Persist pending ops in SQLite.
+- [x] Upload blobs before submitting file revision ops.
+- [x] Submit ops idempotently.
+- [x] Remove pending op only after commit acknowledged.
+- [x] Retry transient failures.
+- [x] Surface permanent failures to status.
 
 Acceptance criteria:
 
-- [ ] Killing process during upload/commit does not lose pending work.
+- [x] Killing process during upload/commit does not lose pending work.
 
 ### 11.3 Implement inbound sync loop
 

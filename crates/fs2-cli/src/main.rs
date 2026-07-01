@@ -31,7 +31,7 @@ fn run_from_args(args: impl IntoIterator<Item = String>) -> Result<String, Strin
     let credentials = SystemCredentialStore;
     let needs_config = matches!(
         args.as_slice(),
-        [cmd, ..] if cmd == "login" || cmd == "logout" || cmd == "device" || cmd == "workspace" || cmd == "mount"
+        [cmd, ..] if cmd == "login" || cmd == "logout" || cmd == "device" || cmd == "workspace" || cmd == "mount" || cmd == "status"
     );
     let config_path = if needs_config {
         default_cli_config_path()?
@@ -86,13 +86,17 @@ fn run_from_args_with_context(
         [cmd, workspace, path] if cmd == "mount" => {
             workspace_mount(workspace, Path::new(path), config_path)
         }
-        [cmd] if cmd == "status" => status_text("."),
-        [cmd, flag] if cmd == "status" && flag == "--json" => status_json("."),
-        [cmd, flag, path] if cmd == "status" && flag == "--path" => status_text(path),
+        [cmd] if cmd == "status" => status_text_with_config(".", config_path),
+        [cmd, flag] if cmd == "status" && flag == "--json" => {
+            status_json_with_config(".", config_path)
+        }
+        [cmd, flag, path] if cmd == "status" && flag == "--path" => {
+            status_text_with_config(path, config_path)
+        }
         [cmd, flag, path, json_flag]
             if cmd == "status" && flag == "--path" && json_flag == "--json" =>
         {
-            status_json(path)
+            status_json_with_config(path, config_path)
         }
         [cmd] if cmd == "doctor" => doctor("."),
         [cmd, path] if cmd == "doctor" => doctor(path),
@@ -1278,12 +1282,21 @@ struct StatusOutput {
     conflicts: u64,
     env_summary: EnvSummary,
     git_warnings: Vec<String>,
+    pending_errors: Vec<PendingErrorStatus>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 struct EnvSummary {
     total: u64,
     secrets: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+struct PendingErrorStatus {
+    workspace: String,
+    op_id: String,
+    retry_count: u32,
+    last_error: String,
 }
 
 fn status_for_path(path: impl AsRef<Path>) -> StatusOutput {
@@ -1298,8 +1311,39 @@ fn status_for_path(path: impl AsRef<Path>) -> StatusOutput {
             total: 0,
             secrets: 0,
         },
+        pending_errors: Vec::new(),
         git_warnings: git_warnings(path),
     }
+}
+
+fn status_for_path_with_config(
+    path: impl AsRef<Path>,
+    config_path: &Path,
+) -> Result<StatusOutput, String> {
+    let mut status = status_for_path(path);
+    for workspace in load_local_workspaces(config_path)? {
+        let workspace_id = workspace
+            .workspace_id
+            .parse::<WorkspaceId>()
+            .map_err(|error| error.to_string())?;
+        let store = fs2_daemon::LocalStore::open(&workspace.metadata_db)
+            .map_err(|error| error.to_string())?;
+        let pending = store
+            .list_pending_ops(workspace_id)
+            .map_err(|error| error.to_string())?;
+        status.pending_uploads += pending.len() as u64;
+        for pending in pending {
+            if let Some(error) = pending.last_error {
+                status.pending_errors.push(PendingErrorStatus {
+                    workspace: workspace.name.clone(),
+                    op_id: pending.operation.op_id.to_string(),
+                    retry_count: pending.retry_count,
+                    last_error: error,
+                });
+            }
+        }
+    }
+    Ok(status)
 }
 
 fn git_warnings(path: impl AsRef<Path>) -> Vec<String> {
@@ -1324,12 +1368,13 @@ fn git_warnings(path: impl AsRef<Path>) -> Vec<String> {
     }
 }
 
-fn status_json(path: impl AsRef<Path>) -> Result<String, String> {
-    serde_json::to_string_pretty(&status_for_path(path)).map_err(|error| error.to_string())
+fn status_json_with_config(path: impl AsRef<Path>, config_path: &Path) -> Result<String, String> {
+    serde_json::to_string_pretty(&status_for_path_with_config(path, config_path)?)
+        .map_err(|error| error.to_string())
 }
 
-fn status_text(path: impl AsRef<Path>) -> Result<String, String> {
-    render_status_text(&status_for_path(path))
+fn status_text_with_config(path: impl AsRef<Path>, config_path: &Path) -> Result<String, String> {
+    render_status_text(&status_for_path_with_config(path, config_path)?)
 }
 
 fn render_status_text(status: &StatusOutput) -> Result<String, String> {
@@ -1351,6 +1396,19 @@ fn render_status_text(status: &StatusOutput) -> Result<String, String> {
         status.env_summary.total, status.env_summary.secrets
     )
     .map_err(|error| error.to_string())?;
+    if status.pending_errors.is_empty() {
+        out.push_str("  pending errors: none\n");
+    } else {
+        out.push_str("  pending errors:\n");
+        for error in &status.pending_errors {
+            writeln!(
+                out,
+                "    - {} {} (retries={}): {}",
+                error.workspace, error.op_id, error.retry_count, error.last_error
+            )
+            .map_err(|error| error.to_string())?;
+        }
+    }
     if status.git_warnings.is_empty() {
         out.push_str("  git warnings: none\n");
     } else {
@@ -1940,7 +1998,7 @@ mod tests {
 
         assert_eq!(
             output,
-            "FS2 status:\n  connection: offline\n  cursor lag: 0\n  pending uploads: 0\n  pending downloads: 0\n  cache size: 0 bytes\n  conflicts: 0\n  env: 0 records (0 secrets)\n  git warnings: none\n"
+            "FS2 status:\n  connection: offline\n  cursor lag: 0\n  pending uploads: 0\n  pending downloads: 0\n  cache size: 0 bytes\n  conflicts: 0\n  env: 0 records (0 secrets)\n  pending errors: none\n  git warnings: none\n"
         );
         Ok(())
     }
@@ -1952,8 +2010,53 @@ mod tests {
 
         assert_eq!(
             output,
-            "{\n  \"connection_state\": \"offline\",\n  \"cursor_lag\": 0,\n  \"pending_uploads\": 0,\n  \"pending_downloads\": 0,\n  \"cache_size_bytes\": 0,\n  \"conflicts\": 0,\n  \"env_summary\": {\n    \"total\": 0,\n    \"secrets\": 0\n  },\n  \"git_warnings\": []\n}"
+            "{\n  \"connection_state\": \"offline\",\n  \"cursor_lag\": 0,\n  \"pending_uploads\": 0,\n  \"pending_downloads\": 0,\n  \"cache_size_bytes\": 0,\n  \"conflicts\": 0,\n  \"env_summary\": {\n    \"total\": 0,\n    \"secrets\": 0\n  },\n  \"git_warnings\": [],\n  \"pending_errors\": []\n}"
         );
+        Ok(())
+    }
+
+    #[test]
+    fn status_surfaces_pending_operation_errors() -> Result<(), Box<dyn std::error::Error>> {
+        let dir = tempfile::tempdir()?;
+        let config_path = dir.path().join("config.json");
+        let metadata_db = dir.path().join("metadata.sqlite");
+        let workspace_id = WorkspaceId::new_v4();
+        let root_node_id = NodeId::new_v4();
+        save_local_workspaces(
+            &config_path,
+            &[LocalWorkspaceConfig {
+                workspace_id: workspace_id.to_string(),
+                name: "pending-workspace".to_owned(),
+                root_node_id: root_node_id.to_string(),
+                metadata_db: metadata_db.display().to_string(),
+                path: None,
+                mount_path: None,
+            }],
+        )?;
+        let mut store = fs2_daemon::LocalStore::open(&metadata_db)?;
+        store.initialize_workspace(workspace_id, "pending-workspace", root_node_id)?;
+        let operation = fs2_core::Operation {
+            op_id: fs2_core::OpId::new_v4(),
+            workspace_id,
+            device_id: fs2_core::DeviceId::new_v4(),
+            base_cursor: fs2_core::Cursor::new(0)?,
+            kind: fs2_core::OperationKind::DeleteNode {
+                node_id: NodeId::new_v4(),
+                recursive: false,
+            },
+            created_at: chrono::Utc::now(),
+        };
+        store.put_pending_op(&operation)?;
+        store.mark_pending_op_failed(&operation, "permanent failure")?;
+        store.mark_pending_op_failed(&operation, "permanent failure")?;
+
+        let status = status_for_path_with_config(dir.path(), &config_path)?;
+
+        assert_eq!(status.pending_uploads, 1);
+        assert_eq!(status.pending_errors.len(), 1);
+        assert_eq!(status.pending_errors[0].workspace, "pending-workspace");
+        assert_eq!(status.pending_errors[0].retry_count, 2);
+        assert_eq!(status.pending_errors[0].last_error, "permanent failure");
         Ok(())
     }
 
@@ -2781,6 +2884,7 @@ mod tests {
                 secrets: 0,
             },
             git_warnings: Vec::new(),
+            pending_errors: Vec::new(),
         }
     }
 }

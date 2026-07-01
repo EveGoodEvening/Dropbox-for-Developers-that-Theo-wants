@@ -121,6 +121,14 @@ pub struct PendingOperation {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PendingBlobUpload {
+    pub blob_id: BlobId,
+    pub workspace_id: WorkspaceId,
+    pub bytes: Vec<u8>,
+    pub encryption_header: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LocalNodeState {
     pub node_id: NodeId,
     pub hydration_state: HydrationState,
@@ -282,6 +290,79 @@ impl LocalStore {
             })
         })
         .collect()
+    }
+
+    pub fn mark_pending_op_failed(&mut self, operation: &Operation, error: &str) -> Result<()> {
+        let tx = self.conn.transaction()?;
+        tx.execute(
+            "UPDATE pending_ops
+             SET retry_count = retry_count + 1, last_error = ?2
+             WHERE op_id = ?1",
+            params![operation.op_id.to_string(), error],
+        )?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    pub fn put_pending_blob_upload(
+        &mut self,
+        blob_id: &BlobId,
+        workspace_id: WorkspaceId,
+        bytes: &[u8],
+        encryption_header: Option<&str>,
+    ) -> Result<()> {
+        let tx = self.conn.transaction()?;
+        tx.execute(
+            "INSERT OR REPLACE INTO pending_blob_uploads
+             (blob_id, workspace_id, bytes, encryption_header, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![
+                blob_id.to_string(),
+                workspace_id.to_string(),
+                bytes,
+                encryption_header,
+                Utc::now(),
+            ],
+        )?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    pub fn pending_blob_upload(&self, blob_id: &BlobId) -> Result<Option<PendingBlobUpload>> {
+        self.conn
+            .query_row(
+                "SELECT blob_id, workspace_id, bytes, encryption_header
+                 FROM pending_blob_uploads WHERE blob_id = ?1",
+                params![blob_id.to_string()],
+                |row| {
+                    let stored_blob_id = row.get::<_, String>(0)?;
+                    let workspace_id = row.get::<_, String>(1)?;
+                    Ok(PendingBlobUpload {
+                        blob_id: parse_blob_id(&stored_blob_id)?,
+                        workspace_id: workspace_id.parse().map_err(|error| {
+                            rusqlite::Error::FromSqlConversionFailure(
+                                1,
+                                rusqlite::types::Type::Text,
+                                Box::new(error),
+                            )
+                        })?,
+                        bytes: row.get(2)?,
+                        encryption_header: row.get(3)?,
+                    })
+                },
+            )
+            .optional()
+            .map_err(Into::into)
+    }
+
+    pub fn remove_pending_blob_upload(&mut self, blob_id: &BlobId) -> Result<()> {
+        let tx = self.conn.transaction()?;
+        tx.execute(
+            "DELETE FROM pending_blob_uploads WHERE blob_id = ?1",
+            params![blob_id.to_string()],
+        )?;
+        tx.commit()?;
+        Ok(())
     }
 
     pub fn mark_blob_cached(
@@ -485,6 +566,20 @@ impl LocalStore {
 
     fn initialize_schema(&self) -> Result<()> {
         self.conn.execute_batch(SCHEMA)?;
+        self.migrate_schema()
+    }
+
+    fn migrate_schema(&self) -> Result<()> {
+        if !column_exists(&self.conn, "pending_ops", "retry_count")? {
+            self.conn.execute(
+                "ALTER TABLE pending_ops ADD COLUMN retry_count INTEGER NOT NULL DEFAULT 0",
+                [],
+            )?;
+        }
+        if !column_exists(&self.conn, "pending_ops", "last_error")? {
+            self.conn
+                .execute("ALTER TABLE pending_ops ADD COLUMN last_error TEXT", [])?;
+        }
         Ok(())
     }
 }
@@ -554,6 +649,14 @@ CREATE TABLE IF NOT EXISTS pending_ops (
     created_at TEXT NOT NULL,
     retry_count INTEGER NOT NULL DEFAULT 0,
     last_error TEXT
+);
+
+CREATE TABLE IF NOT EXISTS pending_blob_uploads (
+    blob_id TEXT PRIMARY KEY,
+    workspace_id TEXT NOT NULL,
+    bytes BLOB NOT NULL,
+    encryption_header TEXT,
+    created_at TEXT NOT NULL
 );
 
 CREATE TABLE IF NOT EXISTS blob_cache (
@@ -1001,6 +1104,18 @@ fn rule_matches(pattern: &str, path: &str, path_kind: Option<NodeKind>) -> Resul
         .map_err(|error| LocalStoreError::Invalid(error.to_string()))
 }
 
+fn column_exists(conn: &Connection, table: &str, column: &str) -> Result<bool> {
+    let pragma = format!("PRAGMA table_info({table})");
+    let mut statement = conn.prepare(&pragma)?;
+    let rows = statement.query_map([], |row| row.get::<_, String>(1))?;
+    for name in rows {
+        if name? == column {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
 fn parse_blob_id(value: &str) -> rusqlite::Result<BlobId> {
     value
         .parse()
@@ -1220,6 +1335,55 @@ mod tests {
                 .map(|state| state.hydration_state),
             Some(HydrationState::Hydrated)
         );
+        Ok(())
+    }
+
+    #[test]
+    fn migrates_legacy_pending_ops_retry_columns() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        let path = dir.path().join("legacy.sqlite");
+        let ids = Ids::new();
+        let pending = op(
+            ids.workspace,
+            ids.device,
+            0,
+            OperationKind::DeleteNode {
+                node_id: ids.root,
+                recursive: true,
+            },
+        )?;
+        {
+            let conn = Connection::open(&path)?;
+            conn.execute_batch(
+                "CREATE TABLE pending_ops (
+                    op_id TEXT PRIMARY KEY,
+                    workspace_id TEXT NOT NULL,
+                    operation_json TEXT NOT NULL,
+                    created_at TEXT NOT NULL
+                );",
+            )?;
+            conn.execute(
+                "INSERT INTO pending_ops (op_id, workspace_id, operation_json, created_at)
+                 VALUES (?1, ?2, ?3, ?4)",
+                params![
+                    pending.op_id.to_string(),
+                    ids.workspace.to_string(),
+                    serde_json::to_string(&pending)?,
+                    pending.created_at.to_rfc3339(),
+                ],
+            )?;
+        }
+
+        let mut store = LocalStore::open(&path)?;
+        let listed = store.list_pending_ops(ids.workspace)?;
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].retry_count, 0);
+        assert_eq!(listed[0].last_error, None);
+
+        store.mark_pending_op_failed(&pending, "after migration")?;
+        let listed = store.list_pending_ops(ids.workspace)?;
+        assert_eq!(listed[0].retry_count, 1);
+        assert_eq!(listed[0].last_error.as_deref(), Some("after migration"));
         Ok(())
     }
 

@@ -5,8 +5,8 @@ use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
 use fs2_core::{
     BlobId, BlobStatusResponse, CommitOperationRequest, CommitOperationResponse, Cursor,
     DevBlobDownloadRequest, DevBlobDownloadResponse, DevBlobUploadRequest, DevBlobUploadResponse,
-    ErrorEnvelope, FetchOpsResponse, ManifestResponse, Operation, RuleAction, WorkspaceEvent,
-    WorkspaceId, WorkspacePath,
+    ErrorEnvelope, FetchOpsResponse, ManifestResponse, Operation, OperationKind, RevisionContent,
+    RuleAction, WorkspaceEvent, WorkspaceId, WorkspacePath,
 };
 use fs2_crypto::{encrypt_blob, CryptoError, EncryptionHeader, WorkspaceContentKey};
 use fs2_rules::{EvaluationPurpose, RuleEngine, RulePathKind};
@@ -105,6 +105,200 @@ impl BlobUploadPlan {
             plaintext_size: plaintext.len() as u64,
             encryption_header: encrypted.header,
         })
+    }
+}
+
+pub fn stage_blob_upload(
+    store: &mut fs2_daemon::LocalStore,
+    workspace_id: WorkspaceId,
+    plan: &BlobUploadPlan,
+) -> Result<(), OutboundQueueError> {
+    let encryption_header = serde_json::to_string(&plan.encryption_header)
+        .map_err(|error| OutboundQueueError::LocalStore(error.to_string()))?;
+    store.put_pending_blob_upload(
+        &plan.blob_id,
+        workspace_id,
+        &plan.ciphertext,
+        Some(&encryption_header),
+    )?;
+    Ok(())
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OutboundQueueReport {
+    pub submitted: usize,
+    pub failed: Option<OutboundFailure>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OutboundFailure {
+    pub op_id: fs2_core::OpId,
+    pub retryable: bool,
+    pub message: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum OutboundQueueError {
+    LocalStore(String),
+}
+
+impl fmt::Display for OutboundQueueError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::LocalStore(message) => write!(formatter, "local store error: {message}"),
+        }
+    }
+}
+
+impl std::error::Error for OutboundQueueError {}
+
+impl From<fs2_daemon::LocalStoreError> for OutboundQueueError {
+    fn from(error: fs2_daemon::LocalStoreError) -> Self {
+        Self::LocalStore(error.to_string())
+    }
+}
+
+pub struct OutboundQueue<'a> {
+    client: &'a ApiClient,
+}
+
+impl<'a> OutboundQueue<'a> {
+    #[must_use]
+    pub const fn new(client: &'a ApiClient) -> Self {
+        Self { client }
+    }
+
+    pub fn drain_workspace(
+        &self,
+        store: &mut fs2_daemon::LocalStore,
+        workspace_id: WorkspaceId,
+        blob_plans: &[BlobUploadPlan],
+    ) -> Result<OutboundQueueReport, OutboundQueueError> {
+        let pending = store.list_pending_ops(workspace_id)?;
+        let mut submitted = 0;
+        for pending in pending {
+            if let Err(error) =
+                self.upload_required_blobs(store, workspace_id, &pending.operation, blob_plans)
+            {
+                let failure = record_outbound_failure(store, &pending.operation, &error)?;
+                return Ok(OutboundQueueReport {
+                    submitted,
+                    failed: Some(failure),
+                });
+            }
+            match self
+                .client
+                .submit_operation(workspace_id, &pending.operation)
+            {
+                Ok(response) => {
+                    store.apply_committed_operation(
+                        &response.committed.operation,
+                        response.cursor,
+                    )?;
+                    submitted += 1;
+                }
+                Err(error) => {
+                    let failure = record_outbound_failure(store, &pending.operation, &error)?;
+                    return Ok(OutboundQueueReport {
+                        submitted,
+                        failed: Some(failure),
+                    });
+                }
+            }
+        }
+        Ok(OutboundQueueReport {
+            submitted,
+            failed: None,
+        })
+    }
+
+    fn upload_required_blobs(
+        &self,
+        store: &mut fs2_daemon::LocalStore,
+        workspace_id: WorkspaceId,
+        operation: &Operation,
+        blob_plans: &[BlobUploadPlan],
+    ) -> Result<(), ApiClientError> {
+        for blob_id in operation_blob_ids(operation) {
+            if let Some(plan) = blob_plans.iter().find(|plan| &plan.blob_id == blob_id) {
+                self.client.upload_blob(workspace_id, plan)?;
+            } else {
+                let status = self.client.blob_status(blob_id)?;
+                if status.size.is_some() {
+                    let _ = store.remove_pending_blob_upload(blob_id);
+                    continue;
+                }
+                let Some(staged) = store
+                    .pending_blob_upload(blob_id)
+                    .map_err(|error| ApiClientError::LocalStore(error.to_string()))?
+                else {
+                    return Err(ApiClientError::MissingBlobUploadPlan(blob_id.clone()));
+                };
+                if staged.workspace_id != workspace_id {
+                    return Err(ApiClientError::MissingBlobUploadPlan(blob_id.clone()));
+                }
+                self.client.upload_blob_bytes(
+                    workspace_id,
+                    &staged.blob_id,
+                    &staged.bytes,
+                    staged.encryption_header.as_deref(),
+                )?;
+            }
+            let _ = store.remove_pending_blob_upload(blob_id);
+        }
+        Ok(())
+    }
+}
+
+impl fmt::Debug for OutboundQueue<'_> {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("OutboundQueue")
+            .finish_non_exhaustive()
+    }
+}
+
+fn record_outbound_failure(
+    store: &mut fs2_daemon::LocalStore,
+    operation: &Operation,
+    error: &ApiClientError,
+) -> Result<OutboundFailure, OutboundQueueError> {
+    let retryable = error.is_transient();
+    let message = error.to_string();
+    store.mark_pending_op_failed(operation, &message)?;
+    Ok(OutboundFailure {
+        op_id: operation.op_id,
+        retryable,
+        message,
+    })
+}
+
+fn operation_blob_ids(operation: &Operation) -> Vec<&BlobId> {
+    match &operation.kind {
+        OperationKind::CreateNode {
+            initial_revision: Some(revision),
+            ..
+        }
+        | OperationKind::PutFileRevision { revision, .. } => revision_blob_ids(revision),
+        OperationKind::CreateNode {
+            initial_revision: None,
+            ..
+        }
+        | OperationKind::MoveNode { .. }
+        | OperationKind::DeleteNode { .. }
+        | OperationKind::RestoreNode { .. }
+        | OperationKind::SetRule { .. }
+        | OperationKind::SetEnvVar { .. }
+        | OperationKind::DeleteEnvVar { .. } => Vec::new(),
+    }
+}
+
+fn revision_blob_ids(revision: &fs2_core::NodeRevision) -> Vec<&BlobId> {
+    match &revision.content {
+        RevisionContent::File {
+            blob_id, chunk_ids, ..
+        } => std::iter::once(blob_id).chain(chunk_ids.iter()).collect(),
+        RevisionContent::Directory | RevisionContent::Symlink { .. } => Vec::new(),
     }
 }
 
@@ -252,12 +446,27 @@ impl ApiClient {
     ) -> Result<DevBlobUploadResponse, ApiClientError> {
         let encryption_header = serde_json::to_string(&plan.encryption_header)
             .map_err(|error| ApiClientError::Json(error.to_string()))?;
-        let request = DevBlobUploadRequest {
-            blob_id: plan.blob_id.to_string(),
+        self.upload_blob_bytes(
             workspace_id,
-            bytes_base64: URL_SAFE_NO_PAD.encode(&plan.ciphertext),
-            size: plan.ciphertext.len() as u64,
-            encryption_header: Some(encryption_header),
+            &plan.blob_id,
+            &plan.ciphertext,
+            Some(&encryption_header),
+        )
+    }
+
+    pub fn upload_blob_bytes(
+        &self,
+        workspace_id: WorkspaceId,
+        blob_id: &BlobId,
+        bytes: &[u8],
+        encryption_header: Option<&str>,
+    ) -> Result<DevBlobUploadResponse, ApiClientError> {
+        let request = DevBlobUploadRequest {
+            blob_id: blob_id.to_string(),
+            workspace_id,
+            bytes_base64: URL_SAFE_NO_PAD.encode(bytes),
+            size: bytes.len() as u64,
+            encryption_header: encryption_header.map(str::to_owned),
         };
         self.post_json(&["v1", "blobs", "dev-upload"], &request)
     }
@@ -499,6 +708,8 @@ pub enum ApiClientError {
         argument: WorkspaceId,
         operation: WorkspaceId,
     },
+    MissingBlobUploadPlan(BlobId),
+    LocalStore(String),
     HttpStatus {
         status: u16,
         structured: Option<Box<ErrorEnvelope>>,
@@ -540,6 +751,11 @@ impl fmt::Display for ApiClientError {
                 formatter,
                 "operation workspace_id {operation} does not match request workspace_id {argument}"
             ),
+            Self::MissingBlobUploadPlan(blob_id) => write!(
+                formatter,
+                "missing upload plan for referenced blob {blob_id}"
+            ),
+            Self::LocalStore(message) => write!(formatter, "local store error: {message}"),
             Self::HttpStatus {
                 status,
                 structured,
@@ -882,6 +1098,189 @@ mod tests {
                 to_cursor: Cursor::new(2)?,
             }
         );
+        Ok(())
+    }
+
+    fn file_create_operation(
+        workspace_id: WorkspaceId,
+        device_id: fs2_core::DeviceId,
+        root_node_id: fs2_core::NodeId,
+        name: &str,
+        base_cursor: Cursor,
+        plan: &BlobUploadPlan,
+    ) -> Result<Operation, Box<dyn std::error::Error>> {
+        let node_id = fs2_core::NodeId::new_v4();
+        let revision_id = fs2_core::RevisionId::new_v4();
+        let encryption_header = serde_json::to_string(&plan.encryption_header)?;
+        Ok(Operation {
+            op_id: fs2_core::OpId::new_v4(),
+            workspace_id,
+            device_id,
+            base_cursor,
+            kind: fs2_core::OperationKind::CreateNode {
+                node_id,
+                parent_id: root_node_id,
+                name: name.to_owned(),
+                kind: fs2_core::NodeKind::File,
+                initial_revision: Some(fs2_core::NodeRevision {
+                    revision_id,
+                    node_id,
+                    workspace_id,
+                    device_id,
+                    base_revision_id: None,
+                    content: RevisionContent::File {
+                        blob_id: plan.blob_id.clone(),
+                        chunk_ids: Vec::new(),
+                        content_hash: "plaintext-sha256:test".to_owned(),
+                        encryption_header: Some(encryption_header),
+                    },
+                    posix_mode: 0o100_644,
+                    mtime: chrono::Utc::now(),
+                    size: plan.plaintext_size,
+                    executable: false,
+                    created_at: chrono::Utc::now(),
+                }),
+            },
+            created_at: chrono::Utc::now(),
+        })
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn outbound_queue_survives_restart_uploads_blobs_then_acknowledges_ops(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let backend = spawn_backend()?;
+        let bootstrap = ApiClient::with_retry_policy(
+            &backend.base_url,
+            "bootstrap-token",
+            RetryPolicy::no_retry(),
+        )?;
+        let login: TestLoginResponse = bootstrap.post_json(
+            &["v1", "auth", "dev-login"],
+            &serde_json::json!({
+                "device_name": "outbound-test",
+                "platform": {"os": "linux", "arch": "x86_64"},
+                "public_key": "test-public-key"
+            }),
+        )?;
+        let client = ApiClient::with_retry_policy(
+            &backend.base_url,
+            login.access_token,
+            RetryPolicy::no_retry(),
+        )?;
+        let workspace: fs2_backend::CreateWorkspaceResponse = client.post_json(
+            &["v1", "workspaces"],
+            &serde_json::json!({"name": "outbound-queue"}),
+        )?;
+        let workspace_id = workspace.workspace_id;
+        let device_id = login.device_id.parse()?;
+        let db_dir = tempfile::tempdir()?;
+        let db_path = db_dir.path().join("metadata.sqlite");
+        let key = WorkspaceContentKey::from_bytes([55; 32]);
+        let plan = BlobUploadPlan::from_plaintext(b"queued bytes", &key)?;
+        let operation = file_create_operation(
+            workspace_id,
+            device_id,
+            workspace.root_node_id,
+            "queued.txt",
+            Cursor::new(0)?,
+            &plan,
+        )?;
+        {
+            let mut store = fs2_daemon::LocalStore::open(&db_path)?;
+            store.initialize_workspace(workspace_id, "outbound-queue", workspace.root_node_id)?;
+            store.put_pending_op(&operation)?;
+            stage_blob_upload(&mut store, workspace_id, &plan)?;
+        }
+
+        let mut restarted = fs2_daemon::LocalStore::open(&db_path)?;
+        let report =
+            OutboundQueue::new(&client).drain_workspace(&mut restarted, workspace_id, &[])?;
+
+        assert_eq!(report.submitted, 1);
+        assert_eq!(report.failed, None);
+        assert!(restarted.list_pending_ops(workspace_id)?.is_empty());
+        assert!(restarted.pending_blob_upload(&plan.blob_id)?.is_none());
+        assert!(restarted
+            .get_node_by_path(workspace_id, "queued.txt")?
+            .is_some());
+        assert!(client.blob_status(&plan.blob_id)?.exists);
+
+        let second = file_create_operation(
+            workspace_id,
+            device_id,
+            workspace.root_node_id,
+            "queued-copy.txt",
+            Cursor::new(1)?,
+            &plan,
+        )?;
+        restarted.put_pending_op(&second)?;
+        stage_blob_upload(&mut restarted, workspace_id, &plan)?;
+        let report =
+            OutboundQueue::new(&client).drain_workspace(&mut restarted, workspace_id, &[])?;
+        assert_eq!(report.submitted, 1);
+        assert!(restarted.pending_blob_upload(&plan.blob_id)?.is_none());
+        assert!(restarted
+            .get_node_by_path(workspace_id, "queued-copy.txt")?
+            .is_some());
+        Ok(())
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn outbound_queue_surfaces_permanent_failures_in_pending_status(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let backend = spawn_backend()?;
+        let bootstrap = ApiClient::with_retry_policy(
+            &backend.base_url,
+            "bootstrap-token",
+            RetryPolicy::no_retry(),
+        )?;
+        let login: TestLoginResponse = bootstrap.post_json(
+            &["v1", "auth", "dev-login"],
+            &serde_json::json!({
+                "device_name": "outbound-failure-test",
+                "platform": {"os": "linux", "arch": "x86_64"},
+                "public_key": "test-public-key"
+            }),
+        )?;
+        let client = ApiClient::with_retry_policy(
+            &backend.base_url,
+            login.access_token,
+            RetryPolicy::no_retry(),
+        )?;
+        let workspace: fs2_backend::CreateWorkspaceResponse = client.post_json(
+            &["v1", "workspaces"],
+            &serde_json::json!({"name": "outbound-failure"}),
+        )?;
+        let workspace_id = workspace.workspace_id;
+        let device_id = login.device_id.parse()?;
+        let key = WorkspaceContentKey::from_bytes([56; 32]);
+        let missing_plan = BlobUploadPlan::from_plaintext(b"never uploaded", &key)?;
+        let operation = file_create_operation(
+            workspace_id,
+            device_id,
+            workspace.root_node_id,
+            "missing.txt",
+            Cursor::new(0)?,
+            &missing_plan,
+        )?;
+        let mut store = fs2_daemon::LocalStore::in_memory()?;
+        store.initialize_workspace(workspace_id, "outbound-failure", workspace.root_node_id)?;
+        store.put_pending_op(&operation)?;
+
+        let report = OutboundQueue::new(&client).drain_workspace(&mut store, workspace_id, &[])?;
+
+        let failure = report.failed.ok_or("expected outbound failure")?;
+        assert_eq!(report.submitted, 0);
+        assert_eq!(failure.op_id, operation.op_id);
+        assert!(!failure.retryable);
+        assert!(failure.message.contains("missing upload plan"));
+        let pending = store.list_pending_ops(workspace_id)?;
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0].retry_count, 1);
+        assert!(pending[0]
+            .last_error
+            .as_deref()
+            .is_some_and(|error| error.contains("missing upload plan")));
         Ok(())
     }
 }
