@@ -835,11 +835,11 @@ Acceptance criteria:
 - [x] Implement `rmdir`.
 - [x] Queue corresponding ops.
 - [x] Apply optimistic local state.
-- [ ] Handle backend rejection.
+- [x] Handle backend rejection.
 
 Acceptance criteria:
 
-- [ ] Rename/delete on A converge to B.
+- [x] Rename/delete on A converge to B.
 
 ### 13.4 chmod/executable bit
 

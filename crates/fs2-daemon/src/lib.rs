@@ -527,6 +527,50 @@ impl LocalStore {
         Ok(())
     }
 
+    pub fn rollback_rejected_pending_op(&mut self, operation: &Operation) -> Result<bool> {
+        let tx = self.conn.transaction()?;
+        let Some(node_id) = operation_target_node(operation) else {
+            return Ok(false);
+        };
+        if has_other_pending_op_for_node(&tx, operation.op_id, node_id)? {
+            return Ok(false);
+        }
+        let rolled_back = match &operation.kind {
+            OperationKind::MoveNode {
+                node_id,
+                old_parent_id,
+                old_name,
+                ..
+            } => apply_move_node(
+                &tx,
+                operation.workspace_id,
+                *node_id,
+                *old_parent_id,
+                old_name,
+                Utc::now(),
+            )
+            .is_ok(),
+            OperationKind::DeleteNode { node_id, .. } => rollback_delete_node(
+                &tx,
+                operation.workspace_id,
+                *node_id,
+                operation.created_at,
+                Utc::now(),
+            )
+            .is_ok(),
+            _ => return Ok(false),
+        };
+        if !rolled_back {
+            return Ok(false);
+        }
+        tx.execute(
+            "DELETE FROM pending_ops WHERE op_id = ?1",
+            params![operation.op_id.to_string()],
+        )?;
+        tx.commit()?;
+        Ok(true)
+    }
+
     pub fn restore_pending_write_head(&mut self, node_id: NodeId) -> Result<bool> {
         let tx = self.conn.transaction()?;
         let restored = if let Some(revision) = newest_pending_put_revision_for_node(&tx, node_id)? {
@@ -1062,6 +1106,9 @@ fn apply_delete_node(
     let tombstone_version = workspace_cursor(tx, workspace_id)?.value() + 1;
     for (node_id, _path, node_json) in matching_paths(tx, workspace_id, &path, true)? {
         let mut node = serde_json::from_str::<Node>(&node_json)?;
+        if node.deleted_at.is_some() {
+            continue;
+        }
         node.deleted_at = Some(deleted_at);
         node.tombstone_version = Some(tombstone_version);
         tx.execute(
@@ -1077,6 +1124,63 @@ fn apply_delete_node(
         )?;
     }
     Ok(())
+}
+
+fn rollback_delete_node(
+    tx: &Transaction<'_>,
+    workspace_id: WorkspaceId,
+    node_id: NodeId,
+    rejected_deleted_at: DateTime<Utc>,
+    updated_at: DateTime<Utc>,
+) -> Result<()> {
+    let base_path = node_path(tx, node_id)?;
+    for (node_id, _path, node_json) in matching_paths(tx, workspace_id, &base_path, true)? {
+        let mut node = serde_json::from_str::<Node>(&node_json)?;
+        if node.deleted_at != Some(rejected_deleted_at) {
+            continue;
+        }
+        node.deleted_at = None;
+        node.tombstone_version = None;
+        node.updated_at = updated_at;
+        tx.execute(
+            "UPDATE local_nodes
+             SET deleted_at = NULL, tombstone_version = NULL, updated_at = ?2, node_json = ?3
+             WHERE node_id = ?1",
+            params![node_id, updated_at, serde_json::to_string(&node)?],
+        )?;
+    }
+    Ok(())
+}
+
+const fn operation_target_node(operation: &Operation) -> Option<NodeId> {
+    match &operation.kind {
+        OperationKind::MoveNode { node_id, .. }
+        | OperationKind::DeleteNode { node_id, .. }
+        | OperationKind::PutFileRevision { node_id, .. }
+        | OperationKind::RestoreNode { node_id, .. }
+        | OperationKind::CreateNode { node_id, .. } => Some(*node_id),
+        OperationKind::SetRule { .. }
+        | OperationKind::SetEnvVar { .. }
+        | OperationKind::DeleteEnvVar { .. } => None,
+    }
+}
+
+fn has_other_pending_op_for_node(
+    tx: &Transaction<'_>,
+    excluded_op_id: OpId,
+    node_id: NodeId,
+) -> Result<bool> {
+    let mut statement = tx.prepare("SELECT operation_json FROM pending_ops WHERE op_id != ?1")?;
+    let rows = statement.query_map(params![excluded_op_id.to_string()], |row| {
+        row.get::<_, String>(0)
+    })?;
+    for row in rows {
+        let operation: Operation = serde_json::from_str(&row?)?;
+        if operation_target_node(&operation) == Some(node_id) {
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }
 
 fn apply_restore_node(
@@ -1931,6 +2035,175 @@ mod tests {
         assert!(store
             .get_node_by_path(ids.workspace, "axb/child")?
             .is_some());
+        Ok(())
+    }
+    #[test]
+    fn rollback_rejected_move_restores_original_path() -> Result<()> {
+        let mut store = LocalStore::in_memory()?;
+        let ids = Ids::new();
+        store.initialize_workspace(ids.workspace, "rollback-move", ids.root)?;
+        let docs = op(
+            ids.workspace,
+            ids.device,
+            0,
+            OperationKind::CreateNode {
+                node_id: ids.docs,
+                parent_id: ids.root,
+                name: "docs".to_owned(),
+                kind: NodeKind::Directory,
+                initial_revision: None,
+            },
+        )?;
+        store.apply_operation(&docs)?;
+        let file = op(
+            ids.workspace,
+            ids.device,
+            1,
+            OperationKind::CreateNode {
+                node_id: ids.file,
+                parent_id: ids.docs,
+                name: "readme.md".to_owned(),
+                kind: NodeKind::File,
+                initial_revision: Some(file_revision(ids, None)?),
+            },
+        )?;
+        store.apply_operation(&file)?;
+        let rename = op(
+            ids.workspace,
+            ids.device,
+            2,
+            OperationKind::MoveNode {
+                node_id: ids.file,
+                old_parent_id: ids.docs,
+                old_name: "readme.md".to_owned(),
+                new_parent_id: ids.root,
+                new_name: "README.md".to_owned(),
+            },
+        )?;
+        store.apply_local_pending_op(&rename)?;
+
+        assert!(store
+            .get_node_by_path(ids.workspace, "README.md")?
+            .is_some());
+        assert!(store.rollback_rejected_pending_op(&rename)?);
+        assert!(store
+            .get_node_by_path(ids.workspace, "docs/readme.md")?
+            .is_some());
+        assert!(store
+            .get_node_by_path(ids.workspace, "README.md")?
+            .is_none());
+        assert!(store.list_pending_ops(ids.workspace)?.is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn rollback_rejected_delete_restores_tombstoned_subtree() -> Result<()> {
+        let mut store = LocalStore::in_memory()?;
+        let ids = Ids::new();
+        store.initialize_workspace(ids.workspace, "rollback-delete", ids.root)?;
+        let docs = op(
+            ids.workspace,
+            ids.device,
+            0,
+            OperationKind::CreateNode {
+                node_id: ids.docs,
+                parent_id: ids.root,
+                name: "docs".to_owned(),
+                kind: NodeKind::Directory,
+                initial_revision: None,
+            },
+        )?;
+        store.apply_operation(&docs)?;
+        let file = op(
+            ids.workspace,
+            ids.device,
+            1,
+            OperationKind::CreateNode {
+                node_id: ids.file,
+                parent_id: ids.docs,
+                name: "readme.md".to_owned(),
+                kind: NodeKind::File,
+                initial_revision: Some(file_revision(ids, None)?),
+            },
+        )?;
+        store.apply_operation(&file)?;
+        let delete = op(
+            ids.workspace,
+            ids.device,
+            2,
+            OperationKind::DeleteNode {
+                node_id: ids.docs,
+                recursive: true,
+            },
+        )?;
+        store.apply_local_pending_op(&delete)?;
+
+        assert!(store.get_node_by_path(ids.workspace, "docs")?.is_none());
+        assert!(store.rollback_rejected_pending_op(&delete)?);
+        assert!(store.get_node_by_path(ids.workspace, "docs")?.is_some());
+        assert!(store
+            .get_node_by_path(ids.workspace, "docs/readme.md")?
+            .is_some());
+        assert!(store.list_pending_ops(ids.workspace)?.is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn rollback_rejected_delete_preserves_existing_tombstones() -> Result<()> {
+        let mut store = LocalStore::in_memory()?;
+        let ids = Ids::new();
+        store.initialize_workspace(ids.workspace, "rollback-existing-tombstone", ids.root)?;
+        store.apply_operation(&op(
+            ids.workspace,
+            ids.device,
+            0,
+            OperationKind::CreateNode {
+                node_id: ids.docs,
+                parent_id: ids.root,
+                name: "docs".to_owned(),
+                kind: NodeKind::Directory,
+                initial_revision: None,
+            },
+        )?)?;
+        store.apply_operation(&op(
+            ids.workspace,
+            ids.device,
+            1,
+            OperationKind::CreateNode {
+                node_id: ids.file,
+                parent_id: ids.docs,
+                name: "old.md".to_owned(),
+                kind: NodeKind::File,
+                initial_revision: Some(file_revision(ids, None)?),
+            },
+        )?)?;
+        store.apply_operation(&op(
+            ids.workspace,
+            ids.device,
+            2,
+            OperationKind::DeleteNode {
+                node_id: ids.file,
+                recursive: false,
+            },
+        )?)?;
+        let delete_dir = op(
+            ids.workspace,
+            ids.device,
+            3,
+            OperationKind::DeleteNode {
+                node_id: ids.docs,
+                recursive: true,
+            },
+        )?;
+        store.apply_local_pending_op(&delete_dir)?;
+
+        assert!(store.get_node_by_path(ids.workspace, "docs")?.is_none());
+        assert!(store.rollback_rejected_pending_op(&delete_dir)?);
+        assert!(store.get_node_by_path(ids.workspace, "docs")?.is_some());
+        assert!(store
+            .get_node_by_path(ids.workspace, "docs/old.md")?
+            .is_none());
+        assert!(store.list_pending_ops(ids.workspace)?.is_empty());
         Ok(())
     }
     #[derive(Debug, Clone, Copy)]

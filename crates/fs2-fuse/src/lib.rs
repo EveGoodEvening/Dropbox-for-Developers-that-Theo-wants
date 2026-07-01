@@ -1566,6 +1566,7 @@ const fn file_type(kind: NodeKind) -> FileType {
 mod tests {
     use super::*;
     use fs2_core::{Cursor, NodeRevision, Operation, OperationKind, RevisionContent, RevisionId};
+    use fs2_sync::{InboundSync, OutboundQueue};
 
     #[test]
     fn exposes_crate_name() {
@@ -1722,6 +1723,47 @@ mod tests {
             pending.operation.kind,
             OperationKind::DeleteNode { node_id, .. } if node_id == ids.symlink
         )));
+        Ok(())
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn rename_and_delete_on_a_converge_to_b() -> Result<(), Box<dyn std::error::Error>> {
+        let harness = fs2_testkit::TwoClientHarness::start()?;
+        harness.simulate_file_creation_on_a("move-me.txt", b"move")?;
+        harness.simulate_file_creation_on_a("delete-me.txt", b"delete")?;
+        let mut origin_store = harness.open_client_a_store()?;
+        let mut mirror_store = harness.open_client_b_store()?;
+        InboundSync::new(&harness.client_a, harness.workspace_id, Duration::ZERO)
+            .sync_startup(&mut origin_store)?;
+        harness.sync_b(&mut mirror_store)?;
+
+        let mut metadata_fs =
+            MetadataWorkspaceFs::new(origin_store, harness.workspace_id, harness.root_node_id);
+        metadata_fs.move_local_node(
+            harness.root_node_id,
+            "move-me.txt",
+            harness.root_node_id,
+            "moved.txt",
+        )?;
+        metadata_fs.delete_local_node(harness.root_node_id, "delete-me.txt", false)?;
+        let report = OutboundQueue::new(&harness.client_a).drain_workspace(
+            &mut metadata_fs.store,
+            harness.workspace_id,
+            &[],
+        )?;
+        assert_eq!(report.submitted, 2);
+        assert_eq!(report.failed, None);
+
+        harness.sync_b(&mut mirror_store)?;
+        assert!(mirror_store
+            .get_node_by_path(harness.workspace_id, "moved.txt")?
+            .is_some());
+        assert!(mirror_store
+            .get_node_by_path(harness.workspace_id, "move-me.txt")?
+            .is_none());
+        assert!(mirror_store
+            .get_node_by_path(harness.workspace_id, "delete-me.txt")?
+            .is_none());
         Ok(())
     }
 

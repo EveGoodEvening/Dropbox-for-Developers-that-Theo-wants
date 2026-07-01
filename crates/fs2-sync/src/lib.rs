@@ -5,8 +5,8 @@ use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
 use fs2_core::{
     BlobId, BlobStatusResponse, CommitOperationRequest, CommitOperationResponse, Cursor,
     DevBlobDownloadRequest, DevBlobDownloadResponse, DevBlobUploadRequest, DevBlobUploadResponse,
-    ErrorEnvelope, FetchOpsResponse, ManifestResponse, Operation, OperationKind, RevisionContent,
-    RuleAction, WorkspaceEvent, WorkspaceId, WorkspacePath,
+    ErrorEnvelope, FetchOpsResponse, Fs2Error, ManifestResponse, Operation, OperationKind,
+    RevisionContent, RuleAction, WorkspaceEvent, WorkspaceId, WorkspacePath,
 };
 use fs2_crypto::{encrypt_blob, CryptoError, EncryptionHeader, WorkspaceContentKey};
 use fs2_rules::{EvaluationPurpose, RuleEngine, RulePathKind};
@@ -265,12 +265,40 @@ fn record_outbound_failure(
 ) -> Result<OutboundFailure, OutboundQueueError> {
     let retryable = error.is_transient();
     let message = error.to_string();
+    if should_rollback_rejected_metadata_op(operation, error)
+        && store.rollback_rejected_pending_op(operation)?
+    {
+        return Ok(OutboundFailure {
+            op_id: operation.op_id,
+            retryable,
+            message,
+        });
+    }
     store.mark_pending_op_failed(operation, &message)?;
     Ok(OutboundFailure {
         op_id: operation.op_id,
         retryable,
         message,
     })
+}
+
+fn should_rollback_rejected_metadata_op(operation: &Operation, error: &ApiClientError) -> bool {
+    matches!(
+        operation.kind,
+        OperationKind::MoveNode { .. } | OperationKind::DeleteNode { .. }
+    ) && matches!(
+        error,
+        ApiClientError::HttpStatus {
+            structured: Some(envelope),
+            ..
+        } if matches!(
+            envelope.error.code,
+            Fs2Error::NodeNotFound
+                | Fs2Error::PathCollision
+                | Fs2Error::RevisionConflict
+                | Fs2Error::InvalidOperation
+        )
+    )
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1667,6 +1695,89 @@ mod tests {
             .last_error
             .as_deref()
             .is_some_and(|error| error.contains("missing upload plan")));
+        Ok(())
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn outbound_auth_failure_keeps_pending_metadata_op(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let backend = spawn_backend()?;
+        let bootstrap = ApiClient::with_retry_policy(
+            &backend.base_url,
+            "bootstrap-token",
+            RetryPolicy::no_retry(),
+        )?;
+        let login: TestLoginResponse = bootstrap.post_json(
+            &["v1", "auth", "dev-login"],
+            &serde_json::json!({
+                "device_name": "outbound-auth-failure-test",
+                "platform": {"os": "linux", "arch": "x86_64"},
+                "public_key": "test-public-key"
+            }),
+        )?;
+        let client = ApiClient::with_retry_policy(
+            &backend.base_url,
+            login.access_token,
+            RetryPolicy::no_retry(),
+        )?;
+        let workspace: fs2_backend::CreateWorkspaceResponse = client.post_json(
+            &["v1", "workspaces"],
+            &serde_json::json!({"name": "outbound-auth-failure"}),
+        )?;
+        let workspace_id = workspace.workspace_id;
+        let device_id = login.device_id.parse()?;
+        let key = WorkspaceContentKey::from_bytes([57; 32]);
+        let plan = BlobUploadPlan::from_plaintext(b"renamed", &key)?;
+        let create = file_create_operation(
+            workspace_id,
+            device_id,
+            workspace.root_node_id,
+            "old.txt",
+            Cursor::new(0)?,
+            &plan,
+        )?;
+        let OperationKind::CreateNode { node_id, .. } = create.kind else {
+            unreachable!("file_create_operation creates nodes")
+        };
+        let rename = Operation {
+            op_id: fs2_core::OpId::new_v4(),
+            workspace_id,
+            device_id,
+            base_cursor: Cursor::new(1)?,
+            kind: OperationKind::MoveNode {
+                node_id,
+                old_parent_id: workspace.root_node_id,
+                old_name: "old.txt".to_owned(),
+                new_parent_id: workspace.root_node_id,
+                new_name: "new.txt".to_owned(),
+            },
+            created_at: chrono::Utc::now(),
+        };
+        let mut store = fs2_daemon::LocalStore::in_memory()?;
+        store.initialize_workspace(
+            workspace_id,
+            "outbound-auth-failure",
+            workspace.root_node_id,
+        )?;
+        store.apply_operation(&create)?;
+        store.apply_local_pending_op(&rename)?;
+        let unauthorized = ApiClient::with_retry_policy(
+            &backend.base_url,
+            "not-a-valid-token",
+            RetryPolicy::no_retry(),
+        )?;
+
+        let report =
+            OutboundQueue::new(&unauthorized).drain_workspace(&mut store, workspace_id, &[])?;
+
+        let failure = report.failed.ok_or("expected auth failure")?;
+        assert_eq!(failure.op_id, rename.op_id);
+        assert!(!failure.retryable);
+        assert!(store.get_node_by_path(workspace_id, "new.txt")?.is_some());
+        assert!(store.get_node_by_path(workspace_id, "old.txt")?.is_none());
+        let pending = store.list_pending_ops(workspace_id)?;
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0].retry_count, 1);
         Ok(())
     }
 }
