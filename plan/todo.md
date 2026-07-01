@@ -830,11 +830,11 @@ Acceptance criteria:
 
 ### 13.3 Rename and delete
 
-- [ ] Implement `rename`.
-- [ ] Implement `unlink`.
-- [ ] Implement `rmdir`.
-- [ ] Queue corresponding ops.
-- [ ] Apply optimistic local state.
+- [x] Implement `rename`.
+- [x] Implement `unlink`.
+- [x] Implement `rmdir`.
+- [x] Queue corresponding ops.
+- [x] Apply optimistic local state.
 - [ ] Handle backend rejection.
 
 Acceptance criteria:

@@ -1055,7 +1055,9 @@ fn apply_delete_node(
     node_id: NodeId,
     deleted_at: DateTime<Utc>,
 ) -> Result<()> {
-    ensure_live_node(tx, node_id)?;
+    if node_by_id_any(tx, node_id)?.deleted_at.is_some() {
+        return Ok(());
+    }
     let path = node_path(tx, node_id)?;
     let tombstone_version = workspace_cursor(tx, workspace_id)?.value() + 1;
     for (node_id, _path, node_json) in matching_paths(tx, workspace_id, &path, true)? {

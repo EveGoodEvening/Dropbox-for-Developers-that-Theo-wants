@@ -820,6 +820,137 @@ impl MetadataWorkspaceFs {
         }
     }
 
+    pub fn move_local_node(
+        &mut self,
+        parent_id: NodeId,
+        name: &str,
+        new_parent_id: NodeId,
+        new_name: &str,
+    ) -> std::io::Result<()> {
+        let node = self
+            .lookup_child(parent_id, name)
+            .map_err(io_other)?
+            .map(|(node, _)| node)
+            .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::NotFound, "source missing"))?;
+        let mut ancestor = Some(new_parent_id);
+        while let Some(ancestor_id) = ancestor {
+            if ancestor_id == node.node_id {
+                return Err(std::io::Error::from_raw_os_error(libc::EINVAL));
+            }
+            ancestor = self
+                .store
+                .get_node_by_id(ancestor_id)
+                .map_err(io_other)?
+                .and_then(|ancestor_node| ancestor_node.parent_id);
+        }
+        let new_name_parsed = NodeName::parse(new_name).map_err(|error| {
+            std::io::Error::new(std::io::ErrorKind::InvalidInput, error.to_string())
+        })?;
+        let mut replacement = None;
+        for sibling in self.store.list_children(new_parent_id).map_err(io_other)? {
+            if sibling.node_id == node.node_id {
+                continue;
+            }
+            let sibling_name = NodeName::parse(&sibling.name).map_err(|error| {
+                std::io::Error::new(std::io::ErrorKind::InvalidData, error.to_string())
+            })?;
+            if names_collide(&new_name_parsed, &sibling_name, CasePolicy::Portable) {
+                if sibling.name == new_name {
+                    replacement = Some(sibling);
+                    continue;
+                }
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::AlreadyExists,
+                    "portable sibling name collision",
+                ));
+            }
+        }
+        let mut move_created_at = chrono::Utc::now();
+        if let Some(replacement) = replacement {
+            match (
+                node.kind == NodeKind::Directory,
+                replacement.kind == NodeKind::Directory,
+            ) {
+                (true, true) => {
+                    if !self
+                        .store
+                        .list_children(replacement.node_id)
+                        .map_err(io_other)?
+                        .is_empty()
+                    {
+                        return Err(std::io::Error::from_raw_os_error(libc::ENOTEMPTY));
+                    }
+                }
+                (true, false) => return Err(std::io::Error::from_raw_os_error(libc::ENOTDIR)),
+                (false, true) => return Err(std::io::Error::from_raw_os_error(libc::EISDIR)),
+                (false, false) => {}
+            }
+            let delete_created_at = move_created_at;
+            self.delete_local_node_at(new_parent_id, new_name, false, delete_created_at)?;
+            move_created_at = delete_created_at + chrono::Duration::microseconds(1);
+        }
+        let operation = Operation {
+            op_id: fs2_core::OpId::new_v4(),
+            workspace_id: self.workspace_id,
+            device_id: self.device_id,
+            base_cursor: self
+                .store
+                .last_cursor(self.workspace_id)
+                .map_err(io_other)?,
+            kind: OperationKind::MoveNode {
+                node_id: node.node_id,
+                old_parent_id: parent_id,
+                old_name: name.to_owned(),
+                new_parent_id,
+                new_name: new_name.to_owned(),
+            },
+            created_at: move_created_at,
+        };
+        self.store
+            .apply_local_pending_op(&operation)
+            .map_err(io_other)
+    }
+
+    pub fn delete_local_node(
+        &mut self,
+        parent_id: NodeId,
+        name: &str,
+        recursive: bool,
+    ) -> std::io::Result<()> {
+        self.delete_local_node_at(parent_id, name, recursive, chrono::Utc::now())
+    }
+
+    fn delete_local_node_at(
+        &mut self,
+        parent_id: NodeId,
+        name: &str,
+        recursive: bool,
+        created_at: chrono::DateTime<chrono::Utc>,
+    ) -> std::io::Result<()> {
+        let node = self
+            .lookup_child(parent_id, name)
+            .map_err(io_other)?
+            .map(|(node, _)| node)
+            .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::NotFound, "node missing"))?;
+        let operation = Operation {
+            op_id: fs2_core::OpId::new_v4(),
+            workspace_id: self.workspace_id,
+            device_id: self.device_id,
+            base_cursor: self
+                .store
+                .last_cursor(self.workspace_id)
+                .map_err(io_other)?,
+            kind: OperationKind::DeleteNode {
+                node_id: node.node_id,
+                recursive,
+            },
+            created_at,
+        };
+        self.store
+            .apply_local_pending_op(&operation)
+            .map_err(io_other)
+    }
+
     fn node_for_inode(&self, inode: u64) -> Result<Option<Node>, fs2_daemon::LocalStoreError> {
         self.inodes
             .node_for(inode)
@@ -843,6 +974,95 @@ impl Filesystem for MetadataWorkspaceFs {
             Ok(Some((_node, attr))) => reply.entry(&TTL, &attr, 0),
             Ok(None) => reply.error(libc::ENOENT),
             Err(_) => reply.error(libc::EIO),
+        }
+    }
+
+    fn unlink(&mut self, _req: &Request<'_>, parent: u64, name: &OsStr, reply: ReplyEmpty) {
+        let Some(parent_id) = self.inodes.node_for(parent) else {
+            reply.error(libc::ENOENT);
+            return;
+        };
+        let Some(name) = name.to_str() else {
+            reply.error(libc::EINVAL);
+            return;
+        };
+        match self.delete_local_node(parent_id, name, false) {
+            Ok(()) => reply.ok(),
+            Err(error) => reply.error(io_error_code(&error)),
+        }
+    }
+
+    fn rmdir(&mut self, _req: &Request<'_>, parent: u64, name: &OsStr, reply: ReplyEmpty) {
+        let Some(parent_id) = self.inodes.node_for(parent) else {
+            reply.error(libc::ENOENT);
+            return;
+        };
+        let Some(name) = name.to_str() else {
+            reply.error(libc::EINVAL);
+            return;
+        };
+        match self.lookup_child(parent_id, name) {
+            Ok(Some((node, _))) if node.kind == NodeKind::Directory => {
+                match self.store.list_children(node.node_id) {
+                    Ok(children) if children.is_empty() => {}
+                    Ok(_) => {
+                        reply.error(libc::ENOTEMPTY);
+                        return;
+                    }
+                    Err(_) => {
+                        reply.error(libc::EIO);
+                        return;
+                    }
+                }
+            }
+            Ok(Some(_)) => {
+                reply.error(libc::ENOTDIR);
+                return;
+            }
+            Ok(None) => {
+                reply.error(libc::ENOENT);
+                return;
+            }
+            Err(_) => {
+                reply.error(libc::EIO);
+                return;
+            }
+        }
+        match self.delete_local_node(parent_id, name, false) {
+            Ok(()) => reply.ok(),
+            Err(error) => reply.error(io_error_code(&error)),
+        }
+    }
+
+    fn rename(
+        &mut self,
+        _req: &Request<'_>,
+        parent: u64,
+        name: &OsStr,
+        newparent: u64,
+        target_name: &OsStr,
+        flags: u32,
+        reply: ReplyEmpty,
+    ) {
+        if flags != 0 {
+            reply.error(libc::ENOTSUP);
+            return;
+        }
+        let (Some(parent_id), Some(new_parent_id)) = (
+            self.inodes.node_for(parent),
+            self.inodes.node_for(newparent),
+        ) else {
+            reply.error(libc::ENOENT);
+            return;
+        };
+        let (Some(source_name), Some(target_name_str)) = (name.to_str(), target_name.to_str())
+        else {
+            reply.error(libc::EINVAL);
+            return;
+        };
+        match self.move_local_node(parent_id, source_name, new_parent_id, target_name_str) {
+            Ok(()) => reply.ok(),
+            Err(error) => reply.error(io_error_code(&error)),
         }
     }
 
@@ -1481,6 +1701,27 @@ mod tests {
         assert_eq!(error.kind(), std::io::ErrorKind::AlreadyExists);
         assert_eq!(fs.store.list_pending_ops(workspace_id)?.len(), 1);
         assert!(fs.resolve_path("README.md")?.is_none());
+        Ok(())
+    }
+
+    #[test]
+    fn move_and_delete_local_nodes_queue_pending_ops() -> Result<(), Box<dyn std::error::Error>> {
+        let (mut fs, ids) = metadata_fixture()?;
+        fs.move_local_node(ids.project, "README.md", ids.root, "README-renamed.md")?;
+        assert!(fs.resolve_path("README-renamed.md")?.is_some());
+        assert!(fs.resolve_path("project/README.md")?.is_none());
+        fs.delete_local_node(ids.project, "README.link", false)?;
+        assert!(fs.resolve_path("project/README.link")?.is_none());
+        let pending = fs.store.list_pending_ops(ids.workspace)?;
+        assert_eq!(pending.len(), 2);
+        assert!(pending.iter().any(|pending| matches!(
+            pending.operation.kind,
+            OperationKind::MoveNode { node_id, .. } if node_id == ids.file
+        )));
+        assert!(pending.iter().any(|pending| matches!(
+            pending.operation.kind,
+            OperationKind::DeleteNode { node_id, .. } if node_id == ids.symlink
+        )));
         Ok(())
     }
 
