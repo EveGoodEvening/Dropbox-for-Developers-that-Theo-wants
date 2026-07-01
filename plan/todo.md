@@ -789,13 +789,13 @@ Acceptance criteria:
 
 ### 12.4 Symlink read support
 
-- [ ] Implement symlink node metadata.
-- [ ] Implement `readlink`.
-- [ ] Add tests/manual checks for relative symlink.
+- [x] Implement symlink node metadata.
+- [x] Implement `readlink`.
+- [x] Add tests/manual checks for relative symlink.
 
 Acceptance criteria:
 
-- [ ] Relative symlinks round-trip through sync and FUSE.
+- [x] Relative symlinks round-trip through sync and FUSE.
 
 ---
 

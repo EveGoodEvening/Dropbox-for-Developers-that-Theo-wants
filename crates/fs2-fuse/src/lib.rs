@@ -429,6 +429,37 @@ impl MetadataWorkspaceFs {
         Ok(bytes)
     }
 
+    pub fn symlink_target(&self, node_id: NodeId) -> std::io::Result<String> {
+        let node = self
+            .store
+            .get_node_by_id(node_id)
+            .map_err(io_other)?
+            .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::NotFound, "node missing"))?;
+        if node.kind != NodeKind::Symlink {
+            return Err(std::io::Error::from_raw_os_error(libc::EINVAL));
+        }
+        let revision_id = node.current_rev.ok_or_else(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "symlink has no current revision",
+            )
+        })?;
+        let revision = self
+            .store
+            .get_revision(revision_id)
+            .map_err(io_other)?
+            .ok_or_else(|| {
+                std::io::Error::new(std::io::ErrorKind::InvalidData, "revision missing")
+            })?;
+        match revision.content {
+            RevisionContent::Symlink { target } => Ok(target),
+            _ => Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "revision is not symlink content",
+            )),
+        }
+    }
+
     fn node_for_inode(&self, inode: u64) -> Result<Option<Node>, fs2_daemon::LocalStoreError> {
         self.inodes
             .node_for(inode)
@@ -463,6 +494,17 @@ impl Filesystem for MetadataWorkspaceFs {
             },
             Ok(None) => reply.error(libc::ENOENT),
             Err(_) => reply.error(libc::EIO),
+        }
+    }
+
+    fn readlink(&mut self, _req: &Request<'_>, ino: u64, reply: ReplyData) {
+        let Some(node_id) = self.inodes.node_for(ino) else {
+            reply.error(libc::ENOENT);
+            return;
+        };
+        match self.symlink_target(node_id) {
+            Ok(target) => reply.data(target.as_bytes()),
+            Err(error) => reply.error(io_error_code(&error)),
         }
     }
 
@@ -1026,6 +1068,65 @@ mod tests {
         assert_eq!(
             fs::read_to_string(mountpoint.path().join("cat.txt"))?,
             "cat downloads bytes"
+        );
+        drop(session);
+        Ok(())
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn relative_symlink_round_trips_through_sync_and_fuse(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let harness = fs2_testkit::TwoClientHarness::start()?;
+        let symlink_id = NodeId::new_v4();
+        let op = Operation {
+            op_id: fs2_core::OpId::new_v4(),
+            workspace_id: harness.workspace_id,
+            device_id: harness.device_a_id,
+            base_cursor: Cursor::new(0)?,
+            kind: OperationKind::CreateNode {
+                node_id: symlink_id,
+                parent_id: harness.root_node_id,
+                name: "README.link".to_owned(),
+                kind: NodeKind::Symlink,
+                initial_revision: Some(NodeRevision {
+                    revision_id: RevisionId::new_v4(),
+                    node_id: symlink_id,
+                    workspace_id: harness.workspace_id,
+                    device_id: harness.device_a_id,
+                    base_revision_id: None,
+                    content: RevisionContent::Symlink {
+                        target: "README.md".to_owned(),
+                    },
+                    posix_mode: 0o120_777,
+                    mtime: chrono::Utc::now(),
+                    size: 9,
+                    executable: false,
+                    created_at: chrono::Utc::now(),
+                }),
+            },
+            created_at: chrono::Utc::now(),
+        };
+        harness
+            .client_a
+            .submit_operation(harness.workspace_id, &op)?;
+        let mut client_b_store = harness.open_client_b_store()?;
+        assert_eq!(harness.sync_b(&mut client_b_store)?.applied, 1);
+        let metadata_fs =
+            MetadataWorkspaceFs::new(client_b_store, harness.workspace_id, harness.root_node_id);
+        let link_node = metadata_fs
+            .resolve_path("README.link")?
+            .ok_or_else(|| "synced symlink metadata missing".to_owned())?;
+        assert_eq!(metadata_fs.symlink_target(link_node.node_id)?, "README.md");
+        let mountpoint = tempfile::tempdir()?;
+        let session = mount_metadata_workspace(
+            metadata_fs.store,
+            harness.workspace_id,
+            harness.root_node_id,
+            mountpoint.path(),
+        )?;
+        assert_eq!(
+            fs::read_link(mountpoint.path().join("README.link"))?,
+            PathBuf::from("README.md")
         );
         drop(session);
         Ok(())
