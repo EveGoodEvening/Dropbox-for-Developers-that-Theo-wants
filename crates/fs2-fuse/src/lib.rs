@@ -1,13 +1,16 @@
 #![allow(clippy::missing_errors_doc, clippy::module_name_repetitions)]
 //! Read-only FUSE adapter skeleton for FS2 workspaces.
 
-use fs2_core::{BlobId, Node, NodeId, NodeKind, RevisionContent, WorkspaceId};
+use fs2_core::{
+    names_collide, BlobId, CasePolicy, DeviceId, Node, NodeId, NodeKind, NodeName, Operation,
+    OperationKind, RevisionContent, WorkspaceId,
+};
 use fs2_crypto::{decrypt_blob, EncryptedBlob, WorkspaceContentKey};
 use fs2_daemon::{HydrationState, LocalStore};
 use fs2_sync::ApiClient;
 use fuser::{
-    BackgroundSession, FileAttr, FileType, Filesystem, MountOption, ReplyAttr, ReplyData,
-    ReplyDirectory, ReplyEntry, ReplyOpen, Request,
+    BackgroundSession, FileAttr, FileType, Filesystem, MountOption, ReplyAttr, ReplyCreate,
+    ReplyData, ReplyDirectory, ReplyEntry, ReplyOpen, Request,
 };
 use std::{
     collections::HashMap,
@@ -166,7 +169,10 @@ pub struct MetadataWorkspaceFs {
     store: LocalStore,
     workspace_id: WorkspaceId,
     hydration: Option<HydrationConfig>,
+    device_id: DeviceId,
     inodes: InodeMap,
+    write_handles: HashMap<u64, NodeId>,
+    next_handle: u64,
 }
 
 impl MetadataWorkspaceFs {
@@ -176,13 +182,22 @@ impl MetadataWorkspaceFs {
             store,
             workspace_id,
             hydration: None,
+            device_id: DeviceId::new_v4(),
             inodes: InodeMap::new(root_node_id),
+            write_handles: HashMap::new(),
+            next_handle: 1,
         }
     }
 
     #[must_use]
     pub fn with_hydration(mut self, hydration: HydrationConfig) -> Self {
         self.hydration = Some(hydration);
+        self
+    }
+
+    #[must_use]
+    pub const fn with_device_id(mut self, device_id: DeviceId) -> Self {
+        self.device_id = device_id;
         self
     }
 
@@ -248,6 +263,68 @@ impl MetadataWorkspaceFs {
             });
         }
         Ok(entries)
+    }
+
+    pub fn create_local_node(
+        &mut self,
+        parent_id: NodeId,
+        name: &str,
+        kind: NodeKind,
+    ) -> std::io::Result<(Node, FileAttr)> {
+        let new_name = NodeName::parse(name).map_err(|error| {
+            std::io::Error::new(std::io::ErrorKind::InvalidInput, error.to_string())
+        })?;
+        for sibling in self.store.list_children(parent_id).map_err(io_other)? {
+            let sibling_name = NodeName::parse(&sibling.name).map_err(|error| {
+                std::io::Error::new(std::io::ErrorKind::InvalidData, error.to_string())
+            })?;
+            if names_collide(&new_name, &sibling_name, CasePolicy::Portable) {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::AlreadyExists,
+                    "portable sibling name collision",
+                ));
+            }
+        }
+        let operation = Operation {
+            op_id: fs2_core::OpId::new_v4(),
+            workspace_id: self.workspace_id,
+            device_id: self.device_id,
+            base_cursor: self
+                .store
+                .last_cursor(self.workspace_id)
+                .map_err(io_other)?,
+            kind: OperationKind::CreateNode {
+                node_id: NodeId::new_v4(),
+                parent_id,
+                name: name.to_owned(),
+                kind,
+                initial_revision: None,
+            },
+            created_at: chrono::Utc::now(),
+        };
+        self.store
+            .apply_local_pending_op(&operation)
+            .map_err(io_other)?;
+        let OperationKind::CreateNode { node_id, .. } = operation.kind else {
+            return Err(std::io::Error::other("operation was not CreateNode"));
+        };
+        let node = self
+            .store
+            .get_node_by_id(node_id)
+            .map_err(io_other)?
+            .ok_or_else(|| {
+                std::io::Error::new(std::io::ErrorKind::NotFound, "created node missing")
+            })?;
+        let inode = self.inode_for_node(node.node_id);
+        let attr = self.attr_for_node(&node, inode).map_err(io_other)?;
+        Ok((node, attr))
+    }
+
+    fn allocate_write_handle(&mut self, node_id: NodeId) -> u64 {
+        let handle = self.next_handle;
+        self.next_handle = self.next_handle.saturating_add(1).max(1);
+        self.write_handles.insert(handle, node_id);
+        handle
     }
 
     pub fn read_file(
@@ -486,6 +563,56 @@ impl Filesystem for MetadataWorkspaceFs {
         }
     }
 
+    fn mkdir(
+        &mut self,
+        _req: &Request<'_>,
+        parent: u64,
+        name: &OsStr,
+        _mode: u32,
+        _umask: u32,
+        reply: ReplyEntry,
+    ) {
+        let Some(parent_id) = self.inodes.node_for(parent) else {
+            reply.error(libc::ENOENT);
+            return;
+        };
+        let Some(name) = name.to_str() else {
+            reply.error(libc::EINVAL);
+            return;
+        };
+        match self.create_local_node(parent_id, name, NodeKind::Directory) {
+            Ok((_node, attr)) => reply.entry(&TTL, &attr, 0),
+            Err(error) => reply.error(io_error_code(&error)),
+        }
+    }
+
+    fn create(
+        &mut self,
+        _req: &Request<'_>,
+        parent: u64,
+        name: &OsStr,
+        _mode: u32,
+        _umask: u32,
+        _flags: i32,
+        reply: ReplyCreate,
+    ) {
+        let Some(parent_id) = self.inodes.node_for(parent) else {
+            reply.error(libc::ENOENT);
+            return;
+        };
+        let Some(name) = name.to_str() else {
+            reply.error(libc::EINVAL);
+            return;
+        };
+        match self.create_local_node(parent_id, name, NodeKind::File) {
+            Ok((node, attr)) => {
+                let handle = self.allocate_write_handle(node.node_id);
+                reply.created(&TTL, &attr, 0, handle, 0);
+            }
+            Err(error) => reply.error(io_error_code(&error)),
+        }
+    }
+
     fn getattr(&mut self, _req: &Request<'_>, ino: u64, reply: ReplyAttr) {
         match self.node_for_inode(ino) {
             Ok(Some(node)) => match self.attr_for_node(&node, ino) {
@@ -620,10 +747,7 @@ fn empty_mount_options() -> Vec<MountOption> {
 }
 
 fn metadata_mount_options() -> Vec<MountOption> {
-    vec![
-        MountOption::RO,
-        MountOption::FSName("fs2-metadata".to_owned()),
-    ]
+    vec![MountOption::FSName("fs2-metadata".to_owned())]
 }
 
 fn blob_cache_path(cache_dir: &Path, blob_id: &BlobId) -> PathBuf {
@@ -650,6 +774,7 @@ fn io_error_code(error: &std::io::Error) -> i32 {
         std::io::ErrorKind::NotFound => libc::ENOENT,
         std::io::ErrorKind::PermissionDenied => libc::EACCES,
         std::io::ErrorKind::InvalidInput => libc::EINVAL,
+        std::io::ErrorKind::AlreadyExists => libc::EEXIST,
         _ => libc::EIO,
     }
 }
@@ -839,6 +964,81 @@ mod tests {
             .node_state(ids.file)?
             .map(|state| state.hydration_state);
         assert_eq!(state, Some(fs2_daemon::HydrationState::MetadataOnly));
+        Ok(())
+    }
+
+    #[test]
+    fn create_local_nodes_adds_metadata_and_pending_ops() -> Result<(), Box<dyn std::error::Error>>
+    {
+        let mut store = LocalStore::in_memory()?;
+        let workspace_id = WorkspaceId::new_v4();
+        let root_id = NodeId::new_v4();
+        store.initialize_workspace(workspace_id, "create", root_id)?;
+        let mut fs = MetadataWorkspaceFs::new(store, workspace_id, root_id);
+        let (dir, dir_attr) = fs.create_local_node(root_id, "src", NodeKind::Directory)?;
+        let (file, file_attr) = fs.create_local_node(root_id, "main.rs", NodeKind::File)?;
+
+        assert_eq!(dir_attr.kind, FileType::Directory);
+        assert_eq!(file_attr.kind, FileType::RegularFile);
+        assert!(fs.resolve_path("src")?.is_some());
+        assert!(fs.resolve_path("main.rs")?.is_some());
+        let handle = fs.allocate_write_handle(file.node_id);
+        assert_eq!(fs.write_handles.get(&handle), Some(&file.node_id));
+        let pending = fs.store.list_pending_ops(workspace_id)?;
+        assert_eq!(pending.len(), 2);
+        assert!(pending.iter().any(|pending| matches!(
+            pending.operation.kind,
+            OperationKind::CreateNode { node_id, .. } if node_id == dir.node_id
+        )));
+        assert!(pending.iter().any(|pending| matches!(
+            pending.operation.kind,
+            OperationKind::CreateNode { node_id, .. } if node_id == file.node_id
+        )));
+        Ok(())
+    }
+
+    #[test]
+    fn create_local_node_rejects_portable_sibling_collision(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let mut store = LocalStore::in_memory()?;
+        let workspace_id = WorkspaceId::new_v4();
+        let root_id = NodeId::new_v4();
+        store.initialize_workspace(workspace_id, "create-collision", root_id)?;
+        let mut fs = MetadataWorkspaceFs::new(store, workspace_id, root_id);
+        fs.create_local_node(root_id, "Readme.md", NodeKind::File)?;
+
+        let Err(error) = fs.create_local_node(root_id, "README.md", NodeKind::File) else {
+            return Err("case-folded duplicate unexpectedly succeeded".into());
+        };
+
+        assert_eq!(error.kind(), std::io::ErrorKind::AlreadyExists);
+        assert_eq!(fs.store.list_pending_ops(workspace_id)?.len(), 1);
+        assert!(fs.resolve_path("README.md")?.is_none());
+        Ok(())
+    }
+
+    #[test]
+    fn mounted_mkdir_and_create_record_pending_ops() -> Result<(), Box<dyn std::error::Error>> {
+        let temp = tempfile::tempdir()?;
+        let db_path = temp.path().join("metadata.sqlite");
+        let workspace_id = WorkspaceId::new_v4();
+        let root_id = NodeId::new_v4();
+        let mut store = LocalStore::open(&db_path)?;
+        store.initialize_workspace(workspace_id, "mounted-create", root_id)?;
+        let mountpoint = tempfile::tempdir()?;
+        let session = mount_metadata_workspace(store, workspace_id, root_id, mountpoint.path())?;
+        fs::create_dir(mountpoint.path().join("src"))?;
+        let created_file = fs::File::create(mountpoint.path().join("created.txt"))?;
+        drop(created_file);
+        drop(session);
+
+        let reopened = LocalStore::open(&db_path)?;
+        let pending = reopened.list_pending_ops(workspace_id)?;
+        assert_eq!(pending.len(), 2);
+        assert!(reopened.get_node_by_path(workspace_id, "src")?.is_some());
+        assert!(reopened
+            .get_node_by_path(workspace_id, "created.txt")?
+            .is_some());
         Ok(())
     }
 

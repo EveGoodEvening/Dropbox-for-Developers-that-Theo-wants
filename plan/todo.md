@@ -803,12 +803,12 @@ Acceptance criteria:
 
 ### 13.1 Create file and directory
 
-- [ ] Implement `mkdir`.
-- [ ] Implement `create`.
-- [ ] Create local node immediately.
-- [ ] Create pending `CreateNode` op.
-- [ ] For files, track write handle.
-- [ ] Add tests with materialized test backend.
+- [x] Implement `mkdir`.
+- [x] Implement `create`.
+- [x] Create local node immediately.
+- [x] Create pending `CreateNode` op.
+- [x] For files, track write handle.
+- [x] Add tests with materialized test backend.
 
 Acceptance criteria:
 

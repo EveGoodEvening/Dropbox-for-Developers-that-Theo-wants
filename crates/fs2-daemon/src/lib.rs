@@ -282,6 +282,32 @@ impl LocalStore {
         Ok(())
     }
 
+    pub fn apply_local_pending_op(&mut self, operation: &Operation) -> Result<()> {
+        let tx = self.conn.transaction()?;
+        let last_cursor = workspace_cursor(&tx, operation.workspace_id)?;
+        let optimistic_cursor = Cursor::new(
+            last_cursor
+                .value()
+                .checked_add(1)
+                .ok_or_else(|| LocalStoreError::Invalid("cursor overflow".to_owned()))?,
+        )
+        .map_err(|error| LocalStoreError::Invalid(error.to_string()))?;
+        apply_operation_in_tx(&tx, operation, optimistic_cursor)?;
+        tx.execute(
+            "INSERT OR REPLACE INTO pending_ops
+             (op_id, workspace_id, operation_json, created_at, retry_count, last_error)
+             VALUES (?1, ?2, ?3, ?4, COALESCE((SELECT retry_count FROM pending_ops WHERE op_id = ?1), 0), NULL)",
+            params![
+                operation.op_id.to_string(),
+                operation.workspace_id.to_string(),
+                serde_json::to_string(operation)?,
+                operation.created_at,
+            ],
+        )?;
+        tx.commit()?;
+        Ok(())
+    }
+
     pub fn list_pending_ops(&self, workspace_id: WorkspaceId) -> Result<Vec<PendingOperation>> {
         let mut statement = self.conn.prepare(
             "SELECT operation_json, retry_count, last_error FROM pending_ops
