@@ -775,17 +775,17 @@ Acceptance criteria:
 
 ### 12.3 Read path with lazy hydration
 
-- [ ] Implement `open` for files.
-- [ ] Implement `read` for files.
-- [ ] If blob absent locally, call daemon hydration.
-- [ ] Verify blob hash.
-- [ ] Serve bytes.
-- [ ] Return useful error when offline and not hydrated.
-- [ ] Update local access timestamp.
+- [x] Implement `open` for files.
+- [x] Implement `read` for files.
+- [x] If blob absent locally, call daemon hydration.
+- [x] Verify blob hash.
+- [x] Serve bytes.
+- [x] Return useful error when offline and not hydrated.
+- [x] Update local access timestamp.
 
 Acceptance criteria:
 
-- [ ] `cat ~/code/project/file.txt` downloads bytes on first read and reads from cache on second read.
+- [x] `cat ~/code/project/file.txt` downloads bytes on first read and reads from cache on second read.
 
 ### 12.4 Symlink read support
 

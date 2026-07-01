@@ -134,6 +134,7 @@ pub struct LocalNodeState {
     pub hydration_state: HydrationState,
     pub local_blob_path: Option<String>,
     pub dirty_base_revision_id: Option<RevisionId>,
+    pub last_accessed_at: Option<DateTime<Utc>>,
     pub pinned: bool,
     pub error_code: Option<String>,
     pub error_message: Option<String>,
@@ -443,12 +444,20 @@ impl LocalStore {
         Ok(())
     }
 
+    pub fn mark_node_accessed(&mut self, node_id: NodeId) -> Result<()> {
+        self.conn.execute(
+            "UPDATE local_state SET last_accessed_at = ?2 WHERE node_id = ?1",
+            params![node_id.to_string(), Utc::now()],
+        )?;
+        Ok(())
+    }
+
     pub fn node_state(&self, node_id: NodeId) -> Result<Option<LocalNodeState>> {
         let row = self
             .conn
             .query_row(
                 "SELECT node_id, hydration_state, local_blob_path, dirty_base_revision_id,
-                        pinned, error_code, error_message
+                        last_accessed_at, pinned, error_code, error_message
                  FROM local_state WHERE node_id = ?1",
                 params![node_id.to_string()],
                 |row| {
@@ -457,9 +466,10 @@ impl LocalStore {
                         row.get::<_, String>(1)?,
                         row.get::<_, Option<String>>(2)?,
                         row.get::<_, Option<String>>(3)?,
-                        row.get::<_, bool>(4)?,
-                        row.get::<_, Option<String>>(5)?,
+                        row.get::<_, Option<DateTime<Utc>>>(4)?,
+                        row.get::<_, bool>(5)?,
                         row.get::<_, Option<String>>(6)?,
+                        row.get::<_, Option<String>>(7)?,
                     ))
                 },
             )
@@ -470,6 +480,7 @@ impl LocalStore {
                 hydration_state,
                 local_blob_path,
                 dirty_base_revision_id,
+                last_accessed_at,
                 pinned,
                 error_code,
                 error_message,
@@ -481,6 +492,7 @@ impl LocalStore {
                     dirty_base_revision_id: parse_optional_revision_id_for_store(
                         dirty_base_revision_id,
                     )?,
+                    last_accessed_at,
                     pinned,
                     error_code,
                     error_message,
@@ -591,6 +603,12 @@ impl LocalStore {
         if !column_exists(&self.conn, "pending_ops", "last_error")? {
             self.conn
                 .execute("ALTER TABLE pending_ops ADD COLUMN last_error TEXT", [])?;
+        }
+        if !column_exists(&self.conn, "local_state", "last_accessed_at")? {
+            self.conn.execute(
+                "ALTER TABLE local_state ADD COLUMN last_accessed_at TEXT",
+                [],
+            )?;
         }
         Ok(())
     }
@@ -1396,6 +1414,48 @@ mod tests {
         let listed = store.list_pending_ops(ids.workspace)?;
         assert_eq!(listed[0].retry_count, 1);
         assert_eq!(listed[0].last_error.as_deref(), Some("after migration"));
+        Ok(())
+    }
+
+    #[test]
+    fn migrates_legacy_local_state_last_accessed_column() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        let path = dir.path().join("legacy-local-state.sqlite");
+        let ids = Ids::new();
+        {
+            let conn = Connection::open(&path)?;
+            conn.execute_batch(
+                "CREATE TABLE local_state (
+                    node_id TEXT PRIMARY KEY,
+                    hydration_state TEXT NOT NULL DEFAULT 'metadata_only',
+                    local_blob_path TEXT,
+                    dirty_base_revision_id TEXT,
+                    pinned INTEGER NOT NULL DEFAULT 0,
+                    error_code TEXT,
+                    error_message TEXT
+                );",
+            )?;
+            conn.execute(
+                "INSERT INTO local_state (node_id, hydration_state, pinned) VALUES (?1, ?2, 0)",
+                params![
+                    ids.file.to_string(),
+                    HydrationState::MetadataOnly.to_string()
+                ],
+            )?;
+        }
+
+        let mut store = LocalStore::open(&path)?;
+        assert_eq!(
+            store
+                .node_state(ids.file)?
+                .map(|state| state.last_accessed_at),
+            Some(None)
+        );
+        store.mark_node_accessed(ids.file)?;
+        assert!(store
+            .node_state(ids.file)?
+            .and_then(|state| state.last_accessed_at)
+            .is_some());
         Ok(())
     }
 

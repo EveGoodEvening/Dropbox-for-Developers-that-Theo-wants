@@ -640,10 +640,15 @@ version = "0.1.0"
 dependencies = [
  "chrono",
  "fs2-core",
+ "fs2-crypto",
  "fs2-daemon",
+ "fs2-sync",
+ "fs2-testkit",
  "fuser",
  "libc",
+ "serde_json",
  "tempfile",
+ "tokio",
 ]
 
 [[package]]

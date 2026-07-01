@@ -1,16 +1,19 @@
 #![allow(clippy::missing_errors_doc, clippy::module_name_repetitions)]
 //! Read-only FUSE adapter skeleton for FS2 workspaces.
 
-use fs2_core::{Node, NodeId, NodeKind, WorkspaceId};
-use fs2_daemon::LocalStore;
+use fs2_core::{BlobId, Node, NodeId, NodeKind, RevisionContent, WorkspaceId};
+use fs2_crypto::{decrypt_blob, EncryptedBlob, WorkspaceContentKey};
+use fs2_daemon::{HydrationState, LocalStore};
+use fs2_sync::ApiClient;
 use fuser::{
-    BackgroundSession, FileAttr, FileType, Filesystem, MountOption, ReplyAttr, ReplyDirectory,
-    ReplyEntry, Request,
+    BackgroundSession, FileAttr, FileType, Filesystem, MountOption, ReplyAttr, ReplyData,
+    ReplyDirectory, ReplyEntry, ReplyOpen, Request,
 };
 use std::{
     collections::HashMap,
     ffi::OsStr,
-    path::Path,
+    fs,
+    path::{Path, PathBuf},
     time::{Duration, SystemTime},
 };
 
@@ -151,10 +154,18 @@ impl Filesystem for EmptyWorkspaceFs {
     }
 }
 
+#[derive(Debug, Clone)]
+pub struct HydrationConfig {
+    pub client: ApiClient,
+    pub content_key: WorkspaceContentKey,
+    pub cache_dir: PathBuf,
+}
+
 #[derive(Debug)]
 pub struct MetadataWorkspaceFs {
     store: LocalStore,
     workspace_id: WorkspaceId,
+    hydration: Option<HydrationConfig>,
     inodes: InodeMap,
 }
 
@@ -164,8 +175,15 @@ impl MetadataWorkspaceFs {
         Self {
             store,
             workspace_id,
+            hydration: None,
             inodes: InodeMap::new(root_node_id),
         }
+    }
+
+    #[must_use]
+    pub fn with_hydration(mut self, hydration: HydrationConfig) -> Self {
+        self.hydration = Some(hydration);
+        self
     }
 
     pub fn resolve_path(&self, path: &str) -> Result<Option<Node>, fs2_daemon::LocalStoreError> {
@@ -232,6 +250,185 @@ impl MetadataWorkspaceFs {
         Ok(entries)
     }
 
+    pub fn read_file(
+        &mut self,
+        node_id: NodeId,
+        offset: i64,
+        size: u32,
+    ) -> std::io::Result<Vec<u8>> {
+        if offset < 0 {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "negative read offset",
+            ));
+        }
+        let node = self
+            .store
+            .get_node_by_id(node_id)
+            .map_err(io_other)?
+            .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::NotFound, "node missing"))?;
+        if node.kind != NodeKind::File {
+            return Err(std::io::Error::from_raw_os_error(libc::EISDIR));
+        }
+        let bytes = self.ensure_file_bytes(&node)?;
+        self.store
+            .mark_node_accessed(node.node_id)
+            .map_err(io_other)?;
+        let start = usize::try_from(offset).map_err(io_other)?;
+        let requested = usize::try_from(size).map_err(io_other)?;
+        if start >= bytes.len() {
+            return Ok(Vec::new());
+        }
+        let end = start.saturating_add(requested).min(bytes.len());
+        Ok(bytes[start..end].to_vec())
+    }
+
+    fn ensure_file_bytes(&mut self, node: &Node) -> std::io::Result<Vec<u8>> {
+        if let Some(state) = self.store.node_state(node.node_id).map_err(io_other)? {
+            if state.hydration_state == HydrationState::Hydrated {
+                if let Some(path) = state.local_blob_path {
+                    if self.cached_path_matches_current_revision(node, &path)? {
+                        match fs::read(&path) {
+                            Ok(bytes) => return Ok(bytes),
+                            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                            Err(error) => return Err(error),
+                        }
+                    }
+                }
+            }
+        }
+        if let Some(bytes) = self.cached_file_bytes(node)? {
+            return Ok(bytes);
+        }
+        self.hydrate_file(node)
+    }
+
+    fn cached_path_matches_current_revision(
+        &self,
+        node: &Node,
+        path: &str,
+    ) -> std::io::Result<bool> {
+        let (blob_id, _encryption_header, expected_size) = self.file_revision_blob(node)?;
+        let Some(entry) = self.store.blob_cache_entry(&blob_id).map_err(io_other)? else {
+            return Ok(false);
+        };
+        Ok(entry.verified && entry.size == expected_size && entry.path == path)
+    }
+
+    fn cached_file_bytes(&mut self, node: &Node) -> std::io::Result<Option<Vec<u8>>> {
+        let (blob_id, _encryption_header, expected_size) = self.file_revision_blob(node)?;
+        let Some(entry) = self.store.blob_cache_entry(&blob_id).map_err(io_other)? else {
+            return Ok(None);
+        };
+        if !entry.verified || entry.size != expected_size {
+            return Ok(None);
+        }
+        let bytes = match fs::read(&entry.path) {
+            Ok(bytes) => bytes,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(error) => return Err(error),
+        };
+        if bytes.len() as u64 != expected_size {
+            return Ok(None);
+        }
+        let pinned = self
+            .store
+            .node_state(node.node_id)
+            .map_err(io_other)?
+            .is_some_and(|state| state.pinned);
+        self.store
+            .set_hydration_state(
+                node.node_id,
+                HydrationState::Hydrated,
+                Some(&entry.path),
+                pinned,
+            )
+            .map_err(io_other)?;
+        Ok(Some(bytes))
+    }
+
+    fn file_revision_blob(&self, node: &Node) -> std::io::Result<(BlobId, Option<String>, u64)> {
+        let revision_id = node.current_rev.ok_or_else(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "file has no current revision",
+            )
+        })?;
+        let revision = self
+            .store
+            .get_revision(revision_id)
+            .map_err(io_other)?
+            .ok_or_else(|| {
+                std::io::Error::new(std::io::ErrorKind::InvalidData, "revision missing")
+            })?;
+        let RevisionContent::File {
+            blob_id,
+            encryption_header,
+            ..
+        } = revision.content
+        else {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "revision is not file content",
+            ));
+        };
+        Ok((blob_id, encryption_header, revision.size))
+    }
+
+    fn hydrate_file(&mut self, node: &Node) -> std::io::Result<Vec<u8>> {
+        let hydration = self.hydration.as_ref().ok_or_else(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::NotConnected,
+                "file is metadata-only and backend hydration is unavailable",
+            )
+        })?;
+        let (blob_id, encryption_header, expected_size) = self.file_revision_blob(node)?;
+        let header = encryption_header
+            .ok_or_else(|| {
+                std::io::Error::new(std::io::ErrorKind::InvalidData, "missing encryption header")
+            })
+            .and_then(|header| serde_json::from_str(&header).map_err(io_other))?;
+        let downloaded = hydration.client.download_blob(&blob_id).map_err(io_other)?;
+        let bytes = decrypt_blob(
+            &EncryptedBlob {
+                blob_id: blob_id.clone(),
+                header,
+                ciphertext: downloaded.bytes,
+            },
+            &hydration.content_key,
+        )
+        .map_err(io_other)?;
+        if bytes.len() as u64 != expected_size {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "hydrated file size does not match revision metadata",
+            ));
+        }
+        fs::create_dir_all(&hydration.cache_dir)?;
+        let cache_path = blob_cache_path(&hydration.cache_dir, &blob_id);
+        let tmp_path = cache_path.with_extension("tmp");
+        fs::write(&tmp_path, &bytes)?;
+        fs::rename(&tmp_path, &cache_path)?;
+        let pinned = self
+            .store
+            .node_state(node.node_id)
+            .map_err(io_other)?
+            .is_some_and(|state| state.pinned);
+        let cache_path_string = cache_path.display().to_string();
+        self.store
+            .mark_blob_cached(&blob_id, &cache_path_string, bytes.len() as u64, true)
+            .map_err(io_other)?;
+        self.store
+            .set_hydration_state(
+                node.node_id,
+                HydrationState::Hydrated,
+                Some(&cache_path_string),
+                pinned,
+            )
+            .map_err(io_other)?;
+        Ok(bytes)
+    }
+
     fn node_for_inode(&self, inode: u64) -> Result<Option<Node>, fs2_daemon::LocalStoreError> {
         self.inodes
             .node_for(inode)
@@ -289,6 +486,40 @@ impl Filesystem for MetadataWorkspaceFs {
             Err(_) => reply.error(libc::EIO),
         }
     }
+
+    fn open(&mut self, _req: &Request<'_>, ino: u64, flags: i32, reply: ReplyOpen) {
+        if flags & libc::O_ACCMODE != libc::O_RDONLY {
+            reply.error(libc::EACCES);
+            return;
+        }
+        match self.node_for_inode(ino) {
+            Ok(Some(node)) if node.kind == NodeKind::File => reply.opened(ino, 0),
+            Ok(Some(_)) => reply.error(libc::EISDIR),
+            Ok(None) => reply.error(libc::ENOENT),
+            Err(_) => reply.error(libc::EIO),
+        }
+    }
+
+    fn read(
+        &mut self,
+        _req: &Request<'_>,
+        ino: u64,
+        _fh: u64,
+        offset: i64,
+        size: u32,
+        _flags: i32,
+        _lock_owner: Option<u64>,
+        reply: ReplyData,
+    ) {
+        let Some(node_id) = self.inodes.node_for(ino) else {
+            reply.error(libc::ENOENT);
+            return;
+        };
+        match self.read_file(node_id, offset, size) {
+            Ok(bytes) => reply.data(&bytes),
+            Err(error) => reply.error(io_error_code(&error)),
+        }
+    }
 }
 
 impl MetadataWorkspaceFs {
@@ -327,6 +558,21 @@ pub fn mount_metadata_workspace(
     )
 }
 
+pub fn mount_hydrated_metadata_workspace(
+    store: LocalStore,
+    workspace_id: WorkspaceId,
+    root_node_id: NodeId,
+    hydration: HydrationConfig,
+    mountpoint: impl AsRef<Path>,
+) -> std::io::Result<BackgroundSession> {
+    let options = metadata_mount_options();
+    fuser::spawn_mount2(
+        MetadataWorkspaceFs::new(store, workspace_id, root_node_id).with_hydration(hydration),
+        mountpoint,
+        &options,
+    )
+}
+
 fn empty_mount_options() -> Vec<MountOption> {
     vec![MountOption::RO, MountOption::FSName("fs2-empty".to_owned())]
 }
@@ -336,6 +582,34 @@ fn metadata_mount_options() -> Vec<MountOption> {
         MountOption::RO,
         MountOption::FSName("fs2-metadata".to_owned()),
     ]
+}
+
+fn blob_cache_path(cache_dir: &Path, blob_id: &BlobId) -> PathBuf {
+    let mut name = String::new();
+    for character in blob_id.to_string().chars() {
+        if character.is_ascii_alphanumeric() || character == '-' || character == '_' {
+            name.push(character);
+        } else {
+            name.push('_');
+        }
+    }
+    cache_dir.join(name)
+}
+
+fn io_other(error: impl std::fmt::Display) -> std::io::Error {
+    std::io::Error::other(error.to_string())
+}
+
+fn io_error_code(error: &std::io::Error) -> i32 {
+    if let Some(code) = error.raw_os_error() {
+        return code;
+    }
+    match error.kind() {
+        std::io::ErrorKind::NotFound => libc::ENOENT,
+        std::io::ErrorKind::PermissionDenied => libc::EACCES,
+        std::io::ErrorKind::InvalidInput => libc::EINVAL,
+        _ => libc::EIO,
+    }
 }
 
 fn add_entries(
@@ -527,6 +801,20 @@ mod tests {
     }
 
     #[test]
+    fn read_file_reports_offline_metadata_only_error() -> Result<(), Box<dyn std::error::Error>> {
+        let (mut fs, ids) = metadata_fixture()?;
+        let error = match fs.read_file(ids.file, 0, 16) {
+            Ok(bytes) => {
+                return Err(format!("read unexpectedly returned {} bytes", bytes.len()).into())
+            }
+            Err(error) => error,
+        };
+        assert_eq!(error.kind(), std::io::ErrorKind::NotConnected);
+        assert!(error.to_string().contains("metadata-only"));
+        Ok(())
+    }
+
+    #[test]
     fn mounted_empty_workspace_lists_empty_root() -> Result<(), Box<dyn std::error::Error>> {
         let mountpoint = tempfile::tempdir()?;
         let _session = mount_empty_workspace(mountpoint.path())?;
@@ -576,6 +864,170 @@ mod tests {
             .node_state(file_id)?
             .map(|state| state.hydration_state);
         assert_eq!(state, Some(fs2_daemon::HydrationState::MetadataOnly));
+        Ok(())
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn read_file_reuses_verified_blob_cache_without_backend(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let harness = fs2_testkit::TwoClientHarness::start()?;
+        let simulated = harness.simulate_file_creation_on_a("cached.txt", b"cached bytes")?;
+        let mut client_b_store = harness.open_client_b_store()?;
+        assert_eq!(harness.sync_b(&mut client_b_store)?.applied, 1);
+        let mut fs =
+            MetadataWorkspaceFs::new(client_b_store, harness.workspace_id, harness.root_node_id);
+        let node = fs
+            .resolve_path(&simulated.path)?
+            .ok_or_else(|| "synced file metadata missing".to_owned())?;
+        let (blob_id, _header, expected_size) = fs.file_revision_blob(&node)?;
+        let cache_dir = tempfile::tempdir()?;
+        let cache_path = cache_dir.path().join("cached-plaintext");
+        fs::write(&cache_path, b"cached bytes")?;
+        let cache_path_string = cache_path.display().to_string();
+        fs.store
+            .mark_blob_cached(&blob_id, &cache_path_string, expected_size, true)?;
+
+        assert_eq!(fs.read_file(node.node_id, 0, 64)?, b"cached bytes");
+        let state = fs
+            .store
+            .node_state(node.node_id)?
+            .ok_or_else(|| "cached state missing".to_owned())?;
+        assert_eq!(state.hydration_state, HydrationState::Hydrated);
+        assert_eq!(
+            state.local_blob_path.as_deref(),
+            Some(cache_path_string.as_str())
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn read_file_does_not_serve_stale_hydrated_path_after_revision_change(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let (mut fs, ids) = metadata_fixture()?;
+        let old_node = fs
+            .store
+            .get_node_by_id(ids.file)?
+            .ok_or_else(|| "file node missing".to_owned())?;
+        let old_revision = old_node
+            .current_rev
+            .ok_or_else(|| "file revision missing".to_owned())?;
+        let cache_dir = tempfile::tempdir()?;
+        let old_path = cache_dir.path().join("old-plaintext");
+        fs::write(&old_path, b"old revision")?;
+        let old_path_string = old_path.display().to_string();
+        let (old_blob_id, _header, old_size) = fs.file_revision_blob(&old_node)?;
+        fs.store
+            .mark_blob_cached(&old_blob_id, &old_path_string, old_size, true)?;
+        fs.store.set_hydration_state(
+            ids.file,
+            HydrationState::Hydrated,
+            Some(&old_path_string),
+            false,
+        )?;
+        let update = Operation {
+            op_id: fs2_core::OpId::new_v4(),
+            workspace_id: ids.workspace,
+            device_id: ids.device,
+            base_cursor: Cursor::new(3)?,
+            kind: OperationKind::PutFileRevision {
+                node_id: ids.file,
+                base_revision_id: Some(old_revision),
+                revision: NodeRevision {
+                    revision_id: RevisionId::new_v4(),
+                    node_id: ids.file,
+                    workspace_id: ids.workspace,
+                    device_id: ids.device,
+                    base_revision_id: Some(old_revision),
+                    content: RevisionContent::File {
+                        blob_id: fs2_core::BlobId::new("sha256:new".to_owned())?,
+                        chunk_ids: Vec::new(),
+                        content_hash: "plaintext-sha256:new".to_owned(),
+                        encryption_header: Some("{}".to_owned()),
+                    },
+                    posix_mode: 0o100_644,
+                    mtime: chrono::Utc::now(),
+                    size: 12,
+                    executable: false,
+                    created_at: chrono::Utc::now(),
+                },
+            },
+            created_at: chrono::Utc::now(),
+        };
+        fs.store
+            .apply_committed_operation(&update, Cursor::new(4)?)?;
+
+        let error = match fs.read_file(ids.file, 0, 64) {
+            Ok(bytes) => return Err(format!("served stale {} bytes", bytes.len()).into()),
+            Err(error) => error,
+        };
+        assert_eq!(error.kind(), std::io::ErrorKind::NotConnected);
+        Ok(())
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn read_file_hydrates_then_serves_cached_bytes() -> Result<(), Box<dyn std::error::Error>>
+    {
+        let harness = fs2_testkit::TwoClientHarness::start()?;
+        let simulated = harness.simulate_file_creation_on_a("file.txt", b"hello from fuse")?;
+        let mut client_b_store = harness.open_client_b_store()?;
+        assert_eq!(harness.sync_b(&mut client_b_store)?.applied, 1);
+        let cache_dir = tempfile::tempdir()?;
+        let mut fs =
+            MetadataWorkspaceFs::new(client_b_store, harness.workspace_id, harness.root_node_id)
+                .with_hydration(HydrationConfig {
+                    client: harness.client_b.clone(),
+                    content_key: harness.content_key.clone(),
+                    cache_dir: cache_dir.path().to_path_buf(),
+                });
+        let node = fs
+            .resolve_path(&simulated.path)?
+            .ok_or_else(|| "synced file metadata missing".to_owned())?;
+
+        assert_eq!(fs.read_file(node.node_id, 0, 5)?, b"hello");
+        let state = fs
+            .store
+            .node_state(node.node_id)?
+            .ok_or_else(|| "hydrated state missing".to_owned())?;
+        assert_eq!(state.hydration_state, HydrationState::Hydrated);
+        assert!(state.last_accessed_at.is_some());
+        let cache_path = state
+            .local_blob_path
+            .ok_or_else(|| "hydrated cache path missing".to_owned())?;
+        fs.hydration = None;
+        assert_eq!(fs.read_file(node.node_id, 6, 4)?, b"from");
+        assert_eq!(fs::read(cache_path)?, b"hello from fuse");
+        Ok(())
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn mounted_read_path_hydrates_file_on_first_cat() -> Result<(), Box<dyn std::error::Error>>
+    {
+        let harness = fs2_testkit::TwoClientHarness::start()?;
+        harness.simulate_file_creation_on_a("cat.txt", b"cat downloads bytes")?;
+        let mut client_b_store = harness.open_client_b_store()?;
+        assert_eq!(harness.sync_b(&mut client_b_store)?.applied, 1);
+        let cache_dir = tempfile::tempdir()?;
+        let mountpoint = tempfile::tempdir()?;
+        let session = mount_hydrated_metadata_workspace(
+            client_b_store,
+            harness.workspace_id,
+            harness.root_node_id,
+            HydrationConfig {
+                client: harness.client_b.clone(),
+                content_key: harness.content_key.clone(),
+                cache_dir: cache_dir.path().to_path_buf(),
+            },
+            mountpoint.path(),
+        )?;
+        assert_eq!(
+            fs::read_to_string(mountpoint.path().join("cat.txt"))?,
+            "cat downloads bytes"
+        );
+        assert_eq!(
+            fs::read_to_string(mountpoint.path().join("cat.txt"))?,
+            "cat downloads bytes"
+        );
+        drop(session);
         Ok(())
     }
 
