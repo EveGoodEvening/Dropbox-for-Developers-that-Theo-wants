@@ -1069,12 +1069,12 @@ Acceptance criteria:
 ### 18.2 Exclude `.git` by default
 
 - [x] Add built-in rule for `.git/**` as local-only/ignored internal.
-- [ ] Ensure FUSE write path does not upload `.git` internals.
+- [x] Ensure FUSE write path does not upload `.git` internals.
 - [x] `fs2 doctor` warns if user overrides this to normal sync.
 
 Acceptance criteria:
 
-- [ ] No `.git/index` or packfile is uploaded under default config.
+- [x] No `.git/index` or packfile is uploaded under default config.
 
 ### 18.3 Git materialization command
 

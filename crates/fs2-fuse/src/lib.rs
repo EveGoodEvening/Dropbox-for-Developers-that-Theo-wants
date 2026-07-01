@@ -230,6 +230,55 @@ impl MetadataWorkspaceFs {
         self.inodes.inode_for(node_id)
     }
 
+    fn node_workspace_path(&self, node_id: NodeId) -> std::io::Result<String> {
+        let mut components = Vec::new();
+        let mut current = Some(node_id);
+        while let Some(node_id) = current {
+            let node = self
+                .store
+                .get_node_by_id(node_id)
+                .map_err(io_other)?
+                .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::NotFound, "node missing"))?;
+            current = node.parent_id;
+            if !node.name.is_empty() {
+                components.push(node.name);
+            }
+        }
+        components.reverse();
+        Ok(components.join("/"))
+    }
+
+    fn child_workspace_path(&self, parent_id: NodeId, name: &str) -> std::io::Result<String> {
+        let parent_path = self.node_workspace_path(parent_id)?;
+        if parent_path.is_empty() {
+            Ok(name.to_owned())
+        } else {
+            Ok(format!("{parent_path}/{name}"))
+        }
+    }
+
+    fn subtree_contains_git_component(&self, node_id: NodeId) -> std::io::Result<bool> {
+        if path_has_git_component(&self.node_workspace_path(node_id)?) {
+            return Ok(true);
+        }
+        for child in self.store.list_children(node_id).map_err(io_other)? {
+            if self.subtree_contains_git_component(child.node_id)? {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+
+    fn reject_git_internal_path(path: &str) -> std::io::Result<()> {
+        if path_has_git_component(path) {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                ".git internals are local-only and are not synced through FUSE",
+            ));
+        }
+        Ok(())
+    }
+
     pub fn attr_for_node(
         &self,
         node: &Node,
@@ -295,6 +344,7 @@ impl MetadataWorkspaceFs {
         let new_name = NodeName::parse(name).map_err(|error| {
             std::io::Error::new(std::io::ErrorKind::InvalidInput, error.to_string())
         })?;
+        Self::reject_git_internal_path(&self.child_workspace_path(parent_id, name)?)?;
         for sibling in self.store.list_children(parent_id).map_err(io_other)? {
             let sibling_name = NodeName::parse(&sibling.name).map_err(|error| {
                 std::io::Error::new(std::io::ErrorKind::InvalidData, error.to_string())
@@ -359,6 +409,7 @@ impl MetadataWorkspaceFs {
         if node.kind != NodeKind::File {
             return Err(std::io::Error::from_raw_os_error(libc::EISDIR));
         }
+        Self::reject_git_internal_path(&self.node_workspace_path(node_id)?)?;
         let handle = self.next_write_handle;
         self.next_write_handle = self.next_write_handle.saturating_add(1).max(1);
         fs::create_dir_all(&self.write_cache_dir)?;
@@ -922,6 +973,14 @@ impl MetadataWorkspaceFs {
             .map_err(io_other)?
             .map(|(node, _)| node)
             .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::NotFound, "source missing"))?;
+        Self::reject_git_internal_path(&self.node_workspace_path(node.node_id)?)?;
+        if self.subtree_contains_git_component(node.node_id)? {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                ".git internals are local-only and are not synced through FUSE",
+            ));
+        }
+        Self::reject_git_internal_path(&self.child_workspace_path(new_parent_id, new_name)?)?;
         let mut ancestor = Some(new_parent_id);
         while let Some(ancestor_id) = ancestor {
             if ancestor_id == node.node_id {
@@ -1485,6 +1544,10 @@ impl MetadataWorkspaceFs {
     }
 }
 
+fn path_has_git_component(path: &str) -> bool {
+    path.split('/').any(|component| component == ".git")
+}
+
 const fn regular_file_mode(mode: u32) -> u32 {
     let permission_bits = mode & 0o7777;
     if mode & libc::S_IFMT == libc::S_IFREG {
@@ -1807,6 +1870,73 @@ mod tests {
             pending.operation.kind,
             OperationKind::CreateNode { node_id, .. } if node_id == file.node_id
         )));
+        Ok(())
+    }
+
+    #[test]
+    fn git_internal_creates_and_moves_do_not_queue_ops() -> Result<(), Box<dyn std::error::Error>> {
+        let (mut fs, ids) = metadata_fixture()?;
+
+        let root_git = fs.create_local_node(ids.root, ".git", NodeKind::Directory);
+        assert_eq!(
+            root_git.err().map(|error| error.kind()),
+            Some(std::io::ErrorKind::PermissionDenied)
+        );
+        let nested_git = fs.create_local_node(ids.project, ".git", NodeKind::Directory);
+        assert_eq!(
+            nested_git.err().map(|error| error.kind()),
+            Some(std::io::ErrorKind::PermissionDenied)
+        );
+        let move_into_git_name = fs.move_local_node(ids.project, "README.md", ids.root, ".git");
+        assert_eq!(
+            move_into_git_name.err().map(|error| error.kind()),
+            Some(std::io::ErrorKind::PermissionDenied)
+        );
+        assert!(fs.store.list_pending_ops(ids.workspace)?.is_empty());
+        assert!(fs.resolve_path(".git")?.is_none());
+        assert!(fs.resolve_path("project/.git")?.is_none());
+        Ok(())
+    }
+
+    #[test]
+    fn moving_tree_with_git_descendant_does_not_queue_op() -> Result<(), Box<dyn std::error::Error>>
+    {
+        let (mut fs, ids) = metadata_fixture()?;
+        let repo_id = NodeId::new_v4();
+        let git_id = NodeId::new_v4();
+        let index_id = NodeId::new_v4();
+        for (cursor, node_id, parent_id, name, kind) in [
+            (4, repo_id, ids.root, "repo", NodeKind::Directory),
+            (5, git_id, repo_id, ".git", NodeKind::Directory),
+            (6, index_id, git_id, "index", NodeKind::File),
+        ] {
+            let operation = Operation {
+                op_id: fs2_core::OpId::new_v4(),
+                workspace_id: ids.workspace,
+                device_id: ids.device,
+                base_cursor: Cursor::new(cursor - 1)?,
+                kind: OperationKind::CreateNode {
+                    node_id,
+                    parent_id,
+                    name: name.to_owned(),
+                    kind,
+                    initial_revision: None,
+                },
+                created_at: chrono::Utc::now(),
+            };
+            fs.store
+                .apply_committed_operation(&operation, Cursor::new(cursor)?)?;
+        }
+
+        let result = fs.move_local_node(ids.root, "repo", ids.root, "repo2");
+
+        assert_eq!(
+            result.err().map(|error| error.kind()),
+            Some(std::io::ErrorKind::PermissionDenied)
+        );
+        assert!(fs.resolve_path("repo/.git/index")?.is_some());
+        assert!(fs.resolve_path("repo2/.git/index")?.is_none());
+        assert!(fs.store.list_pending_ops(ids.workspace)?.is_empty());
         Ok(())
     }
 
