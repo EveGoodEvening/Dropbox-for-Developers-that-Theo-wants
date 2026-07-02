@@ -282,6 +282,16 @@ impl LocalStore {
         Ok(())
     }
 
+    pub fn remove_pending_op(&mut self, op_id: OpId) -> Result<()> {
+        let tx = self.conn.transaction()?;
+        tx.execute(
+            "DELETE FROM pending_ops WHERE op_id = ?1",
+            params![op_id.to_string()],
+        )?;
+        tx.commit()?;
+        Ok(())
+    }
+
     pub fn apply_local_pending_op(&mut self, operation: &Operation) -> Result<()> {
         let tx = self.conn.transaction()?;
         let last_cursor = workspace_cursor(&tx, operation.workspace_id)?;
@@ -527,6 +537,27 @@ impl LocalStore {
         Ok(())
     }
 
+    pub fn remove_local_subtree(
+        &mut self,
+        workspace_id: WorkspaceId,
+        node_id: NodeId,
+    ) -> Result<()> {
+        let tx = self.conn.transaction()?;
+        let path = node_path(&tx, node_id)?;
+        for (node_id, _, _) in matching_paths(&tx, workspace_id, &path, true)? {
+            tx.execute(
+                "DELETE FROM local_state WHERE node_id = ?1",
+                params![node_id.clone()],
+            )?;
+            tx.execute(
+                "DELETE FROM local_nodes WHERE node_id = ?1",
+                params![node_id],
+            )?;
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
     pub fn rollback_rejected_pending_op(&mut self, operation: &Operation) -> Result<bool> {
         let tx = self.conn.transaction()?;
         let Some(node_id) = operation_target_node(operation) else {
@@ -658,13 +689,32 @@ impl LocalStore {
             .optional()?
             .map(|json| serde_json::from_str::<Node>(&json).map(|node| node.kind))
             .transpose()?;
+        self.get_effective_rule_for_normalized_path(workspace_id, &normalized, path_kind)
+    }
+
+    pub fn get_effective_rule_for_kind(
+        &self,
+        workspace_id: WorkspaceId,
+        path: &str,
+        kind: NodeKind,
+    ) -> Result<Option<FsRule>> {
+        let normalized = normalize_path(path)?;
+        self.get_effective_rule_for_normalized_path(workspace_id, &normalized, Some(kind))
+    }
+
+    fn get_effective_rule_for_normalized_path(
+        &self,
+        workspace_id: WorkspaceId,
+        normalized: &str,
+        path_kind: Option<NodeKind>,
+    ) -> Result<Option<FsRule>> {
         let mut statement = self.conn.prepare(
             "SELECT pattern, rule_json FROM rules WHERE workspace_id = ?1 ORDER BY priority DESC, id DESC",
         )?;
         let mut rows = statement.query(params![workspace_id.to_string()])?;
         while let Some(row) = rows.next()? {
             let pattern: String = row.get(0)?;
-            if rule_matches(&pattern, &normalized, path_kind)? {
+            if rule_matches(&pattern, normalized, path_kind)? {
                 let rule_json: String = row.get(1)?;
                 return serde_json::from_str(&rule_json)
                     .map(Some)

@@ -3,7 +3,7 @@
 
 use fs2_core::{
     names_collide, BlobId, CasePolicy, DeviceId, Node, NodeId, NodeKind, NodeName, NodeRevision,
-    Operation, OperationKind, RevisionContent, WorkspaceId,
+    Operation, OperationKind, RevisionContent, RuleAction, WorkspaceId, WorkspacePath,
 };
 use fs2_crypto::{decrypt_blob, encrypt_blob, EncryptedBlob, WorkspaceContentKey};
 use fs2_daemon::{HydrationState, LocalStore};
@@ -257,6 +257,38 @@ impl MetadataWorkspaceFs {
         }
     }
 
+    fn path_sync_suppressed(&self, path: &str, kind: NodeKind) -> std::io::Result<bool> {
+        if let Some(rule) = self
+            .store
+            .get_effective_rule_for_kind(self.workspace_id, path, kind)
+            .map_err(io_other)?
+        {
+            return Ok(rule_action_suppresses_upload(rule.action));
+        }
+        let engine = fs2_rules::RuleEngine::new(fs2_rules::Config::default(), Vec::new())
+            .map_err(io_other)?;
+        if path.rsplit('/').next().is_some_and(is_editor_temp_name) {
+            return default_ancestor_suppresses_upload(path, &engine);
+        }
+        default_path_suppresses_upload(path, kind, &engine)
+    }
+
+    fn node_sync_suppressed(&self, node: &Node) -> std::io::Result<bool> {
+        self.path_sync_suppressed(&self.node_workspace_path(node.node_id)?, node.kind)
+    }
+
+    fn parent_sync_suppressed(&self, parent_id: NodeId) -> std::io::Result<bool> {
+        let parent = self
+            .store
+            .get_node_by_id(parent_id)
+            .map_err(io_other)?
+            .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::NotFound, "parent missing"))?;
+        if parent.parent_id.is_none() {
+            return Ok(false);
+        }
+        self.node_sync_suppressed(&parent)
+    }
+
     fn subtree_contains_git_component(&self, node_id: NodeId) -> std::io::Result<bool> {
         if path_has_git_component(&self.node_workspace_path(node_id)?) {
             return Ok(true);
@@ -267,6 +299,35 @@ impl MetadataWorkspaceFs {
             }
         }
         Ok(false)
+    }
+
+    fn move_suppression_state(
+        &self,
+        node: &Node,
+        new_parent_id: NodeId,
+        new_name: &str,
+    ) -> std::io::Result<(bool, bool)> {
+        Ok((
+            self.node_sync_suppressed(node)?,
+            self.path_sync_suppressed(
+                &self.child_workspace_path(new_parent_id, new_name)?,
+                node.kind,
+            )?,
+        ))
+    }
+
+    fn reject_move_below_suppressed_parent(
+        &self,
+        new_parent_id: NodeId,
+        new_path_suppressed: bool,
+    ) -> std::io::Result<()> {
+        if new_path_suppressed || !self.parent_sync_suppressed(new_parent_id)? {
+            return Ok(());
+        }
+        Err(std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            "moves below generated/local-only parents must keep the target suppressed",
+        ))
     }
 
     fn reject_git_internal_path(path: &str) -> std::io::Result<()> {
@@ -344,7 +405,15 @@ impl MetadataWorkspaceFs {
         let new_name = NodeName::parse(name).map_err(|error| {
             std::io::Error::new(std::io::ErrorKind::InvalidInput, error.to_string())
         })?;
-        Self::reject_git_internal_path(&self.child_workspace_path(parent_id, name)?)?;
+        let child_path = self.child_workspace_path(parent_id, name)?;
+        Self::reject_git_internal_path(&child_path)?;
+        let suppress_upload = self.path_sync_suppressed(&child_path, kind)?;
+        if !suppress_upload && self.parent_sync_suppressed(parent_id)? {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                "creates below generated/local-only parents must keep the parent suppressed",
+            ));
+        }
         for sibling in self.store.list_children(parent_id).map_err(io_other)? {
             let sibling_name = NodeName::parse(&sibling.name).map_err(|error| {
                 std::io::Error::new(std::io::ErrorKind::InvalidData, error.to_string())
@@ -377,6 +446,11 @@ impl MetadataWorkspaceFs {
         self.store
             .apply_local_pending_op(&operation)
             .map_err(io_other)?;
+        if suppress_upload {
+            self.store
+                .remove_pending_op(operation.op_id)
+                .map_err(io_other)?;
+        }
         let node = self
             .store
             .get_node_by_id(node_id)
@@ -601,7 +675,7 @@ impl MetadataWorkspaceFs {
             device_id: self.device_id,
             base_revision_id: write_handle.base_revision_id,
             content: RevisionContent::File {
-                blob_id: encrypted.blob_id,
+                blob_id: encrypted.blob_id.clone(),
                 chunk_ids: Vec::new(),
                 content_hash: format!(
                     "plaintext-sha256:{}",
@@ -630,6 +704,12 @@ impl MetadataWorkspaceFs {
             },
             created_at: now,
         };
+        let node = self
+            .store
+            .get_node_by_id(write_handle.node_id)
+            .map_err(io_other)?
+            .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::NotFound, "node missing"))?;
+        let suppress_upload = self.node_sync_suppressed(&node)?;
         self.store
             .apply_local_pending_op(&operation)
             .map_err(io_other)?;
@@ -638,15 +718,50 @@ impl MetadataWorkspaceFs {
             .node_state(write_handle.node_id)
             .map_err(io_other)?
             .is_some_and(|state| state.pinned);
-        self.store
-            .mark_node_dirty(
-                write_handle.node_id,
-                &cache_path_string,
-                write_handle.base_revision_id,
-                pinned,
-            )
-            .map_err(io_other)?;
+        self.finish_write_state(
+            write_handle,
+            &encrypted.blob_id,
+            &cache_path_string,
+            operation.op_id,
+            suppress_upload,
+            pinned,
+        )?;
         Ok(revision)
+    }
+
+    fn finish_write_state(
+        &mut self,
+        write_handle: &WriteHandle,
+        blob_id: &BlobId,
+        cache_path: &str,
+        op_id: fs2_core::OpId,
+        suppress_upload: bool,
+        pinned: bool,
+    ) -> std::io::Result<()> {
+        if suppress_upload {
+            self.store.remove_pending_op(op_id).map_err(io_other)?;
+            self.store
+                .remove_pending_blob_upload(blob_id)
+                .map_err(io_other)?;
+            self.store
+                .set_hydration_state(
+                    write_handle.node_id,
+                    HydrationState::Hydrated,
+                    Some(cache_path),
+                    pinned,
+                )
+                .map_err(io_other)?;
+        } else {
+            self.store
+                .mark_node_dirty(
+                    write_handle.node_id,
+                    cache_path,
+                    write_handle.base_revision_id,
+                    pinned,
+                )
+                .map_err(io_other)?;
+        }
+        Ok(())
     }
 
     pub fn read_file(
@@ -751,6 +866,11 @@ impl MetadataWorkspaceFs {
         self.store
             .apply_local_pending_op(&operation)
             .map_err(io_other)?;
+        if self.node_sync_suppressed(&node)? {
+            self.store
+                .remove_pending_op(operation.op_id)
+                .map_err(io_other)?;
+        }
         for write_handle in self.write_handles.values_mut() {
             if write_handle.node_id == node_id
                 && write_handle.base_revision_id == Some(base_revision_id)
@@ -961,6 +1081,207 @@ impl MetadataWorkspaceFs {
         }
     }
 
+    fn collapse_editor_temp_replace(
+        &mut self,
+        source: &Node,
+        target: &Node,
+    ) -> std::io::Result<bool> {
+        if target.kind != NodeKind::File || !is_editor_temp_name(&source.name) {
+            return Ok(false);
+        }
+        let pending = self
+            .store
+            .list_pending_ops(self.workspace_id)
+            .map_err(io_other)?;
+        let create_op_id = pending
+            .iter()
+            .find_map(|pending| match pending.operation.kind {
+                OperationKind::CreateNode { node_id, .. } if node_id == source.node_id => {
+                    Some(pending.operation.op_id)
+                }
+                _ => None,
+            });
+        let Some(create_op_id) = create_op_id else {
+            return Ok(false);
+        };
+        let source_writes = pending
+            .iter()
+            .filter_map(|pending| match &pending.operation.kind {
+                OperationKind::PutFileRevision {
+                    node_id, revision, ..
+                } if *node_id == source.node_id => {
+                    Some((pending.operation.op_id, revision.clone()))
+                }
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        let Some((_write_op_id, source_revision)) = source_writes.last().cloned() else {
+            return Ok(false);
+        };
+        let now = chrono::Utc::now();
+        let final_blob_id = file_blob_id(&source_revision).cloned();
+        let mut revision = source_revision;
+        revision.revision_id = fs2_core::RevisionId::new_v4();
+        revision.node_id = target.node_id;
+        revision.base_revision_id = target.current_rev;
+        revision.created_at = now;
+        let operation = Operation {
+            op_id: fs2_core::OpId::new_v4(),
+            workspace_id: self.workspace_id,
+            device_id: self.device_id,
+            base_cursor: self
+                .store
+                .last_cursor(self.workspace_id)
+                .map_err(io_other)?,
+            kind: OperationKind::PutFileRevision {
+                node_id: target.node_id,
+                base_revision_id: target.current_rev,
+                revision,
+            },
+            created_at: now,
+        };
+        self.store
+            .apply_local_pending_op(&operation)
+            .map_err(io_other)?;
+        for (pending_write_op_id, pending_revision) in source_writes {
+            self.store
+                .remove_pending_op(pending_write_op_id)
+                .map_err(io_other)?;
+            if let Some(blob_id) = file_blob_id(&pending_revision) {
+                if Some(blob_id) != final_blob_id.as_ref() {
+                    self.store
+                        .remove_pending_blob_upload(blob_id)
+                        .map_err(io_other)?;
+                }
+            }
+        }
+        self.store
+            .remove_optimistic_create(source.node_id, create_op_id)
+            .map_err(io_other)?;
+        Ok(true)
+    }
+
+    fn discard_uncommitted_editor_temp(&mut self, node: &Node) -> std::io::Result<bool> {
+        if !is_editor_temp_name(&node.name) {
+            return Ok(false);
+        }
+        let pending = self
+            .store
+            .list_pending_ops(self.workspace_id)
+            .map_err(io_other)?;
+        let create_op_id = pending
+            .iter()
+            .find_map(|pending| match pending.operation.kind {
+                OperationKind::CreateNode { node_id, .. } if node_id == node.node_id => {
+                    Some(pending.operation.op_id)
+                }
+                _ => None,
+            });
+        let Some(create_op_id) = create_op_id else {
+            return Ok(false);
+        };
+        for pending in pending {
+            if let OperationKind::PutFileRevision {
+                node_id, revision, ..
+            } = &pending.operation.kind
+            {
+                if *node_id == node.node_id {
+                    self.store
+                        .remove_pending_op(pending.operation.op_id)
+                        .map_err(io_other)?;
+                    if let Some(blob_id) = file_blob_id(revision) {
+                        self.store
+                            .remove_pending_blob_upload(blob_id)
+                            .map_err(io_other)?;
+                    }
+                }
+            }
+        }
+        self.store
+            .remove_optimistic_create(node.node_id, create_op_id)
+            .map_err(io_other)?;
+        Ok(true)
+    }
+
+    fn collapse_editor_temp_create(
+        &mut self,
+        source: &Node,
+        new_parent_id: NodeId,
+        new_name: &str,
+    ) -> std::io::Result<bool> {
+        if source.kind != NodeKind::File || !is_editor_temp_name(&source.name) {
+            return Ok(false);
+        }
+        let pending = self
+            .store
+            .list_pending_ops(self.workspace_id)
+            .map_err(io_other)?;
+        let create_op_id = pending
+            .iter()
+            .find_map(|pending| match pending.operation.kind {
+                OperationKind::CreateNode { node_id, .. } if node_id == source.node_id => {
+                    Some(pending.operation.op_id)
+                }
+                _ => None,
+            });
+        let Some(create_op_id) = create_op_id else {
+            return Ok(false);
+        };
+        let source_writes = pending
+            .iter()
+            .filter_map(|pending| match &pending.operation.kind {
+                OperationKind::PutFileRevision {
+                    node_id, revision, ..
+                } if *node_id == source.node_id => {
+                    Some((pending.operation.op_id, revision.clone()))
+                }
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        let Some((_, source_revision)) = source_writes.last().cloned() else {
+            return Ok(false);
+        };
+        let final_blob_id = file_blob_id(&source_revision).cloned();
+        let mut revision = source_revision;
+        revision.base_revision_id = None;
+        let operation = Operation {
+            op_id: fs2_core::OpId::new_v4(),
+            workspace_id: self.workspace_id,
+            device_id: self.device_id,
+            base_cursor: self
+                .store
+                .last_cursor(self.workspace_id)
+                .map_err(io_other)?,
+            kind: OperationKind::CreateNode {
+                node_id: source.node_id,
+                parent_id: new_parent_id,
+                name: new_name.to_owned(),
+                kind: NodeKind::File,
+                initial_revision: Some(revision),
+            },
+            created_at: chrono::Utc::now(),
+        };
+        for (pending_write_op_id, pending_revision) in source_writes {
+            self.store
+                .remove_pending_op(pending_write_op_id)
+                .map_err(io_other)?;
+            if let Some(blob_id) = file_blob_id(&pending_revision) {
+                if Some(blob_id) != final_blob_id.as_ref() {
+                    self.store
+                        .remove_pending_blob_upload(blob_id)
+                        .map_err(io_other)?;
+                }
+            }
+        }
+        self.store
+            .remove_optimistic_create(source.node_id, create_op_id)
+            .map_err(io_other)?;
+        self.store
+            .apply_local_pending_op(&operation)
+            .map_err(io_other)?;
+        Ok(true)
+    }
+
     pub fn move_local_node(
         &mut self,
         parent_id: NodeId,
@@ -1014,6 +1335,17 @@ impl MetadataWorkspaceFs {
                 ));
             }
         }
+        let (old_path_suppressed, new_path_suppressed) =
+            self.move_suppression_state(&node, new_parent_id, new_name)?;
+        reject_cross_boundary_move(old_path_suppressed, new_path_suppressed)?;
+        self.reject_move_below_suppressed_parent(new_parent_id, new_path_suppressed)?;
+        if let Some(replacement) = replacement.as_ref() {
+            if self.collapse_editor_temp_replace(&node, replacement)? {
+                return Ok(());
+            }
+        } else if self.collapse_editor_temp_create(&node, new_parent_id, new_name)? {
+            return Ok(());
+        }
         let mut move_created_at = chrono::Utc::now();
         if let Some(replacement) = replacement {
             match (
@@ -1055,9 +1387,23 @@ impl MetadataWorkspaceFs {
             },
             created_at: move_created_at,
         };
+        self.apply_local_move(&operation, old_path_suppressed && new_path_suppressed)
+    }
+
+    fn apply_local_move(
+        &mut self,
+        operation: &Operation,
+        suppress_upload: bool,
+    ) -> std::io::Result<()> {
         self.store
-            .apply_local_pending_op(&operation)
-            .map_err(io_other)
+            .apply_local_pending_op(operation)
+            .map_err(io_other)?;
+        if suppress_upload {
+            self.store
+                .remove_pending_op(operation.op_id)
+                .map_err(io_other)?;
+        }
+        Ok(())
     }
 
     pub fn delete_local_node(
@@ -1081,6 +1427,15 @@ impl MetadataWorkspaceFs {
             .map_err(io_other)?
             .map(|(node, _)| node)
             .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::NotFound, "node missing"))?;
+        if self.discard_uncommitted_editor_temp(&node)? {
+            return Ok(());
+        }
+        if self.node_sync_suppressed(&node)? {
+            self.store
+                .remove_local_subtree(self.workspace_id, node.node_id)
+                .map_err(io_other)?;
+            return Ok(());
+        }
         let operation = Operation {
             op_id: fs2_core::OpId::new_v4(),
             workspace_id: self.workspace_id,
@@ -1548,6 +1903,62 @@ fn path_has_git_component(path: &str) -> bool {
     path.split('/').any(|component| component == ".git")
 }
 
+const fn rule_path_kind(kind: NodeKind) -> fs2_rules::RulePathKind {
+    match kind {
+        NodeKind::Directory => fs2_rules::RulePathKind::Directory,
+        NodeKind::File | NodeKind::Symlink => fs2_rules::RulePathKind::File,
+    }
+}
+
+const fn rule_action_suppresses_upload(action: RuleAction) -> bool {
+    matches!(
+        action,
+        RuleAction::Ignore
+            | RuleAction::LocalOnly
+            | RuleAction::Generated
+            | RuleAction::DependencyCache
+    )
+}
+
+fn default_path_suppresses_upload(
+    path: &str,
+    kind: NodeKind,
+    engine: &fs2_rules::RuleEngine,
+) -> std::io::Result<bool> {
+    let workspace_path = WorkspacePath::parse(path).map_err(io_other)?;
+    let resolution = engine
+        .resolve(
+            &workspace_path,
+            rule_path_kind(kind),
+            fs2_rules::EvaluationPurpose::NewLocalCreate,
+            None,
+        )
+        .map_err(io_other)?;
+    Ok(rule_action_suppresses_upload(
+        resolution.effective_rule.action,
+    ))
+}
+
+fn default_ancestor_suppresses_upload(
+    path: &str,
+    engine: &fs2_rules::RuleEngine,
+) -> std::io::Result<bool> {
+    let Some((parent, _)) = path.rsplit_once('/') else {
+        return Ok(false);
+    };
+    if parent.is_empty() {
+        return Ok(false);
+    }
+    let mut current = Some(parent);
+    while let Some(path) = current {
+        if default_path_suppresses_upload(path, NodeKind::Directory, engine)? {
+            return Ok(true);
+        }
+        current = path.rsplit_once('/').map(|(ancestor, _)| ancestor);
+    }
+    Ok(false)
+}
+
 const fn regular_file_mode(mode: u32) -> u32 {
     let permission_bits = mode & 0o7777;
     if mode & libc::S_IFMT == libc::S_IFREG {
@@ -1655,6 +2066,33 @@ fn add_entries(
     }
 }
 
+fn is_editor_temp_name(name: &str) -> bool {
+    if name == "4913" || name.ends_with('~') {
+        return true;
+    }
+    let lowercase = name.to_ascii_lowercase();
+    [".tmp", ".temp", ".swp", ".swo", ".swx"]
+        .iter()
+        .any(|suffix| lowercase.ends_with(suffix))
+}
+
+fn reject_cross_boundary_move(old_suppressed: bool, new_suppressed: bool) -> std::io::Result<()> {
+    if old_suppressed == new_suppressed {
+        return Ok(());
+    }
+    Err(std::io::Error::new(
+        std::io::ErrorKind::PermissionDenied,
+        "moves across generated/local-only boundaries must be copied explicitly",
+    ))
+}
+
+const fn file_blob_id(revision: &NodeRevision) -> Option<&BlobId> {
+    match &revision.content {
+        RevisionContent::File { blob_id, .. } => Some(blob_id),
+        _ => None,
+    }
+}
+
 trait FuseDirectoryEntry {
     fn inode(&self) -> u64;
     fn kind(&self) -> FileType;
@@ -1753,7 +2191,9 @@ const fn file_type(kind: NodeKind) -> FileType {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use fs2_core::{Cursor, NodeRevision, Operation, OperationKind, RevisionContent, RevisionId};
+    use fs2_core::{
+        Cursor, FsRule, NodeRevision, Operation, OperationKind, RevisionContent, RevisionId,
+    };
     use fs2_sync::{InboundSync, OutboundQueue};
 
     #[test]
@@ -1790,6 +2230,213 @@ mod tests {
                 },
             ]
         );
+    }
+
+    #[test]
+    fn generated_paths_do_not_queue_upload_ops() -> Result<(), Box<dyn std::error::Error>> {
+        let mut store = LocalStore::in_memory()?;
+        let workspace_id = WorkspaceId::new_v4();
+        let root_id = NodeId::new_v4();
+        store.initialize_workspace(workspace_id, "generated", root_id)?;
+        let cache = tempfile::tempdir()?;
+        let mut fs = MetadataWorkspaceFs::new(store, workspace_id, root_id)
+            .with_hydration(HydrationConfig {
+                client: ApiClient::new("http://127.0.0.1:1", "token")?,
+                content_key: WorkspaceContentKey::generate(),
+                cache_dir: cache.path().join("cache"),
+            })
+            .with_write_cache_dir(cache.path().join("writes"));
+
+        let (dir, _, _) = fs.create_local_node(root_id, "node_modules", NodeKind::Directory)?;
+        let (file, _, _) = fs.create_local_node(dir.node_id, "pkg.js", NodeKind::File)?;
+        let handle = fs.begin_write_handle(file.node_id, true, None)?;
+        fs.write_to_handle(handle, 0, b"generated")?;
+        let revision = fs
+            .commit_write_handle(handle)?
+            .ok_or_else(|| "write did not commit".to_owned())?;
+
+        assert!(fs.store.list_pending_ops(workspace_id)?.is_empty());
+        if let Some(blob_id) = file_blob_id(&revision) {
+            assert!(fs.store.pending_blob_upload(blob_id)?.is_none());
+        }
+        assert_eq!(fs.read_file(file.node_id, 0, 9)?, b"generated");
+        fs.set_node_mode(file.node_id, 0o755)?;
+        assert!(fs.store.list_pending_ops(workspace_id)?.is_empty());
+
+        fs.move_local_node(dir.node_id, "pkg.js", dir.node_id, "pkg-renamed.js")?;
+        assert!(fs.resolve_path("node_modules/pkg-renamed.js")?.is_some());
+        assert!(fs.store.list_pending_ops(workspace_id)?.is_empty());
+        let generated_to_normal =
+            fs.move_local_node(dir.node_id, "pkg-renamed.js", root_id, "pkg.js");
+        assert_eq!(
+            generated_to_normal.err().map(|error| error.kind()),
+            Some(std::io::ErrorKind::PermissionDenied)
+        );
+        assert!(fs.resolve_path("node_modules/pkg-renamed.js")?.is_some());
+        assert!(fs.resolve_path("pkg.js")?.is_none());
+        assert!(fs.store.list_pending_ops(workspace_id)?.is_empty());
+
+        let (temp_file, _, _) = fs.create_local_node(dir.node_id, "scratch.tmp", NodeKind::File)?;
+        let handle = fs.begin_write_handle(temp_file.node_id, true, None)?;
+        fs.write_to_handle(handle, 0, b"temp")?;
+        fs.commit_write_handle(handle)?;
+        assert!(fs.store.list_pending_ops(workspace_id)?.is_empty());
+
+        for index in 0..128 {
+            let name = format!("pkg-{index}.js");
+            let (stress_file, _, _) = fs.create_local_node(dir.node_id, &name, NodeKind::File)?;
+            let handle = fs.begin_write_handle(stress_file.node_id, true, None)?;
+            fs.write_to_handle(handle, 0, b"install output")?;
+            fs.commit_write_handle(handle)?;
+        }
+        assert!(fs.store.list_pending_ops(workspace_id)?.is_empty());
+
+        let (target_dir, _, _) = fs.create_local_node(root_id, "target", NodeKind::Directory)?;
+        for index in 0..128 {
+            let name = format!("artifact-{index}.o");
+            let (artifact, _, _) =
+                fs.create_local_node(target_dir.node_id, &name, NodeKind::File)?;
+            let handle = fs.begin_write_handle(artifact.node_id, true, None)?;
+            fs.write_to_handle(handle, 0, b"cargo output")?;
+            fs.commit_write_handle(handle)?;
+        }
+        assert!(fs.store.list_pending_ops(workspace_id)?.is_empty());
+        fs.delete_local_node(root_id, "target", true)?;
+        assert!(fs.store.list_pending_ops(workspace_id)?.is_empty());
+
+        fs.delete_local_node(root_id, "node_modules", true)?;
+
+        assert!(fs.resolve_path("node_modules")?.is_none());
+        assert!(fs.store.list_pending_ops(workspace_id)?.is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn normal_to_generated_move_is_rejected_without_stale_remote_state(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let (mut fs, ids) = metadata_fixture()?;
+        let (generated_dir, _, _) =
+            fs.create_local_node(ids.root, "node_modules", NodeKind::Directory)?;
+        assert!(fs.store.list_pending_ops(ids.workspace)?.is_empty());
+
+        let result =
+            fs.move_local_node(ids.project, "README.md", generated_dir.node_id, "README.md");
+
+        assert_eq!(
+            result.err().map(|error| error.kind()),
+            Some(std::io::ErrorKind::PermissionDenied)
+        );
+        assert!(fs.resolve_path("project/README.md")?.is_some());
+        assert!(fs.resolve_path("node_modules/README.md")?.is_none());
+        assert!(fs.store.list_pending_ops(ids.workspace)?.is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn normal_override_below_generated_parent_is_rejected() -> Result<(), Box<dyn std::error::Error>>
+    {
+        let mut store = LocalStore::in_memory()?;
+        let workspace_id = WorkspaceId::new_v4();
+        let root_id = NodeId::new_v4();
+        let device_id = DeviceId::new_v4();
+        store.initialize_workspace(workspace_id, "normal child override", root_id)?;
+        let rule = Operation {
+            op_id: fs2_core::OpId::new_v4(),
+            workspace_id,
+            device_id,
+            base_cursor: Cursor::new(0)?,
+            kind: OperationKind::SetRule {
+                path_pattern: "target/app/".to_owned(),
+                rule: FsRule {
+                    action: RuleAction::Normal,
+                    manager: None,
+                    scope: None,
+                },
+            },
+            created_at: chrono::Utc::now(),
+        };
+        store.apply_committed_operation(&rule, Cursor::new(1)?)?;
+        let mut fs = MetadataWorkspaceFs::new(store, workspace_id, root_id);
+
+        let (target, _, _) = fs.create_local_node(root_id, "target", NodeKind::Directory)?;
+        assert!(fs.store.list_pending_ops(workspace_id)?.is_empty());
+        let app = fs.create_local_node(target.node_id, "app", NodeKind::Directory);
+
+        assert_eq!(
+            app.err().map(|error| error.kind()),
+            Some(std::io::ErrorKind::PermissionDenied)
+        );
+        assert!(fs.resolve_path("target/app")?.is_none());
+        assert!(fs.store.list_pending_ops(workspace_id)?.is_empty());
+
+        let (normal_app, _, _) = fs.create_local_node(root_id, "app", NodeKind::Directory)?;
+        assert_eq!(fs.store.list_pending_ops(workspace_id)?.len(), 1);
+        let move_app = fs.move_local_node(root_id, "app", target.node_id, "app");
+        assert_eq!(
+            move_app.err().map(|error| error.kind()),
+            Some(std::io::ErrorKind::PermissionDenied)
+        );
+        assert!(fs.resolve_path("app")?.is_some());
+        assert!(fs.resolve_path("target/app")?.is_none());
+        let pending = fs.store.list_pending_ops(workspace_id)?;
+        assert_eq!(pending.len(), 1);
+        assert!(matches!(
+            pending[0].operation.kind,
+            OperationKind::CreateNode { node_id, .. } if node_id == normal_app.node_id
+        ));
+        Ok(())
+    }
+
+    #[test]
+    fn explicit_normal_rule_overrides_default_generated_suppression(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let mut store = LocalStore::in_memory()?;
+        let workspace_id = WorkspaceId::new_v4();
+        let root_id = NodeId::new_v4();
+        let device_id = DeviceId::new_v4();
+        store.initialize_workspace(workspace_id, "normal override", root_id)?;
+        let rule = Operation {
+            op_id: fs2_core::OpId::new_v4(),
+            workspace_id,
+            device_id,
+            base_cursor: Cursor::new(0)?,
+            kind: OperationKind::SetRule {
+                path_pattern: "node_modules/".to_owned(),
+                rule: FsRule {
+                    action: RuleAction::Normal,
+                    manager: None,
+                    scope: None,
+                },
+            },
+            created_at: chrono::Utc::now(),
+        };
+        store.apply_committed_operation(&rule, Cursor::new(1)?)?;
+        let cache = tempfile::tempdir()?;
+        let mut fs = MetadataWorkspaceFs::new(store, workspace_id, root_id)
+            .with_hydration(HydrationConfig {
+                client: ApiClient::new("http://127.0.0.1:1", "token")?,
+                content_key: WorkspaceContentKey::generate(),
+                cache_dir: cache.path().join("cache"),
+            })
+            .with_write_cache_dir(cache.path().join("writes"));
+
+        let (dir, _, _) = fs.create_local_node(root_id, "node_modules", NodeKind::Directory)?;
+        let (file, _, _) = fs.create_local_node(dir.node_id, "pkg.js", NodeKind::File)?;
+        let handle = fs.begin_write_handle(file.node_id, true, None)?;
+        fs.write_to_handle(handle, 0, b"upload")?;
+        fs.commit_write_handle(handle)?;
+
+        let pending = fs.store.list_pending_ops(workspace_id)?;
+        assert_eq!(pending.len(), 3);
+        assert!(pending.iter().any(|pending| matches!(
+            pending.operation.kind,
+            OperationKind::CreateNode { node_id, .. } if node_id == dir.node_id
+        )));
+        assert!(pending.iter().any(|pending| matches!(
+            pending.operation.kind,
+            OperationKind::PutFileRevision { node_id, .. } if node_id == file.node_id
+        )));
+        Ok(())
     }
 
     #[test]
@@ -1870,6 +2517,109 @@ mod tests {
             pending.operation.kind,
             OperationKind::CreateNode { node_id, .. } if node_id == file.node_id
         )));
+        Ok(())
+    }
+
+    #[test]
+    fn atomic_temp_replace_uploads_final_revision_once() -> Result<(), Box<dyn std::error::Error>> {
+        let (fs, ids) = metadata_fixture()?;
+        let cache = tempfile::tempdir()?;
+        let mut fs = fs
+            .with_hydration(HydrationConfig {
+                client: ApiClient::new("http://127.0.0.1:1", "token")?,
+                content_key: WorkspaceContentKey::generate(),
+                cache_dir: cache.path().join("cache"),
+            })
+            .with_write_cache_dir(cache.path().join("writes"));
+
+        let (temp, _, _) = fs.create_local_node(ids.project, ".README.md.swp", NodeKind::File)?;
+        let handle = fs.begin_write_handle(temp.node_id, true, None)?;
+        fs.write_to_handle(handle, 0, b"updated")?;
+        fs.commit_write_handle(handle)?;
+        let handle = fs.begin_write_handle(temp.node_id, true, None)?;
+        fs.write_to_handle(handle, 0, b"final!!")?;
+        fs.commit_write_handle(handle)?;
+        fs.set_node_mode(temp.node_id, 0o755)?;
+        assert_eq!(fs.store.list_pending_ops(ids.workspace)?.len(), 4);
+
+        fs.move_local_node(ids.project, ".README.md.swp", ids.project, "README.md")?;
+
+        assert!(fs.resolve_path("project/.README.md.swp")?.is_none());
+        assert_eq!(fs.read_file(ids.file, 0, 7)?, b"final!!");
+        let pending = fs.store.list_pending_ops(ids.workspace)?;
+        assert_eq!(pending.len(), 1);
+        assert!(matches!(
+            pending[0].operation.kind,
+            OperationKind::PutFileRevision { node_id, .. } if node_id == ids.file
+        ));
+        if let OperationKind::PutFileRevision { revision, .. } = &pending[0].operation.kind {
+            assert_eq!(revision.posix_mode, 0o100_755);
+            if let Some(blob_id) = file_blob_id(revision) {
+                assert!(fs.store.pending_blob_upload(blob_id)?.is_some());
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn atomic_temp_rename_to_new_file_queues_final_create_only(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let (fs, ids) = metadata_fixture()?;
+        let cache = tempfile::tempdir()?;
+        let mut fs = fs
+            .with_hydration(HydrationConfig {
+                client: ApiClient::new("http://127.0.0.1:1", "token")?,
+                content_key: WorkspaceContentKey::generate(),
+                cache_dir: cache.path().join("cache"),
+            })
+            .with_write_cache_dir(cache.path().join("writes"));
+
+        let (temp, _, _) = fs.create_local_node(ids.project, "new.txt.tmp", NodeKind::File)?;
+        let handle = fs.begin_write_handle(temp.node_id, true, None)?;
+        fs.write_to_handle(handle, 0, b"new file")?;
+        fs.commit_write_handle(handle)?;
+        fs.set_node_mode(temp.node_id, 0o755)?;
+        assert_eq!(fs.store.list_pending_ops(ids.workspace)?.len(), 3);
+
+        fs.move_local_node(ids.project, "new.txt.tmp", ids.project, "new.txt")?;
+
+        assert!(fs.resolve_path("project/new.txt.tmp")?.is_none());
+        let new_file = fs
+            .resolve_path("project/new.txt")?
+            .ok_or_else(|| "new file missing".to_owned())?;
+        assert_eq!(fs.read_file(new_file.node_id, 0, 8)?, b"new file");
+        let pending = fs.store.list_pending_ops(ids.workspace)?;
+        assert_eq!(pending.len(), 1);
+        assert!(matches!(
+            &pending[0].operation.kind,
+            OperationKind::CreateNode { name, initial_revision: Some(revision), .. }
+                if name == "new.txt" && revision.posix_mode == 0o100_755
+        ));
+        Ok(())
+    }
+
+    #[test]
+    fn deleting_editor_temp_discards_noisy_pending_ops() -> Result<(), Box<dyn std::error::Error>> {
+        let (fs, ids) = metadata_fixture()?;
+        let cache = tempfile::tempdir()?;
+        let mut fs = fs
+            .with_hydration(HydrationConfig {
+                client: ApiClient::new("http://127.0.0.1:1", "token")?,
+                content_key: WorkspaceContentKey::generate(),
+                cache_dir: cache.path().join("cache"),
+            })
+            .with_write_cache_dir(cache.path().join("writes"));
+
+        let (temp, _, _) = fs.create_local_node(ids.project, ".README.md.swp", NodeKind::File)?;
+        let handle = fs.begin_write_handle(temp.node_id, true, None)?;
+        fs.write_to_handle(handle, 0, b"swap")?;
+        fs.commit_write_handle(handle)?;
+        assert_eq!(fs.store.list_pending_ops(ids.workspace)?.len(), 2);
+
+        fs.delete_local_node(ids.project, ".README.md.swp", false)?;
+
+        assert!(fs.resolve_path("project/.README.md.swp")?.is_none());
+        assert!(fs.store.list_pending_ops(ids.workspace)?.is_empty());
         Ok(())
     }
 

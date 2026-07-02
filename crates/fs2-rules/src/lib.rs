@@ -1452,6 +1452,8 @@ fn detect_node_root(root: &Path) -> Result<Option<DependencyRoot>, RuleError> {
             ".next/".to_owned(),
             ".nuxt/".to_owned(),
             ".turbo/".to_owned(),
+            "coverage/".to_owned(),
+            ".vercel/".to_owned(),
         ],
         install_command: node_install_command(manager),
     }))
@@ -1568,6 +1570,7 @@ fn detect_python_root(root: &Path) -> Option<DependencyRoot> {
             ".venv/".to_owned(),
             "venv/".to_owned(),
             "__pycache__/".to_owned(),
+            ".pytest_cache/".to_owned(),
         ],
         install_command,
     })

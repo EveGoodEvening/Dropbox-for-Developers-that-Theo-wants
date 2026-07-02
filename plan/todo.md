@@ -853,13 +853,13 @@ Acceptance criteria:
 
 ### 13.5 Atomic editor save patterns
 
-- [ ] Test temp-file write + rename.
+- [x] Test temp-file write + rename.
 - [x] Add default ignore rules for common swap/temp files.
-- [ ] Ensure final file revision is uploaded once.
+- [x] Ensure final file revision is uploaded once.
 
 Acceptance criteria:
 
-- [ ] Saving from VS Code or vim does not create noisy synced temp files under default rules.
+- [x] Saving from VS Code or vim does not create noisy synced temp files under default rules.
 
 ---
 
@@ -1118,29 +1118,29 @@ Acceptance criteria:
 
 ### 19.2 Generated write suppression
 
-- [ ] Ensure generated paths do not produce upload queue entries.
-- [ ] Stress test `npm install` creating many files.
-- [ ] Stress test Rust `cargo build` creating `target` files.
-- [ ] Ensure status reports generated dirs separately.
+- [x] Ensure generated paths do not produce upload queue entries.
+- [x] Stress test `npm install` creating many files.
+- [x] Stress test Rust `cargo build` creating `target` files.
+- [x] Ensure status reports generated dirs separately.
 
 Acceptance criteria:
 
-- [ ] `npm install` does not attempt to sync thousands of dependency files.
+- [x] `npm install` does not attempt to sync thousands of dependency files.
 
 ### 19.3 Dependency helper commands
 
-- [ ] Implement `fs2 deps status <path>`.
-- [ ] Implement `fs2 deps install <path>` as a safe wrapper that prints and asks before running command, unless `--yes`.
-- [ ] Store last installed lockfile hash locally.
-- [ ] Warn when lockfile hash changed but dependencies not reinstalled.
+- [x] Implement `fs2 deps status <path>`.
+- [x] Implement `fs2 deps install <path>` as a safe wrapper that prints and asks before running command, unless `--yes`.
+- [x] Store last installed lockfile hash locally.
+- [x] Warn when lockfile hash changed but dependencies not reinstalled.
 
 Acceptance criteria:
 
-- [ ] User can see dependency state after syncing a project to a new machine.
+- [x] User can see dependency state after syncing a project to a new machine.
 
 MVP relaxation:
 
-- [ ] Full `deps install` helper can be deferred, but generated suppression cannot.
+- [x] Full `deps install` helper can be deferred, but generated suppression cannot.
 
 ---
 
@@ -1148,34 +1148,34 @@ MVP relaxation:
 
 ### 20.1 Implement `fs2 doctor`
 
-- [ ] Check FUSE availability.
-- [ ] Check daemon running.
-- [ ] Check backend connection.
-- [ ] Check auth token.
-- [ ] Check workspace keys.
-- [ ] Check cache directory permissions.
-- [ ] Check path collisions.
-- [ ] Check `.env` sync safety.
-- [ ] Check `.git` sync safety.
-- [ ] Check generated directories without rules.
-- [ ] Check package manager mismatch.
+- [x] Check FUSE availability.
+- [x] Check daemon running.
+- [x] Check backend connection.
+- [x] Check auth token.
+- [x] Check workspace keys.
+- [x] Check cache directory permissions.
+- [x] Check path collisions.
+- [x] Check `.env` sync safety.
+- [x] Check `.git` sync safety.
+- [x] Check generated directories without rules.
+- [x] Check package manager mismatch.
 
 Acceptance criteria:
 
-- [ ] Doctor output gives actionable commands, not vague warnings.
+- [ ] Doctor output gives actionable commands, not vague warnings. Blocked: daemon startup and workspace-key recovery/enrollment have no implemented repair commands yet, so those warnings cannot point to safe repair commands.
 
 ### 20.2 Implement diagnostics bundle
 
-- [ ] `fs2 debug bundle` creates redacted archive.
-- [ ] Include logs.
-- [ ] Include config.
-- [ ] Include status JSON.
-- [ ] Exclude secrets/tokens/keys.
-- [ ] Add redaction tests.
+- [x] `fs2 debug bundle` creates redacted archive.
+- [x] Include logs.
+- [x] Include config.
+- [x] Include status JSON.
+- [x] Exclude secrets/tokens/keys.
+- [x] Add redaction tests.
 
 Acceptance criteria:
 
-- [ ] Debug bundle is safe to attach to an issue.
+- [x] Debug bundle is safe to attach to an issue.
 
 ---
 

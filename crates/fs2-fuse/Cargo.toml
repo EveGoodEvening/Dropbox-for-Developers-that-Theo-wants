@@ -9,6 +9,7 @@ license.workspace = true
 libc = "0.2"
 fs2-core = { path = "../fs2-core" }
 fs2-daemon = { path = "../fs2-daemon" }
+fs2-rules = { path = "../fs2-rules" }
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
 fs2-crypto = { path = "../fs2-crypto" }
 fs2-sync = { path = "../fs2-sync" }
