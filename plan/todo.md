@@ -1331,11 +1331,11 @@ Acceptance criteria:
 
 ### 24.1 Token handling
 
-- [ ] Store tokens only in keychain.
+- [x] Store tokens only in keychain.
 - [ ] Redact tokens in logs.
 - [ ] Refresh tokens automatically.
 - [ ] Reject revoked device tokens.
-- [ ] Add logout flow.
+- [x] Add logout flow.
 
 Acceptance criteria:
 
