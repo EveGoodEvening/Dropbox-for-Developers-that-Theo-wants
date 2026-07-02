@@ -1334,7 +1334,7 @@ Acceptance criteria:
 - [x] Store tokens only in keychain.
 - [ ] Redact tokens in logs.
 - [ ] Refresh tokens automatically.
-- [ ] Reject revoked device tokens.
+- [x] Reject revoked device tokens.
 - [x] Add logout flow.
 
 Acceptance criteria:
@@ -1354,8 +1354,8 @@ Acceptance criteria:
 
 ### 24.3 Permission checks
 
-- [ ] Materialized secret files mode `0600`.
-- [ ] Cache directory not world-readable where platform supports it.
+- [x] Materialized secret files mode `0600`.
+- [x] Cache directory not world-readable where platform supports it.
 - [ ] Local RPC socket permissions restricted to user.
 
 Acceptance criteria:
@@ -1574,3 +1574,31 @@ Do not start with UI, team features, Windows, artifact caching, or Git replaceme
 - [ ] Explore per-file permissions.
 - [ ] Explore Git import/export bridge.
 - [ ] Keep separate from sync MVP until proven.
+
+---
+
+## Current blocked/deferred classification — 2026-06-29
+
+Remaining unchecked tasks are not being marked complete. Current classification:
+
+- Section 0 working rules (lines 12-21): operating rules for implementation, not product deliverables; remain unchecked as standing constraints.
+- Phase 6.4 chunking (lines 519-527): deferred by its own heading and MVP note; whole-file blobs remain acceptable for the vertical slice.
+- Phase 7.4 redaction tests (lines 579-586): blocked until `fs2 env` set/list/status/error commands and a test logger exist.
+- Phase 13 hydration/pin/cache commands (lines 870-907): blocked by missing daemon/local RPC hydration API, unresolved local-vs-synced pin semantics, and absent cache manager/eviction loop.
+- Phase 14 conflict preservation/resolution (lines 925-949): blocked by missing client conflict artifact handling, conflict DB APIs/status integration, and hydration/remote-current contract; advanced resolve commands remain post-list/visible-file work per MVP relaxation.
+- Phase 15 offline/replay/rebase (lines 957-991): blocked by absent running daemon connection-state tracker, restartable sync loop, reconnect sequencing, and conflict preservation.
+- Phase 16 env CLI/import acceptance (lines 1026-1049): blocked by absent `fs2 env` command surface, API-client env methods, workspace-key availability/enrollment flow, and rule-writing import behavior.
+- Phase 17 git materialize/submodule acceptance (lines 1081-1102): blocked by absent `fs2 git materialize`, unsynced remote Git metadata/materialized worktree contract, and no cross-machine sync E2E.
+- Phase 19.1 doctor acceptance (line 1165): explicitly blocked until daemon startup and workspace-key recovery/enrollment repair commands exist.
+- Phase 20 daemon/service lifecycle (lines 1186-1217): blocked on local RPC protocol and daemon runtime ownership decision; service install/status depends on `fs2 daemon run`.
+- Phase 21 E2E matrix (lines 1225-1286): blocked until real daemon/client sync, hydration, conflicts, offline, env exec, git materialize, and generated-path E2E exist.
+- Phase 22 performance pass (lines 1294-1326): deferred until functional daemon, hydration, upload queue, cache loop, and E2E paths exist.
+- Phase 23.1 remaining token tasks (lines 1335-1342): log redaction and leakage tests blocked by missing structured app/daemon logger and test logger; refresh-token flow blocked by absent refresh endpoint/client flow.
+- Phase 23.2 key handling (lines 1346-1353): partially implemented but blocked by absent product workspace-key generation/storage flow, enrollment/recovery, revocation semantics, and key-unavailable status coverage.
+- Phase 23.3 remaining permission checks (lines 1359-1363): local RPC socket permissions are blocked by absent RPC socket; local security-check acceptance remains unchecked until socket permissions are implemented and macOS/Linux checks are complete.
+- Phase 24 documentation (lines 1371-1405): deferred until actual daemon/service/hydration/pinning/env/conflict/git-materialize/security behavior is complete enough to document truthfully.
+- Phase 25 dogfood (lines 1413-1438): blocked until the MVP sync, conflict, offline, env, generated-directory, git-materialize, cache, and safety paths work end to end.
+- Phase 26 public MVP polish (lines 1446-1478): deferred until the command/API/schema surface is stable.
+- Phase 28 implementation-order checklist (lines 1486-1505): operating/order rollup; several early entries are already satisfied elsewhere, but remaining entries are blocked by the detailed sections above.
+- Phase 29 definition of done (lines 1513-1527): rollup acceptance; cannot be marked until the referenced sync/conflict/offline/env/git/cache/docs/dogfood deliverables are complete.
+- Phase 30 post-MVP roadmap (lines 1535-1576): deferred by heading until public MVP is complete.

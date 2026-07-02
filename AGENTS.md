@@ -11,3 +11,4 @@
 - Shared backend/client wire contracts for sync APIs belong in `fs2-core`; `fs2-sync::ApiClient` is a blocking HTTP/WebSocket client for the local daemon sync loops and currently targets the development direct blob endpoints.
 - `fs2-sync::OutboundQueue` drains `fs2-daemon::LocalStore` pending ops: upload referenced file blobs first, submit the op, then apply the committed response locally so the pending row is removed only after backend acknowledgement; failures stay in `pending_ops.last_error` with retry count.
 - `fs2 debug bundle` must redact config/status JSON with `redact_config_text` to preserve valid JSON, and its line-oriented text/log redactor must keep container, quote, escape, comment, PEM, and symlink edge cases conservative before marking bundles safe to attach.
+- FUSE hydration cache roots and `writes/` children contain plaintext bytes; create/chmod both to `0700` on Unix before hydration or write-cache paths store data.

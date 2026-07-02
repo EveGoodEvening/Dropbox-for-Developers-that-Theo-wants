@@ -486,7 +486,7 @@ impl MetadataWorkspaceFs {
         Self::reject_git_internal_path(&self.node_workspace_path(node_id)?)?;
         let handle = self.next_write_handle;
         self.next_write_handle = self.next_write_handle.saturating_add(1).max(1);
-        fs::create_dir_all(&self.write_cache_dir)?;
+        create_private_dir_all(&self.write_cache_dir)?;
         let path = self.write_cache_dir.join(format!(
             "write-{}-{}-{handle}.tmp",
             self.workspace_id, node.node_id
@@ -655,7 +655,7 @@ impl MetadataWorkspaceFs {
             .map_err(io_other)?;
         let cache_path = blob_cache_path(&self.write_cache_dir, &encrypted.blob_id);
         if let Some(parent) = cache_path.parent() {
-            fs::create_dir_all(parent)?;
+            create_private_dir_all(parent)?;
         }
         fs::write(&cache_path, &plaintext)?;
         let cache_path_string = cache_path.display().to_string();
@@ -1025,7 +1025,7 @@ impl MetadataWorkspaceFs {
                 "hydrated file size does not match revision metadata",
             ));
         }
-        fs::create_dir_all(&hydration.cache_dir)?;
+        create_private_dir_all(&hydration.cache_dir)?;
         let cache_path = blob_cache_path(&hydration.cache_dir, &blob_id);
         let tmp_path = cache_path.with_extension("tmp");
         fs::write(&tmp_path, &bytes)?;
@@ -2004,7 +2004,7 @@ pub fn mount_hydrated_metadata_workspace(
     hydration: HydrationConfig,
     mountpoint: impl AsRef<Path>,
 ) -> std::io::Result<BackgroundSession> {
-    let write_cache_dir = hydration.cache_dir.join("writes");
+    let write_cache_dir = prepare_hydration_cache_dirs(&hydration.cache_dir)?;
     let options = metadata_mount_options();
     fuser::spawn_mount2(
         MetadataWorkspaceFs::new(store, workspace_id, root_node_id)
@@ -2033,6 +2033,30 @@ fn blob_cache_path(cache_dir: &Path, blob_id: &BlobId) -> PathBuf {
         }
     }
     cache_dir.join(name)
+}
+
+fn prepare_hydration_cache_dirs(cache_dir: &Path) -> std::io::Result<PathBuf> {
+    let write_cache_dir = cache_dir.join("writes");
+    create_private_dir_all(cache_dir)?;
+    create_private_dir_all(&write_cache_dir)?;
+    Ok(write_cache_dir)
+}
+
+fn create_private_dir_all(path: &Path) -> std::io::Result<()> {
+    fs::create_dir_all(path)?;
+    set_private_dir_permissions(path)
+}
+
+#[cfg(unix)]
+fn set_private_dir_permissions(path: &Path) -> std::io::Result<()> {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    fs::set_permissions(path, fs::Permissions::from_mode(0o700))
+}
+
+#[cfg(not(unix))]
+fn set_private_dir_permissions(_path: &Path) -> std::io::Result<()> {
+    Ok(())
 }
 
 fn io_other(error: impl std::fmt::Display) -> std::io::Error {
@@ -2199,6 +2223,27 @@ mod tests {
     #[test]
     fn exposes_crate_name() {
         assert_eq!(crate_name(), "fs2-fuse");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn cache_directories_are_user_only() -> Result<(), Box<dyn std::error::Error>> {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let temp = tempfile::tempdir()?;
+        let cache_dir = temp.path().join("cache");
+
+        let writes_dir = prepare_hydration_cache_dirs(&cache_dir)?;
+
+        assert_eq!(
+            fs::metadata(&cache_dir)?.permissions().mode() & 0o777,
+            0o700
+        );
+        assert_eq!(
+            fs::metadata(&writes_dir)?.permissions().mode() & 0o777,
+            0o700
+        );
+        Ok(())
     }
 
     #[test]
